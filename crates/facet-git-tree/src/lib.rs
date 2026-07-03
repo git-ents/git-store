@@ -325,6 +325,12 @@ fn serialize_node<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
 ) -> Result<(ObjectId, EntryKind), Error> {
+    // Smart pointer (`Box`/`Arc`/`Rc`, including `Arc<[T]>`) and transparent
+    // newtype (`#[facet(transparent)]`, `NonZero<T>`, path wrappers) → the
+    // inner value's own encoding. Neither carries information Git needs to
+    // record, so both are transparent: `Arc<[u8]>` serializes exactly as
+    // `[u8]` would, and a transparent `Hex(String)` exactly as `String` would.
+    let peek = peek.innermost_peek();
     let shape = peek.shape();
 
     // Scalar leaf → blob
@@ -334,20 +340,6 @@ fn serialize_node<W: Write + ?Sized>(
             .write_buf(Kind::Blob, &bytes)
             .map_err(Error::Backend)?;
         return Ok((oid, EntryKind::Blob));
-    }
-
-    // Smart pointer (`Box`/`Arc`/`Rc`, including `Arc<[T]>`) → the pointee's own
-    // encoding. The indirection carries no information Git needs to record, so it
-    // is transparent: `Arc<[u8]>` serializes exactly as `[u8]` would.
-    if matches!(shape.def, Def::Pointer(_)) {
-        let ptr = peek.into_pointer().map_err(msg)?;
-        let inner = ptr.borrow_inner().ok_or_else(|| {
-            Error::Message(format!(
-                "cannot read through pointer: {}",
-                shape.type_identifier
-            ))
-        })?;
-        return serialize_node(inner, store);
     }
 
     // Byte sequence (`Vec<u8>`, `[u8; N]`, `[u8]`) → a single blob. This is the
@@ -772,6 +764,19 @@ fn deser_into<'facet, F: Find + ?Sized>(
             return partial.end().map_err(msg);
         }
         partial = deser_into(partial, oid, store, depth + 1)?;
+        return partial.end().map_err(msg);
+    }
+
+    // Transparent newtype (`#[facet(transparent)]`, `NonZero<T>`, path
+    // wrappers): the object was written as the inner value's own encoding (via
+    // `Peek::innermost_peek`, which unwraps exactly when `try_borrow_inner` is
+    // present), so build that and let `begin_inner` reassemble the wrapper.
+    // Gated on `has_try_borrow_inner`, not just `shape.inner.is_some()`: plain
+    // collections like `Vec<T>` also carry an `inner` shape (for variance) but
+    // were never unwrapped on serialization, so must not be routed here.
+    if shape.inner.is_some() && shape.vtable.has_try_borrow_inner() {
+        let partial = partial.begin_inner().map_err(msg)?;
+        let partial = deser_into(partial, oid, store, depth + 1)?;
         return partial.end().map_err(msg);
     }
 
