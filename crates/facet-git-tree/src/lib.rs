@@ -19,6 +19,7 @@ use gix_hash::Kind as HashKind;
 use gix_object::{Data, Find, Kind, ObjectRef, Write};
 
 use facet::Def;
+use facet::Facet;
 use facet::{Partial, Peek};
 
 /// A content-addressed store of Git objects produced by [`serialize`].
@@ -180,6 +181,42 @@ pub enum Error {
     Message(String),
 }
 
+/// A Git tree already written into the backing store, embedded by object id
+/// rather than walked field-by-field.
+///
+/// [`serialize_node`] and [`deser_into`] special-case this type ahead of the
+/// generic struct branch: a `RawTree` field passes its wrapped object id
+/// straight through as a tree entry (no recursion, no write), and reading one
+/// back captures the child entry's object id without decoding its contents.
+/// This lets a `Facet`-derived struct embed an arbitrarily-shaped subtree — a
+/// directory with no fixed layout, such as an imported toolchain's `bin/` —
+/// next to ordinarily-encoded fields.
+///
+/// The wrapped tree must already exist in the store the caller serializes
+/// into; `RawTree` carries no content of its own to write. Sha-1 only, like
+/// the rest of this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct RawTree {
+    // Opaque to the normal field-by-field encoding: `serialize_node`/
+    // `deser_into` intercept `RawTree` by shape identity before this field is
+    // ever visited.
+    hash: [u8; 20],
+}
+
+impl RawTree {
+    /// Wrap a tree's object id for embedding as a passthrough field.
+    pub fn new(oid: ObjectId) -> Self {
+        let mut hash = [0u8; 20];
+        hash.copy_from_slice(oid.as_slice());
+        Self { hash }
+    }
+
+    /// The wrapped tree's object id.
+    pub fn oid(&self) -> ObjectId {
+        ObjectId::from_bytes_or_panic(&self.hash)
+    }
+}
+
 /// Wrap any displayable backend or reflection error as [`Error::Message`].
 ///
 /// `facet`'s `Partial`/`Peek` operations and `gix`'s tree decoding each return
@@ -332,6 +369,14 @@ fn serialize_node<W: Write + ?Sized>(
     // `[u8]` would, and a transparent `Hex(String)` exactly as `String` would.
     let peek = peek.innermost_peek();
     let shape = peek.shape();
+
+    // RawTree → its wrapped object id, straight through as a tree entry. No
+    // write happens here: the referenced tree must already be present in
+    // `store`, from a write the caller made directly beforehand.
+    if shape.is_type::<RawTree>() {
+        let rt = peek.get::<RawTree>().map_err(msg)?;
+        return Ok((rt.oid(), EntryKind::Tree));
+    }
 
     // Scalar leaf → blob
     if matches!(shape.def, Def::Scalar) {
@@ -705,6 +750,20 @@ fn deser_into<'facet, F: Find + ?Sized>(
         return Err(Error::MaxDepth(MAX_DEPTH));
     }
     let shape = partial.shape();
+
+    // RawTree: capture the child entry's object id without decoding its
+    // contents — the caller walks it separately, by whatever means it was
+    // originally written. Still verified to be a tree, not a blob, so a
+    // malformed or foreign tree fails fast with `NotATree` rather than
+    // silently handing back a bogus tree id.
+    if shape.is_type::<RawTree>() {
+        let mut buf = Vec::new();
+        let data = find_object(oid, &mut buf, store)?;
+        if data.kind != Kind::Tree {
+            return Err(Error::NotATree(*oid));
+        }
+        return partial.set(RawTree::new(*oid)).map_err(msg);
+    }
 
     // Scalar leaf: read blob, parse from str
     if matches!(shape.def, Def::Scalar) {

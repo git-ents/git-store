@@ -135,6 +135,14 @@ A smart pointer — `Box<T>`, `Arc<T>`, `Rc<T>`, including the unsized slice for
 The indirection carries no information Git needs to record, so it is transparent: `Box<Issue>` encodes exactly as `Issue`, and `Arc<[u8]>` encodes exactly as `[u8]` (a single blob). On read the pointer is reconstructed around the decoded pointee.
 --
 
+[role="requirement", id="serialization.design.raw-tree"]
+.Raw-Tree Passthrough
+--
+`RawTree`, a type provided by this crate wrapping an `ObjectId`, MUST be encoded as a tree entry pointing at that object id directly, with no re-encoding of the referenced tree's contents.
+
+`RawTree` embeds a subtree that was written independently of the `Facet` encoding this crate performs — an arbitrarily-shaped directory with no fixed layout, alongside ordinarily-encoded fields in the same struct. The wrapped object MUST already exist in the store being serialized into; writing a `RawTree` value performs no object-store write of its own. On read, the entry's object id is captured as the `RawTree` value without decoding what it points to, but is verified to be a tree, not a blob, since that is the only shape a `RawTree` may hold.
+--
+
 [role="requirement", id="serialization.design.trees.ordering"]
 .Entry Name Ordering
 --
