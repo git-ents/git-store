@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use facet_git_tree::{Error, check_key, serialize};
+use facet_git_tree::{KeyError, SerializeError, check_key, serialize};
 use rstest::rstest;
 
 mod common;
@@ -25,7 +25,8 @@ fn accepts_valid_keys(#[case] key: &str) {
     assert!(check_key(key).is_ok(), "{key:?} should be accepted");
 }
 
-/// Keys containing the path separator are rejected as [`Error::InvalidKey`].
+/// Keys containing the path separator are rejected as [`KeyError`], which
+/// carries the offending key.
 #[rstest]
 #[case("a/b")]
 #[case("/")]
@@ -33,21 +34,24 @@ fn accepts_valid_keys(#[case] key: &str) {
 #[case("trailing/")]
 fn rejects_keys_with_slash(#[case] key: &str) {
     assert!(
-        matches!(check_key(key), Err(Error::InvalidKey(_))),
-        "{key:?} should be rejected as InvalidKey"
+        matches!(check_key(key), Err(KeyError { key: k }) if k == key),
+        "{key:?} should be rejected as KeyError carrying the offending key"
     );
 }
 
 // --- integration: serialize must apply `check_key` to dynamic (map) keys ---
 
 /// `serialize` rejects a map key containing the path separator, surfacing it as
-/// [`Error::InvalidKey`] rather than emitting an invalid tree entry name.
+/// [`SerializeError::Key`] rather than emitting an invalid tree entry name.
 #[test]
 fn serialize_rejects_map_key_with_slash() {
     let mut table = HashMap::new();
     table.insert("a/b".to_string(), "v".to_string());
     assert!(
-        matches!(serialize(&WithMap { table }), Err(Error::InvalidKey(_))),
+        matches!(
+            serialize(&WithMap { table }),
+            Err(SerializeError::Key(KeyError { key })) if key == "a/b"
+        ),
         "a map key with '/' must be rejected by serialize"
     );
 }

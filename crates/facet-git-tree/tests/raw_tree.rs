@@ -6,7 +6,9 @@
 //!   deserialization.roundtrip     — deserialize(serialize(x)) must equal x
 
 use facet::Facet;
-use facet_git_tree::{EntryKind, Error, ObjectStore, RawTree, deserialize, serialize_into};
+use facet_git_tree::{
+    DeserializeError, EntryKind, ObjectStore, RawTree, deserialize, serialize_into,
+};
 use gix_object::{Kind, Write as _};
 
 mod common;
@@ -87,7 +89,7 @@ fn raw_tree_over_a_blob_is_not_a_tree() {
     let root = serialize_into(&value, &store).expect("serialize");
     let result: Result<WithRawTree, _> = deserialize(&root, &store);
     assert!(
-        matches!(result, Err(Error::NotATree(oid)) if oid == blob_oid),
+        matches!(result, Err(DeserializeError::NotATree(oid)) if oid == blob_oid),
         "RawTree over a blob must be NotATree, got {result:?}"
     );
 }

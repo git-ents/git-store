@@ -1,17 +1,19 @@
 //! Integration tests for deserialization error paths.
 //!
-//! These exercise the `Error` variants that only arise on read, against missing,
-//! mistyped, or externally-produced (foreign) trees — the robustness a git interop
-//! library must have:
-//!   Error::NotFound       — a referenced object is absent from the store
-//!   Error::NotATree       — an object expected to be a tree is another kind
-//!   Error::NonUtf8Name    — a foreign tree has a non-UTF-8 entry name
-//!   Error::InvalidOrdinal — a sequence entry is not named by a decimal index
-//!   Error::MaxDepth       — a pathologically deep tree is rejected, not overflowed
-//!   (malformed `Option`)  — an Option tree is neither empty nor a single "some"
+//! These exercise the `DeserializeError` variants that only arise on read,
+//! against missing, mistyped, or externally-produced (foreign) trees — the
+//! robustness a git interop library must have:
+//!   DeserializeError::NotFound         — a referenced object is absent from the store
+//!   DeserializeError::NotATree         — an object expected to be a tree is another kind
+//!   DeserializeError::NonUtf8Name      — a foreign tree has a non-UTF-8 entry name
+//!   DeserializeError::InvalidOrdinal   — a sequence entry is not named by a decimal index
+//!   DeserializeError::MaxDepth         — a pathologically deep tree is rejected, not overflowed
+//!   DeserializeError::MislabeledOption — an Option tree's single entry is not named "some"
 
 use facet::Facet;
-use facet_git_tree::{EntryKind, EntryMode, Error, ObjectId, ObjectStore, TreeEntry, deserialize};
+use facet_git_tree::{
+    DeserializeError, EntryKind, EntryMode, ObjectId, ObjectStore, TreeEntry, deserialize,
+};
 use gix_object::bstr::BString;
 use gix_object::{Kind, Tree, Write};
 
@@ -42,7 +44,7 @@ fn missing_root_object_is_not_found() {
     let empty = ObjectStore::default();
     let result: Result<Point, _> = deserialize(&id, &empty);
     assert!(
-        matches!(result, Err(Error::NotFound(_))),
+        matches!(result, Err(DeserializeError::NotFound(_))),
         "absent root must be NotFound"
     );
 }
@@ -58,7 +60,7 @@ fn blob_root_is_not_a_tree() {
 
     let result: Result<Point, _> = deserialize(&blob_id, &store);
     assert!(
-        matches!(result, Err(Error::NotATree(_))),
+        matches!(result, Err(DeserializeError::NotATree(_))),
         "blob root must be NotATree"
     );
 }
@@ -83,7 +85,7 @@ fn non_utf8_entry_name_is_rejected() {
 
     let result: Result<Point, _> = deserialize(&tree_id, &store);
     assert!(
-        matches!(result, Err(Error::NonUtf8Name(_))),
+        matches!(result, Err(DeserializeError::NonUtf8Name(_))),
         "non-UTF-8 entry name must be NonUtf8Name"
     );
 }
@@ -99,7 +101,7 @@ fn non_numeric_sequence_ordinal_is_rejected() {
 
     let result: Result<Vec<i64>, _> = deserialize(&tree_id, &store);
     assert!(
-        matches!(result, Err(Error::InvalidOrdinal(name)) if name == "x"),
+        matches!(result, Err(DeserializeError::InvalidOrdinal(name)) if name == "x"),
         "non-numeric ordinal must be InvalidOrdinal"
     );
 }
@@ -114,7 +116,7 @@ fn mislabeled_option_entry_is_rejected() {
 
     let result: Result<Option<i32>, _> = deserialize(&tree_id, &store);
     assert!(
-        matches!(&result, Err(Error::Message(m)) if m.contains("Option")),
+        matches!(&result, Err(DeserializeError::MislabeledOption { name }) if name == "nope"),
         "mislabeled Option entry must be rejected, got {result:?}"
     );
 }
@@ -141,7 +143,7 @@ fn excessively_deep_tree_is_rejected() {
 
     let result: Result<DeepNode, _> = deserialize(&node, &store);
     assert!(
-        matches!(result, Err(Error::MaxDepth(_))),
+        matches!(result, Err(DeserializeError::MaxDepth(_))),
         "deeply nested tree must be MaxDepth, got {result:?}"
     );
 }

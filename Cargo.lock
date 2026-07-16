@@ -18,6 +18,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "anyhow"
+version = "1.0.103"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+
+[[package]]
 name = "arc-swap"
 version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,10 +213,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "facet-dessert"
+version = "0.50.0-rc.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39aaece2ca1e5aad3e2bee0f4fea23ae0a11eb5a0b88bb265ec09c39d580aac5"
+dependencies = [
+ "facet-core",
+ "facet-reflect",
+]
+
+[[package]]
+name = "facet-format"
+version = "0.50.0-rc.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64c612924dc3d45853f81e9cfafc513f3ec0be5982f943a7945f49f2492effb1"
+dependencies = [
+ "facet-core",
+ "facet-dessert",
+ "facet-path",
+ "facet-reflect",
+ "facet-solver",
+]
+
+[[package]]
 name = "facet-git-tree"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "facet",
+ "facet-value",
  "gix-hash",
  "gix-object",
  "gix-odb",
@@ -283,6 +314,29 @@ dependencies = [
  "facet-path",
  "hashbrown 0.17.1",
  "smallvec 2.0.0-alpha.12",
+]
+
+[[package]]
+name = "facet-solver"
+version = "0.50.0-rc.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5c800eb08ef5e1f18ffafcddf40da5d9ea3c86b8f0486f6ee077b0a3d497812"
+dependencies = [
+ "facet-core",
+ "facet-reflect",
+ "strsim",
+]
+
+[[package]]
+name = "facet-value"
+version = "0.50.0-rc.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfc5a08618f541594700de7dc032054e04368c06029682d61ab43683d18f5232"
+dependencies = [
+ "facet-core",
+ "facet-format",
+ "facet-reflect",
+ "indexmap",
 ]
 
 [[package]]
