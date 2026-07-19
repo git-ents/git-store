@@ -7,6 +7,7 @@
 //!   DeserializeError::NotATree         — an object expected to be a tree is another kind
 //!   DeserializeError::NonUtf8Name      — a foreign tree has a non-UTF-8 entry name
 //!   DeserializeError::InvalidOrdinal   — a sequence entry is not named by a decimal index
+//!   DeserializeError::DuplicateOrdinal — two sequence entries name the same numeric index
 //!   DeserializeError::MaxDepth         — a pathologically deep tree is rejected, not overflowed
 //!   DeserializeError::MislabeledOption — an Option tree's single entry is not named "some"
 
@@ -103,6 +104,26 @@ fn non_numeric_sequence_ordinal_is_rejected() {
     assert!(
         matches!(result, Err(DeserializeError::InvalidOrdinal(name)) if name == "x"),
         "non-numeric ordinal must be InvalidOrdinal"
+    );
+}
+
+/// A foreign sequence tree with two entries naming the same numeric ordinal
+/// (`"0"` and `"0000"`, distinct strings that parse to the same index) is
+/// rejected rather than silently resolved by insertion or lexical order.
+#[test]
+fn duplicate_sequence_ordinal_is_rejected() {
+    let store = ObjectStore::default();
+    let a = store.write_buf(Kind::Blob, b"1").expect("write blob");
+    let b = store.write_buf(Kind::Blob, b"2").expect("write blob");
+    let tree_id = write_tree(
+        &store,
+        &[("0", EntryKind::Blob, a), ("0000", EntryKind::Blob, b)],
+    );
+
+    let result: Result<Vec<i64>, _> = deserialize(&tree_id, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::DuplicateOrdinal(0))),
+        "duplicate ordinal must be rejected, got {result:?}"
     );
 }
 

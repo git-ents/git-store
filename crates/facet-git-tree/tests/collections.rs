@@ -8,6 +8,7 @@
 //! Ordinal entry naming for sequence collections is covered in `ordinals.rs`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use facet::Facet;
 use facet_git_tree::{EntryKind, deserialize, serialize};
@@ -18,6 +19,11 @@ use common::{WithArray, WithMap, WithVec, get_tree_entry_mode, tree_entries};
 #[derive(Facet)]
 struct WithIntMap {
     table: HashMap<u32, String>,
+}
+
+#[derive(Facet, PartialEq, Debug)]
+struct WithArcStrKeyMap {
+    table: HashMap<Arc<str>, u32>,
 }
 
 #[derive(Facet, PartialEq, Eq, Hash, Debug, Clone)]
@@ -178,6 +184,45 @@ fn map_insertion_order_is_irrelevant() {
         id_a, id_b,
         "maps with identical pairs must serialize identically regardless of insertion order"
     );
+}
+
+/// A map keyed by a smart pointer to a scalar (`Arc<str>`) is name-keyed by
+/// the textual form of the *collapsed* key shape (`str`'s own textual form),
+/// not treated as composite merely because the key's own static shape is
+/// `Def::Pointer`. This is the encoder-side half of the map-key transparency
+/// collapse: `schema_of::<HashMap<Arc<str>, u32>>()` classifies the same key
+/// scalar (covered in `schema_driven.rs`), and both sides must agree on what
+/// actually got written.
+#[test]
+fn map_with_smart_pointer_scalar_keys_is_name_keyed() {
+    let mut table: HashMap<Arc<str>, u32> = HashMap::new();
+    table.insert(Arc::from("hello"), 5);
+
+    let (root_id, store) = serialize(&WithArcStrKeyMap {
+        table: table.clone(),
+    })
+    .expect("serialize should succeed");
+
+    let (mode, map_id) = get_tree_entry_mode(&store, &root_id, "table");
+    assert_eq!(mode, EntryKind::Tree, "Map field must be a tree");
+
+    // A composite-keyed layout would name this entry "0000" and point at a
+    // `{k, v}` pair sub-tree; a name-keyed layout points straight at the value.
+    let (vmode, v_id) = get_tree_entry_mode(&store, &map_id, "hello");
+    assert_eq!(
+        vmode,
+        EntryKind::Blob,
+        "an Arc<str> key must be name-keyed by its collapsed scalar's textual \
+         form, not wrapped in a {{k, v}} pair sub-tree"
+    );
+    assert_eq!(
+        store.get_blob(&v_id).expect("value blob in store"),
+        b"5",
+        "name-keyed entry must resolve directly to the value"
+    );
+
+    let got: WithArcStrKeyMap = deserialize(&root_id, &store).expect("deserialize should succeed");
+    assert_eq!(got.table, table, "Arc<str>-keyed map must round-trip");
 }
 
 // --- composite map keys ---

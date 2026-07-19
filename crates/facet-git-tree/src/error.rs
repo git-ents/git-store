@@ -1,6 +1,7 @@
 //! Error types, one per operation: [`KeyError`] for key validation,
-//! [`SerializeError`] for the write side, and [`DeserializeError`] for the
-//! read side.
+//! [`SerializeError`] for the write side, [`DeserializeError`] for the
+//! read side, [`SchemaError`] for schema generation, and [`SchemaReadError`]
+//! for schema-driven reads.
 
 use gix_hash::ObjectId;
 
@@ -49,6 +50,24 @@ pub enum SerializeError {
     /// Holds the type identifier of the unsupported scalar.
     #[error("unsupported scalar type: {0}")]
     UnsupportedScalar(&'static str),
+    /// A dynamic value holds a number with no exact textual rendering.
+    ///
+    /// The generic dynamic-value vtable only surfaces 64-bit reads, so an
+    /// integer beyond the 64-bit range can only be observed as a lossy `f64`
+    /// approximation. Writing that approximation would silently change the
+    /// value — and therefore its object id — so it is refused instead. The
+    /// `value` cargo feature adds a `facet_value::Value` fast path that
+    /// renders integers exactly at any width.
+    #[error("dynamic number has no exact textual rendering")]
+    UnrepresentableNumber,
+    /// A dynamic value's runtime kind is not supported by this encoding.
+    ///
+    /// Holds the kind's name. Produced for kinds with no generic textual
+    /// form (QName and UUID without the `value` feature) and for kinds this
+    /// crate does not know (`DynValueKind` is `#[non_exhaustive]`); refusing
+    /// them is preferred over guessing an encoding.
+    #[error("unsupported dynamic value kind: {0}")]
+    UnsupportedDynamicKind(String),
 }
 
 /// An error produced by deserialization ([`deserialize`](crate::deserialize)
@@ -89,6 +108,15 @@ pub enum DeserializeError {
     /// externally-produced tree.
     #[error("invalid sequence ordinal {0:?}")]
     InvalidOrdinal(String),
+    /// Two sequence entries name the same numeric ordinal (e.g. `"0"` and
+    /// `"0000"`).
+    ///
+    /// Each element must occupy a distinct index; a foreign tree with two
+    /// entries naming the same index leaves the element order ambiguous, so
+    /// it is rejected rather than silently resolved by insertion or lexical
+    /// order.
+    #[error("duplicate sequence ordinal {0}: two entries name the same index")]
+    DuplicateOrdinal(usize),
     /// An error from the underlying `gix` object backend.
     ///
     /// Wraps the backend's own error (from [`Find`](gix_object::Find)) as the
@@ -154,4 +182,88 @@ pub enum DeserializeError {
     /// Holds the type identifier of the unsupported shape.
     #[error("unsupported type for deserialization: {0}")]
     Unsupported(&'static str),
+}
+
+/// An error produced by schema generation ([`schema_of`](crate::schema_of) and
+/// [`SchemaDoc::from_shape`](crate::SchemaDoc::from_shape)).
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaError {
+    /// The shape contains a scalar type this encoding does not support.
+    ///
+    /// Holds the type identifier of the unsupported scalar. Mirrors
+    /// [`SerializeError::UnsupportedScalar`]: a shape that cannot be encoded
+    /// cannot be described by a schema either.
+    #[error("unsupported scalar type in schema: {0}")]
+    UnsupportedScalar(&'static str),
+    /// The shape contains a type this encoding does not support.
+    ///
+    /// Holds the type identifier of the unsupported shape. Mirrors
+    /// [`SerializeError::Unsupported`].
+    #[error("unsupported type in schema: {0}")]
+    UnsupportedShape(&'static str),
+    /// A smart pointer shape carries no pointee shape to collapse to.
+    ///
+    /// Holds the pointer type's identifier. Transparency collapse resolves a
+    /// pointer to its pointee's schema; a pointer without one (an opaque
+    /// pointer shape) has no schema.
+    #[error("smart pointer {0} has no pointee shape")]
+    MissingPointee(&'static str),
+    /// Schema generation exceeded the maximum supported nesting depth.
+    ///
+    /// Mirrors [`DeserializeError::MaxDepth`]: data nested deeper than the
+    /// limit could never be read back regardless, so describing it is
+    /// refused rather than recursing unboundedly.
+    #[error("maximum nesting depth ({0}) exceeded while generating schema")]
+    MaxDepth(usize),
+}
+
+/// An error produced by schema-driven deserialization
+/// (`deserialize_value_with_schema` and `validate_with_schema`, available with
+/// the `value` feature).
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaReadError {
+    /// The underlying tree walk failed exactly as a typed read would.
+    ///
+    /// Covers missing objects, malformed trees, depth exhaustion, and every
+    /// other condition [`DeserializeError`] describes.
+    #[error(transparent)]
+    Deserialize(#[from] DeserializeError),
+    /// A `Schema::Ref` names a definition absent from the document's `defs`
+    /// table.
+    #[error("schema ref {0:?} has no definition in the document")]
+    UnknownRef(String),
+    /// An enum tree's variant name is not present in the schema.
+    #[error("unknown enum variant {variant:?}; schema defines {expected:?}")]
+    UnknownVariant {
+        /// The variant name found in the tree.
+        variant: String,
+        /// The variant names the schema defines.
+        expected: Vec<String>,
+    },
+    /// A fixed-length sequence's entry count does not match the schema.
+    ///
+    /// Produced for `Schema::Array` (whose `len` is part of the schema) and
+    /// `Schema::Tuple` (whose element count is).
+    #[error("sequence length mismatch: schema expects {expected} elements, tree holds {found}")]
+    ArrayLenMismatch {
+        /// The element count the schema requires.
+        expected: usize,
+        /// The entry count the tree actually holds.
+        found: usize,
+    },
+    /// A scalar blob's text does not parse as the schema's scalar type.
+    #[error("cannot parse {text:?} as schema scalar {schema}")]
+    InvalidScalar {
+        /// The name of the scalar schema node (e.g. `I8`, `Bool`).
+        schema: &'static str,
+        /// The text that failed to parse.
+        text: String,
+    },
+    /// A tree that the schema requires to be empty (a `Unit` value or a unit
+    /// enum variant payload) holds entries.
+    #[error("malformed unit tree: expected no entries, found {found}")]
+    MalformedUnit {
+        /// How many entries the tree actually holds.
+        found: usize,
+    },
 }

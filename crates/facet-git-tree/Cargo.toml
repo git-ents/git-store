@@ -19,3 +19,7 @@ anyhow = "1"
 facet-value = "0.50.0-rc.5"
 proptest = "1"
 rstest = "0.26"
+
+[[test]]
+name = "schema_driven"
+required-features = ["value"]

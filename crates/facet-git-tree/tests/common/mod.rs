@@ -58,6 +58,32 @@ pub struct WithOptional {
     pub maybe: Option<i32>,
 }
 
+/// A typed struct carrying a dynamic [`facet_value::Value`] field, for the
+/// dynamic-value suites.
+#[derive(Debug, Facet, PartialEq)]
+pub struct WithValue {
+    pub meta: facet_value::Value,
+}
+
+/// A self-referential type: a node owns child nodes of the same type. Used by
+/// the schema suites to exercise `Schema::Ref` recursion.
+#[derive(Debug, Facet, PartialEq)]
+pub struct TreeNode {
+    pub value: i64,
+    pub children: Vec<TreeNode>,
+}
+
+/// An enum exercising all four variant payload kinds: unit, newtype, tuple,
+/// and struct.
+#[derive(Debug, Facet, PartialEq)]
+#[repr(u8)]
+pub enum Event {
+    Ping,
+    Message(String),
+    Move(i32, i32),
+    Login { user: String, ok: bool },
+}
+
 // --- git ground truth ---
 
 /// The git blob OID of `b"hello"`, i.e. `printf 'hello' | git hash-object --stdin`.
