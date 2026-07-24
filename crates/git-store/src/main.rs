@@ -4,8 +4,9 @@
 //!
 //! Bare `git store` lists kinds. Writing is an explicit `git store put <kind>
 //! [<name>]`, taking content from `-F <file>`, stdin, or `$EDITOR`; reading is
-//! `git store get <kind> <name>`. Everything else — `list`, `log`, `rm`, and
-//! the `schema` subgroup — mirrors git porcelain.
+//! `git store get <kind> <name>`, where `<name>` may carry a git revision
+//! (`<name>~1`, `<name>@{date}`) to read a past version. Everything else —
+//! `list`, `log`, `rm`, and the `schema` subgroup — mirrors git porcelain.
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
@@ -28,15 +29,10 @@ enum Command {
     /// Store an entity. Content comes from `-F <file>`, stdin, or `$EDITOR`
     /// (at a terminal with neither); prints the commit id.
     Put(PutArgs),
-    /// Read an entity back as JSON.
-    Get {
-        kind: String,
-        name: String,
-        /// Read an earlier version by revision — an oid, or `~N` / `@{date}`
-        /// relative to the entity (from `log`).
-        #[arg(long, value_name = "REV")]
-        at: Option<String>,
-    },
+    /// Read an entity back as JSON. Append a revision to read a past version:
+    /// `carbonara~1`, `carbonara@{yesterday}`, or `carbonara@<oid>` (the `@`
+    /// separates any revision from the name; see `log`).
+    Get { kind: String, name: String },
     /// List kinds, or the entity names within a kind.
     #[command(visible_alias = "ls")]
     List { kind: Option<String> },
@@ -111,19 +107,20 @@ fn main() -> Result<()> {
         // Bare `git store` lists kinds — a read-only default, like `git remote`.
         None => print_lines(store.kinds()?),
         Some(Command::Put(args)) => put(&store, args)?,
-        Some(Command::Get { kind, name, at }) => {
-            let value = match at {
+        Some(Command::Get { kind, name }) => {
+            let (name, rev) = split_name_rev(&name);
+            let value = match rev {
                 Some(rev) => {
-                    let oid = resolve_at(&repo, &kind, &name, &rev)?;
+                    let oid = resolve_at(&repo, &kind, name, rev)?;
                     // Only read a commit that is actually a version of this
                     // entity, so a stray oid can't return an unrelated value.
-                    if !store.history(&kind, &name)?.contains(&oid) {
+                    if !store.history(&kind, name)?.contains(&oid) {
                         bail!("{rev} is not a version of {kind}/{name}");
                     }
                     store.retrieve_at(oid)?
                 }
                 None => store
-                    .retrieve(&kind, &name)?
+                    .retrieve(&kind, name)?
                     .with_context(|| format!("no entity {kind}/{name}"))?,
             };
             println!("{}", to_json(&value)?);
@@ -202,9 +199,33 @@ fn put(store: &Store, args: PutArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a `--at` revision to a commit id. A leading revision operator
-/// (`~`, `^`, `@`) is relative to the entity's ref; anything else stands alone
-/// (an oid or a full ref).
+/// Split an entity argument into its name and an optional revision.
+///
+/// A revision may be written as a bare git ancestry suffix (`carbonara~1`,
+/// `carbonara^2`), as git's own date/reflog syntax (`carbonara@{yesterday}`),
+/// or attached with an explicit `@` separator (`carbonara@<rev>`, where `<rev>`
+/// is any revision — an oid, `~1`, a ref). Without a suffix the whole token is
+/// the name. A literal `@`/`~`/`^` in a name isn't addressable this way, the
+/// same trade-off git makes for `<rev>@{…}`.
+fn split_name_rev(token: &str) -> (&str, Option<&str>) {
+    let Some(i) = token.find(['~', '^', '@']) else {
+        return (token, None);
+    };
+    let (name, marker) = token.split_at(i);
+    let rev = match marker.strip_prefix('@') {
+        // `@{…}` is git's date/reflog syntax — keep it attached to the ref.
+        Some(rest) if rest.starts_with('{') => marker,
+        // `@` is an explicit separator: the revision is whatever follows.
+        Some(rest) => rest,
+        // `~`/`^`: a bare git ancestry suffix, relative to the entity ref.
+        None => marker,
+    };
+    (name, (!rev.is_empty()).then_some(rev))
+}
+
+/// Resolve a revision to a commit id. A leading revision operator (`~`, `^`,
+/// `@`) is relative to the entity's ref; anything else stands alone (an oid or
+/// a full ref).
 fn resolve_at(repo: &gix::Repository, kind: &str, name: &str, rev: &str) -> Result<ObjectId> {
     let spec = if rev.starts_with(['~', '^', '@']) {
         format!("refs/store/{kind}/{name}{rev}")

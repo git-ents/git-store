@@ -35,7 +35,7 @@ $ git log --oneline refs/store/recipe/carbonara     # history for free
 9f50ef7 store recipe/carbonara
 15e425b store recipe/carbonara
 
-$ git store get recipe carbonara --at '~1' | jq .serves   # time-travel by revision
+$ git store get recipe 'carbonara~1' | jq .serves   # time-travel by revision
 4
 ```
 
@@ -81,7 +81,9 @@ git store put <kind> [<name>]               # store an entity; name defaults to 
     -F, --file <FILE>                       #   content from a file (else stdin, else $EDITOR)
     -m, --message <MSG>                     #   commit message for this version
     -e, --edit                              #   edit the content in $VISUAL/$EDITOR first
-git store get  <kind> <name> [--at <rev>]   # read back as JSON; --at reads a past version (oid, ~N, @{date})
+git store get  <kind> <name>                # read back as JSON; <name> may carry a
+                                            #   revision to read a past version:
+                                            #   <name>~N, <name>@{date}, <name>@<oid>
 git store list [<kind>]   (alias: ls)       # kinds, or entity names within a kind
 git store log  <kind> <name>                # oid + date per version
 git store rm   <kind> <name>                # delete an entity

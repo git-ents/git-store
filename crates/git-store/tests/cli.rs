@@ -63,6 +63,24 @@ fn store_get_list_and_remove() {
     assert!(out.contains("\"serves\": 4"), "get output: {out}");
     assert!(out.contains("\"title\": \"Carbonara\""), "get output: {out}");
 
+    // A second version, then read the prior one via a revision folded into the
+    // name (`carbonara~1`), and the same via the explicit `@` separator.
+    let v2 = r#"{"title":"Carbonara","serves":6,"steps":["boil","fry"]}"#;
+    let (_, err, ok) = run(path, Some(v2), &["put", "recipe", "carbonara"]);
+    assert!(ok, "second put failed: {err}");
+
+    let (out, err, ok) = run(path, None, &["get", "recipe", "carbonara"]);
+    assert!(ok, "get failed: {err}");
+    assert!(out.contains("\"serves\": 6"), "current version: {out}");
+
+    let (out, err, ok) = run(path, None, &["get", "recipe", "carbonara~1"]);
+    assert!(ok, "get carbonara~1 failed: {err}");
+    assert!(out.contains("\"serves\": 4"), "prior version: {out}");
+
+    let (out, err, ok) = run(path, None, &["get", "recipe", "carbonara@~1"]);
+    assert!(ok, "get carbonara@~1 failed: {err}");
+    assert!(out.contains("\"serves\": 4"), "prior version via @: {out}");
+
     // Bare `git store` lists kinds; `ls` is an alias for `list`.
     let (out, _, ok) = run(path, None, &[]);
     assert!(ok);
