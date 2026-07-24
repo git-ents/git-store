@@ -539,9 +539,9 @@ dependencies = [
 
 [[package]]
 name = "gix-object"
-version = "0.61.0"
+version = "0.62.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5cd857e29429c7213bdef3f5aef83f8cc124774fe8ae0d27b1607d218d6d525"
+checksum = "019b38afc3eac1e41f9fe09a327664b313ba4a120fa5f40e3678795d0e42783e"
 dependencies = [
  "bstr",
  "gix-actor",
@@ -558,9 +558,9 @@ dependencies = [
 
 [[package]]
 name = "gix-odb"
-version = "0.81.0"
+version = "0.82.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d004c32858b1556f2d7874405edb3c97dc78fc09beaa87d57bb077ee2858a7d"
+checksum = "7fadc59f6fa0f9dd445eceee61060a2b59ca557f48da9fc677f567db535b782a"
 dependencies = [
  "arc-swap",
  "gix-features",
@@ -579,9 +579,9 @@ dependencies = [
 
 [[package]]
 name = "gix-pack"
-version = "0.71.0"
+version = "0.72.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e43626f2a27d1033674ec1a196b845614231e6bbd949d5e21c133045ff56b174"
+checksum = "ca3e7f1726cd2c0cd1cf1fc20be8a8e623f0b163f1f8d6fc836cfb9bc8cd758b"
 dependencies = [
  "gix-chunk",
  "gix-error",

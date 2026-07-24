@@ -85,6 +85,25 @@ impl Write for ObjectStore {
     ) -> Result<ObjectId, gix_object::write::Error> {
         self.0.write_stream(kind, size, from)
     }
+
+    fn write_buf_with_known_id(
+        &self,
+        kind: Kind,
+        from: &[u8],
+        id: ObjectId,
+    ) -> Result<ObjectId, gix_object::write::Error> {
+        self.0.write_buf_with_known_id(kind, from, id)
+    }
+
+    fn write_stream_with_known_id(
+        &self,
+        kind: Kind,
+        size: u64,
+        from: &mut dyn Read,
+        id: ObjectId,
+    ) -> Result<ObjectId, gix_object::write::Error> {
+        self.0.write_stream_with_known_id(kind, size, from, id)
+    }
 }
 
 /// Inert backing database for [`ObjectStore`]'s in-memory [`Proxy`].
@@ -117,6 +136,25 @@ impl Write for NoBackend {
     ) -> Result<ObjectId, gix_object::write::Error> {
         // The enclosing `Proxy` always has its in-memory store enabled, so writes
         // are intercepted before reaching this inner database.
+        Err("NoBackend: writes are handled by the in-memory proxy".into())
+    }
+
+    fn write_buf_with_known_id(
+        &self,
+        _kind: Kind,
+        _from: &[u8],
+        _id: ObjectId,
+    ) -> Result<ObjectId, gix_object::write::Error> {
+        Err("NoBackend: writes are handled by the in-memory proxy".into())
+    }
+
+    fn write_stream_with_known_id(
+        &self,
+        _kind: Kind,
+        _size: u64,
+        _from: &mut dyn Read,
+        _id: ObjectId,
+    ) -> Result<ObjectId, gix_object::write::Error> {
         Err("NoBackend: writes are handled by the in-memory proxy".into())
     }
 }

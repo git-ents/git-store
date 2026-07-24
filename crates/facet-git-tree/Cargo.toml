@@ -10,8 +10,8 @@ value = ["dep:facet-value"]
 facet = { version = "0.50.0-rc.0", features = ["reflect"] }
 facet-value = { version = "0.50.0-rc.5", optional = true }
 gix-hash = { version = "0.25.1", features = ["sha1"] }
-gix-object = "0.61.0"
-gix-odb = "0.81.0"
+gix-object = "0.62.0"
+gix-odb = "0.82.0"
 thiserror = "2"
 
 [dev-dependencies]
