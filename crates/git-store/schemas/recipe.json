@@ -1,0 +1,31 @@
+{
+  "root": {
+    "Ref": "Recipe"
+  },
+  "defs": {
+    "Recipe": {
+      "Struct": [
+        {
+          "name": "title",
+          "schema": "String"
+        },
+        {
+          "name": "serves",
+          "schema": "U32"
+        },
+        {
+          "name": "ingredients",
+          "schema": {
+            "List": "String"
+          }
+        },
+        {
+          "name": "steps",
+          "schema": {
+            "List": "String"
+          }
+        }
+      ]
+    }
+  }
+}

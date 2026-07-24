@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/facet-git-tree"]
+members = ["crates/facet-git-tree", "crates/gix-store", "crates/git-store", "crates/test-support"]
 resolver = "3"

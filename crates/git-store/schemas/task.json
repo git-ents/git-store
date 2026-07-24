@@ -1,0 +1,47 @@
+{
+  "root": {
+    "Ref": "Task"
+  },
+  "defs": {
+    "Priority": {
+      "Enum": [
+        {
+          "name": "Low",
+          "kind": "Unit"
+        },
+        {
+          "name": "Medium",
+          "kind": "Unit"
+        },
+        {
+          "name": "High",
+          "kind": "Unit"
+        }
+      ]
+    },
+    "Task": {
+      "Struct": [
+        {
+          "name": "summary",
+          "schema": "String"
+        },
+        {
+          "name": "done",
+          "schema": "Bool"
+        },
+        {
+          "name": "priority",
+          "schema": {
+            "Ref": "Priority"
+          }
+        },
+        {
+          "name": "tags",
+          "schema": {
+            "List": "String"
+          }
+        }
+      ]
+    }
+  }
+}
