@@ -13,6 +13,8 @@
 
 #[cfg(feature = "value")]
 pub mod read;
+#[cfg(feature = "value")]
+pub mod write;
 
 use std::collections::{BTreeMap, HashMap};
 

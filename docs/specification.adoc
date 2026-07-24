@@ -390,6 +390,67 @@ Generation MUST be deterministic: the same input shape always yields an identica
 Shape recursion MUST be bounded by the same maximum nesting depth that bounds ordinary deserialization (link:#deserialization.schema-driven[schema-driven deserialization] already applies this bound to reads); a shape nested deeper than that limit MUST fail generation rather than recurse unboundedly, since data written that deep could never be read back regardless of what schema described it.
 --
 
+[role="requirement", id="serialization.schema-directed"]
+.Schema-Directed Serialization
+--
+Given a link:#schema.representation[schema document], the schema-directed writer (`serialize_value_with_schema`) MUST encode a dynamic value as the Git objects the schema describes, producing byte-for-byte — and therefore object-id — identical output to link:#serialization.design.dynamic[dynamic encoding] of the equivalent typed value, according to the following mapping from schema node to accepted value.
+
+Encoding and conformance are one operation: a value that does not conform MUST fail — naming the path within the value at which the mismatch occurred — rather than be encoded lossily or ambiguously.
+The accepted set MUST be exactly the image of link:#deserialization.schema-driven[schema-driven deserialization] — every value that read can produce MUST re-encode — together with the two deterministic bridges a value authored without type information (for example, parsed from JSON) requires: a lossless integer supplied for a floating-point node, and a `String` supplied for a `Bytes` node.
+
+[cols="1,2", options="header"]
+|===
+| Schema node | Accepted value and encoding
+
+| `Unit`
+| `Null`; encoded as an empty tree.
+
+| `I8` … `I128`, `ISize`, `U8` … `U128`, `USize`
+| an integer `Number` within the node's range, encoded as its decimal text. A floating-point-backed `Number` MUST be refused (float-to-integer is not a bridge), as MUST a value outside the range.
+
+| `F32`, `F64`
+| a `Number`, encoded as its textual form under link:#serialization.design.normalization.leaves[leaf normalization]. A floating-point-backed value MUST be rendered at the node's width regardless of magnitude; an integer-backed value MUST be exactly representable at that width, otherwise the write MUST fail rather than round.
+
+| `Bool`, `Char`, `String`
+| the corresponding kind, encoded as the matching leaf blob. `Char` also accepts a single-character `String`; `String` accepts a `String`.
+
+| `Bytes`
+| `Bytes`, encoded verbatim; or a `String`, encoded as its UTF-8 bytes.
+
+| `Struct`
+| an `Object` whose keys are all defined fields; a field absent from the object is skipped (matching the read path's leniency), and a key the schema does not define MUST be an error.
+
+| `Tuple`, `Array { elem, len }`
+| an `Array` of the exact required length, encoded as an link:#serialization.design.trees.ordering[ordinal-named] tree; a length mismatch MUST be an error.
+
+| `List`
+| an `Array` of any length, encoded as an ordinal-named tree.
+
+| `Map` with a scalar key schema
+| an `Object`, encoded as a tree keyed by the member names, each subject to the entry-name validity rule.
+
+| `Map` with a composite key schema
+| an `Array` of two-member `{"k": …, "v": …}` objects, encoded as ordinal-named `{ k, v }` pair sub-trees, the pairs ordered by object id exactly as the typed encoder orders them.
+
+| `Optional`
+| `Null`, encoded as an empty tree; otherwise the inner value, encoded and wrapped in a single `some` entry.
+
+| `Enum`
+| a single-member `Object` whose key names the variant and whose value encodes the payload per link:#serialization.design.trees.variants[variant encoding]; a name not present in the schema, or an object that is not a single member, MUST be an error.
+
+| `RawTree`
+| a `String` holding a 40-character lowercase-hex object id, referenced verbatim as a tree with no object written.
+
+| `Dynamic`
+| any value, encoded by link:#serialization.design.dynamic[dynamic encoding].
+
+| `Ref(name)`
+| the value encoded via the definition named `name`; an unknown name MUST be an error.
+|===
+
+Recursion depth MUST be bounded by the same maximum-depth limit that bounds deserialization, and every hop MUST count against that limit — including `Ref` resolution — so that a `Ref`-to-`Ref` cycle in the schema fails rather than recursing unboundedly.
+--
+
 [NOTE]
 ====
 Publishing a schema under a ref — e.g. `refs/schema/issue` — is a convention owned by higher layers such as `git-store`; `facet-git-tree` itself remains oid-in/oid-out and performs no ref operations.

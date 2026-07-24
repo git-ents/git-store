@@ -90,7 +90,7 @@ pub(crate) fn is_byte_seq(shape: &facet::Shape) -> bool {
     seq_elem(shape).is_some_and(|t| t.is_type::<u8>())
 }
 
-fn serialize_node<W: Write + ?Sized>(
+pub(crate) fn serialize_node<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
@@ -639,7 +639,7 @@ fn serialize_sequence<W: Write + ?Sized>(
 }
 
 /// A float type [`float_text`] can canonicalize (`f32`, `f64`).
-trait FloatScalar: Copy + PartialEq + ToString {
+pub(crate) trait FloatScalar: Copy + PartialEq + ToString {
     /// Positive zero, used to collapse negative zero.
     const ZERO: Self;
     /// Whether the value is a NaN of any payload.
@@ -666,7 +666,7 @@ impl FloatScalar for f64 {
 /// numerically equal values always produce byte-identical blobs — and thus
 /// equal object ids. Shared by the typed scalar path ([`scalar_bytes`]) and
 /// the dynamic number path ([`serialize_dynamic`]).
-fn float_text<F: FloatScalar>(v: F) -> Vec<u8> {
+pub(crate) fn float_text<F: FloatScalar>(v: F) -> Vec<u8> {
     if v.is_nan() {
         return b"nan".to_vec();
     }

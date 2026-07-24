@@ -1,7 +1,8 @@
 //! Error types, one per operation: [`KeyError`] for key validation,
 //! [`SerializeError`] for the write side, [`DeserializeError`] for the
-//! read side, [`SchemaError`] for schema generation, and [`SchemaReadError`]
-//! for schema-driven reads.
+//! read side, [`SchemaError`] for schema generation, [`SchemaReadError`]
+//! for schema-driven reads, and [`SchemaWriteError`] for schema-directed
+//! writes.
 
 use gix_hash::ObjectId;
 
@@ -265,5 +266,124 @@ pub enum SchemaReadError {
     MalformedUnit {
         /// How many entries the tree actually holds.
         found: usize,
+    },
+}
+
+/// An error produced by schema-directed serialization
+/// (`serialize_value_with_schema`, available with the `value` feature).
+///
+/// The write-side mirror of [`SchemaReadError`]: it validates a dynamic value
+/// against a schema *while* encoding it, so every variant beyond the backend
+/// pass-through names the `path` in the value where the value diverged from
+/// what the schema accepts. The accepted set is exactly the image of
+/// [`deserialize_value_with_schema`](crate::deserialize_value_with_schema),
+/// plus the deterministic bridges a JSON-authored value needs (an integer into
+/// a float field; a string into a `Bytes` field).
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaWriteError {
+    /// The underlying object write, key validation, or `Dynamic`-node
+    /// encoding failed exactly as an ordinary serialization would.
+    #[error(transparent)]
+    Serialize(#[from] SerializeError),
+    /// The value's runtime kind does not match the schema node.
+    #[error("at {path}: expected {expected}, found {found}")]
+    Expected {
+        /// The location within the value.
+        path: String,
+        /// The kind (or kinds) the schema node accepts.
+        expected: &'static str,
+        /// The value's actual runtime kind.
+        found: &'static str,
+    },
+    /// A number does not fit the schema's integer type.
+    #[error("at {path}: number {value} out of range for {schema}")]
+    NumberOutOfRange {
+        /// The location within the value.
+        path: String,
+        /// The integer schema node's name (e.g. `U8`).
+        schema: &'static str,
+        /// The offending number's textual form.
+        value: String,
+    },
+    /// An integer has no exact representation in the schema's float type.
+    ///
+    /// The float-field bridge is lossless by design: an integer that cannot be
+    /// represented exactly at the target width is refused rather than rounded,
+    /// the same posture [`SerializeError::UnrepresentableNumber`] takes.
+    #[error("at {path}: number has no exact {schema} representation")]
+    UnrepresentableNumber {
+        /// The location within the value.
+        path: String,
+        /// The float schema node's name (`F32` or `F64`).
+        schema: &'static str,
+    },
+    /// An object holds a key the struct schema does not define.
+    ///
+    /// The accepted set is exactly the image of the schema-driven read, which
+    /// only ever emits the schema's own fields, so an extra key is rejected
+    /// rather than silently dropped.
+    #[error("at {path}: unknown field {field:?}")]
+    UnknownField {
+        /// The location of the object.
+        path: String,
+        /// The offending key.
+        field: String,
+    },
+    /// A fixed-length sequence (`Tuple` or `Array`) has the wrong element
+    /// count.
+    #[error("at {path}: expected {expected} elements, found {found}")]
+    LengthMismatch {
+        /// The location of the sequence.
+        path: String,
+        /// The element count the schema requires.
+        expected: usize,
+        /// The element count the value holds.
+        found: usize,
+    },
+    /// An enum value is not a single-member tagged object.
+    #[error("at {path}: enum must be a single-member object, found {found} members")]
+    MalformedEnum {
+        /// The location of the value.
+        path: String,
+        /// How many members the object holds.
+        found: usize,
+    },
+    /// An enum variant name is not present in the schema.
+    #[error("at {path}: unknown variant {variant:?}; schema defines {expected:?}")]
+    UnknownVariant {
+        /// The location of the value.
+        path: String,
+        /// The variant name found.
+        variant: String,
+        /// The variant names the schema defines.
+        expected: Vec<String>,
+    },
+    /// A `RawTree` value is not a 40-character lowercase-hex object id.
+    #[error("at {path}: invalid raw tree object id {text:?}")]
+    InvalidRawTree {
+        /// The location of the value.
+        path: String,
+        /// The offending text.
+        text: String,
+    },
+    /// A `Ref` names a definition absent from the document's `defs` table.
+    #[error("at {path}: schema ref {name:?} has no definition in the document")]
+    UnknownRef {
+        /// The location of the value.
+        path: String,
+        /// The undefined reference name.
+        name: String,
+    },
+    /// Serialization exceeded the maximum supported nesting depth.
+    ///
+    /// Mirrors [`DeserializeError::MaxDepth`]: since every hop — including
+    /// `Ref` resolution — counts against the limit, a `Ref`-to-`Ref` cycle in
+    /// the schema fails here rather than recursing unboundedly.
+    #[error("at {path}: maximum nesting depth ({depth}) exceeded while serializing")]
+    MaxDepth {
+        /// The location reached when the limit tripped.
+        path: String,
+        /// The limit that was exceeded.
+        depth: usize,
     },
 }

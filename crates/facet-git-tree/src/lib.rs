@@ -21,10 +21,14 @@ pub use gix_object::Object as GitObject;
 pub use gix_object::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 
 pub use de::{check_key, deserialize, deserialize_into};
-pub use error::{DeserializeError, KeyError, SchemaError, SchemaReadError, SerializeError};
+pub use error::{
+    DeserializeError, KeyError, SchemaError, SchemaReadError, SchemaWriteError, SerializeError,
+};
 pub use raw_tree::RawTree;
 #[cfg(feature = "value")]
 pub use schema::read::{deserialize_value_with_schema, validate_with_schema};
+#[cfg(feature = "value")]
+pub use schema::write::serialize_value_with_schema;
 pub use schema::{FieldSchema, Schema, SchemaDoc, VariantKind, VariantSchema, schema_of};
 pub use ser::{serialize, serialize_into, serialize_peek, serialize_peek_into};
 pub use store::ObjectStore;

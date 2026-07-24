@@ -23,3 +23,7 @@ rstest = "0.26"
 [[test]]
 name = "schema_driven"
 required-features = ["value"]
+
+[[test]]
+name = "schema_write"
+required-features = ["value"]
