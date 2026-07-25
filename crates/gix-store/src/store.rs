@@ -9,11 +9,11 @@ use facet_git_tree::{
 use facet_value::Value;
 
 use crate::Error;
-use crate::refname::check_component;
+use crate::refname::{check_component, check_prefix};
 
-/// Where entity refs live: `refs/store/<kind>/<name>`.
+/// Where entity refs live by default: `refs/store/<kind>/<name>`.
 const DATA_PREFIX: &str = "refs/store";
-/// Where schema refs live: `refs/schema/<kind>`.
+/// Where schema refs live by default: `refs/schema/<kind>`.
 const SCHEMA_PREFIX: &str = "refs/schema";
 /// Our per-ref lock files live under `<git-dir>/<LOCK_DIR>/`, kept separate
 /// from git's own `<ref>.lock` so holding one never blocks gix's own ref
@@ -28,20 +28,63 @@ const MAX_CAS_ATTEMPTS: u32 = 8;
 
 /// A content-addressed store layered over a `gix` repository.
 ///
-/// Every kind is defined by a [`SchemaDoc`] published to `refs/schema/<kind>`;
-/// every entity is a commit chain at `refs/store/<kind>/<name>` whose tree is
-/// the schema-directed encoding of a [`Value`] and whose tip names, in a
-/// `Schema:` trailer, the exact schema commit it was validated against. Every
-/// write is a commit; history is the audit trail.
+/// Every kind is defined by a [`SchemaDoc`] published to
+/// `<schema_prefix>/<kind>` (`refs/schema/<kind>` by default); every entity is
+/// a commit chain at `<data_prefix>/<kind>/<name>` (`refs/store/<kind>/<name>`
+/// by default) whose tree is the schema-directed encoding of a [`Value`] and
+/// whose tip names, in a `Schema:` trailer, the exact schema commit it was
+/// validated against. Every write is a commit; history is the audit trail.
+///
+/// Refs are this system's public API surface, so the namespace is
+/// configurable: see [`Store::open_with_prefixes`] for a consumer that wants
+/// its entities to live under its own domain namespace instead of under
+/// `refs/store`, which names the storage mechanism rather than the domain.
 pub struct Store<'r> {
     repo: &'r gix::Repository,
+    data_prefix: String,
+    schema_prefix: String,
 }
 
 impl<'r> Store<'r> {
     /// Open a store over `repo` with the default `refs/store` and
     /// `refs/schema` prefixes.
     pub fn open(repo: &'r gix::Repository) -> Store<'r> {
-        Store { repo }
+        Store {
+            repo,
+            data_prefix: DATA_PREFIX.to_owned(),
+            schema_prefix: SCHEMA_PREFIX.to_owned(),
+        }
+    }
+
+    /// Open a store over `repo` with caller-supplied ref-namespace prefixes
+    /// in place of the defaults `refs/store` and `refs/schema`. Entities then
+    /// live at `<data>/<kind>/<name>` and schemas at `<schema>/<kind>`.
+    ///
+    /// Use this when the mechanism's own namespace (`refs/store/…`) is the
+    /// wrong public name for what is stored — a rule module is a rule module
+    /// regardless of what serializes it, so a consumer may prefer e.g.
+    /// `refs/meta/rules` for `data` over accepting `refs/store/rules`.
+    ///
+    /// `data` and `schema` are validated with the same discipline
+    /// [`Store::open`]'s `kind`/`name` arguments get on every call: each
+    /// `/`-separated segment must be non-empty and must not begin or end with
+    /// `.`, end with `.lock`, contain `..` or `@{`, be a lone `@`, or contain
+    /// control characters, spaces, or any of `~^:?*[\`. The prefix as a whole
+    /// must not begin or end with `/`. Unlike `open`, this can fail — a bad
+    /// prefix is rejected here, at open time, rather than surfacing later as
+    /// a malformed ref from the first write.
+    pub fn open_with_prefixes(
+        repo: &'r gix::Repository,
+        data: &str,
+        schema: &str,
+    ) -> Result<Store<'r>, Error> {
+        check_prefix("data prefix", data)?;
+        check_prefix("schema prefix", schema)?;
+        Ok(Store {
+            repo,
+            data_prefix: data.to_owned(),
+            schema_prefix: schema.to_owned(),
+        })
     }
 
     // ── schemas ──────────────────────────────────────────────────────────
@@ -51,7 +94,7 @@ impl<'r> Store<'r> {
     pub fn put_schema(&self, kind: &str, doc: &SchemaDoc) -> Result<ObjectId, Error> {
         check_component("kind", kind)?;
         let tree = serialize_into(doc, &self.repo.objects)?;
-        self.commit_forward(&schema_ref(kind), &format!("schema {kind}\n"), tree)
+        self.commit_forward(&self.schema_ref(kind), &format!("schema {kind}\n"), tree)
     }
 
     /// The current schema for `kind`, or `None` when never published.
@@ -64,14 +107,14 @@ impl<'r> Store<'r> {
     /// has no published schema.
     pub fn schema_history(&self, kind: &str) -> Result<Vec<ObjectId>, Error> {
         check_component("kind", kind)?;
-        self.ref_history(&schema_ref(kind))
+        self.ref_history(&self.schema_ref(kind))
     }
 
     // ── entities ─────────────────────────────────────────────────────────
 
     /// Schema-directed serialize of `value`, committed forward at
-    /// `refs/store/<kind>/<name>` with a `Schema:` trailer naming the schema
-    /// commit it was validated against.
+    /// `<data_prefix>/<kind>/<name>` with a `Schema:` trailer naming the
+    /// schema commit it was validated against.
     ///
     /// `message` sets the commit summary; when `None`, a default `store
     /// <kind>/<name>` summary is used. The `Schema:` trailer is always
@@ -91,22 +134,22 @@ impl<'r> Store<'r> {
         check_component("kind", kind)?;
         check_component("name", name)?;
 
-        let (schema_commit, doc) = self
-            .current_schema(kind)?
-            .ok_or_else(|| Error::NoSchema { kind: kind.to_owned() })?;
+        let (schema_commit, doc) = self.current_schema(kind)?.ok_or_else(|| Error::NoSchema {
+            kind: kind.to_owned(),
+        })?;
 
         let tree = serialize_value_with_schema(value, &doc, &self.repo.objects)?;
         let default_summary = format!("store {kind}/{name}");
         let summary = message.unwrap_or(&default_summary);
         let msg = format!("{summary}\n\nSchema: {schema_commit}\n");
-        self.commit_forward(&data_ref(kind, name), &msg, tree)
+        self.commit_forward(&self.data_ref(kind, name), &msg, tree)
     }
 
-    /// The current value at `refs/store/<kind>/<name>`, or `None` when absent.
+    /// The current value at `<data_prefix>/<kind>/<name>`, or `None` when absent.
     pub fn retrieve(&self, kind: &str, name: &str) -> Result<Option<Value>, Error> {
         check_component("kind", kind)?;
         check_component("name", name)?;
-        let Some(tip) = self.tip(&data_ref(kind, name))? else {
+        let Some(tip) = self.tip(&self.data_ref(kind, name))? else {
             return Ok(None);
         };
         Ok(Some(self.retrieve_at(tip)?))
@@ -122,18 +165,22 @@ impl<'r> Store<'r> {
         let tree = commit.tree_id().map_err(Error::git)?.detach();
         let schema_commit = schema_trailer(&commit)?;
         let doc = self.read_schema(self.commit_tree(schema_commit)?)?;
-        Ok(deserialize_value_with_schema(&tree, &doc, &self.repo.objects)?)
+        Ok(deserialize_value_with_schema(
+            &tree,
+            &doc,
+            &self.repo.objects,
+        )?)
     }
 
     /// The entity names published under `kind`, sorted.
     pub fn list(&self, kind: &str) -> Result<Vec<String>, Error> {
         check_component("kind", kind)?;
-        self.names_under(&format!("{DATA_PREFIX}/{kind}/"))
+        self.names_under(&format!("{}/{kind}/", self.data_prefix))
     }
 
     /// Every kind that has a published schema, sorted.
     pub fn kinds(&self) -> Result<Vec<String>, Error> {
-        self.names_under(&format!("{SCHEMA_PREFIX}/"))
+        self.names_under(&format!("{}/", self.schema_prefix))
     }
 
     /// The commit history of an entity, tip-first along first parents. Empty
@@ -141,7 +188,7 @@ impl<'r> Store<'r> {
     pub fn history(&self, kind: &str, name: &str) -> Result<Vec<ObjectId>, Error> {
         check_component("kind", kind)?;
         check_component("name", name)?;
-        self.ref_history(&data_ref(kind, name))
+        self.ref_history(&self.data_ref(kind, name))
     }
 
     /// Delete an entity's ref. Returns whether it existed. Schema refs are not
@@ -152,7 +199,7 @@ impl<'r> Store<'r> {
         check_component("name", name)?;
         match self
             .repo
-            .try_find_reference(data_ref(kind, name).as_str())
+            .try_find_reference(self.data_ref(kind, name).as_str())
             .map_err(Error::git)?
         {
             Some(reference) => {
@@ -194,7 +241,7 @@ impl<'r> Store<'r> {
     /// provenance — who committed that schema and when — and its place in the
     /// schema's history.
     fn current_schema(&self, kind: &str) -> Result<Option<(ObjectId, SchemaDoc)>, Error> {
-        let Some(commit) = self.tip(&schema_ref(kind))? else {
+        let Some(commit) = self.tip(&self.schema_ref(kind))? else {
             return Ok(None);
         };
         let doc = self.read_schema(self.commit_tree(commit)?)?;
@@ -283,16 +330,16 @@ impl<'r> Store<'r> {
         out.sort();
         Ok(out)
     }
-}
 
-/// `refs/store/<kind>/<name>`.
-fn data_ref(kind: &str, name: &str) -> String {
-    format!("{DATA_PREFIX}/{kind}/{name}")
-}
+    /// `<data_prefix>/<kind>/<name>`.
+    fn data_ref(&self, kind: &str, name: &str) -> String {
+        format!("{}/{kind}/{name}", self.data_prefix)
+    }
 
-/// `refs/schema/<kind>`.
-fn schema_ref(kind: &str) -> String {
-    format!("{SCHEMA_PREFIX}/{kind}")
+    /// `<schema_prefix>/<kind>`.
+    fn schema_ref(&self, kind: &str) -> String {
+        format!("{}/{kind}", self.schema_prefix)
+    }
 }
 
 /// A flat, filesystem-safe lock filename for a ref: `%` and `/` are

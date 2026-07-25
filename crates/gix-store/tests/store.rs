@@ -32,9 +32,14 @@ fn store_retrieve_list_and_schema_roundtrip() {
     assert_eq!(store.schema("recipe").unwrap().as_ref(), Some(&doc));
 
     let carbonara = value!({ "title": "Carbonara", "serves": 4, "steps": ["boil", "fry"] });
-    store.store("recipe", "carbonara", &carbonara, None).unwrap();
+    store
+        .store("recipe", "carbonara", &carbonara, None)
+        .unwrap();
 
-    assert_eq!(store.retrieve("recipe", "carbonara").unwrap(), Some(carbonara));
+    assert_eq!(
+        store.retrieve("recipe", "carbonara").unwrap(),
+        Some(carbonara)
+    );
     assert_eq!(store.retrieve("recipe", "missing").unwrap(), None);
     assert_eq!(store.list("recipe").unwrap(), vec!["carbonara".to_owned()]);
     assert_eq!(store.kinds().unwrap(), vec!["recipe".to_owned()]);
@@ -70,12 +75,16 @@ fn old_versions_stay_readable_after_schema_evolves() {
     let repo = gix::open(dir.path()).unwrap();
     let store = Store::open(&repo);
 
-    store.put_schema("thing", &schema_of::<V1>().unwrap()).unwrap();
+    store
+        .put_schema("thing", &schema_of::<V1>().unwrap())
+        .unwrap();
     let v1 = value!({ "name": "old" });
     let old_commit = store.store("thing", "a", &v1, None).unwrap();
 
     // Evolve the kind: the schema ref moves forward, v1's tree stays reachable.
-    store.put_schema("thing", &schema_of::<V2>().unwrap()).unwrap();
+    store
+        .put_schema("thing", &schema_of::<V2>().unwrap())
+        .unwrap();
 
     // The old commit reads back through its own `Schema:` trailer.
     assert_eq!(store.retrieve_at(old_commit).unwrap(), v1);
@@ -109,7 +118,9 @@ fn concurrent_writers_land_a_linear_history() {
                 let store = Store::open(&repo);
                 for i in 0..WRITES {
                     let n = (t * WRITES + i) as u32;
-                    store.store("counter", "c", &value!({ "n": (n) }), None).unwrap();
+                    store
+                        .store("counter", "c", &value!({ "n": (n) }), None)
+                        .unwrap();
                 }
             });
         }
@@ -130,11 +141,125 @@ fn concurrent_writers_land_a_linear_history() {
         .iter()
         .map(|&id| {
             let v = store.retrieve_at(id).unwrap();
-            v.as_object().unwrap().get("n").unwrap().as_number().unwrap().to_u128().unwrap() as u32
+            v.as_object()
+                .unwrap()
+                .get("n")
+                .unwrap()
+                .as_number()
+                .unwrap()
+                .to_u128()
+                .unwrap() as u32
         })
         .collect();
     let expected: HashSet<u32> = (0..(THREADS * WRITES) as u32).collect();
     assert_eq!(stored, expected);
+}
+
+#[test]
+fn default_open_still_uses_refs_store_and_refs_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let repo = gix::open(dir.path()).unwrap();
+    let store = Store::open(&repo);
+
+    store
+        .put_schema("counter", &schema_of::<Counter>().unwrap())
+        .unwrap();
+    store
+        .store("counter", "c", &value!({ "n": 1 }), None)
+        .unwrap();
+
+    assert!(
+        repo.find_reference("refs/schema/counter").is_ok(),
+        "schema ref should land under the default refs/schema prefix"
+    );
+    assert!(
+        repo.find_reference("refs/store/counter/c").is_ok(),
+        "data ref should land under the default refs/store prefix"
+    );
+}
+
+#[test]
+fn custom_prefixes_roundtrip_store_retrieve_and_history() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let repo = gix::open(dir.path()).unwrap();
+    let store =
+        Store::open_with_prefixes(&repo, "refs/meta/rules", "refs/meta/rules-schema").unwrap();
+
+    store
+        .put_schema("module", &schema_of::<Counter>().unwrap())
+        .unwrap();
+    store
+        .store("module", "a", &value!({ "n": 1 }), None)
+        .unwrap();
+    store
+        .store("module", "a", &value!({ "n": 2 }), None)
+        .unwrap();
+
+    assert_eq!(
+        store.retrieve("module", "a").unwrap(),
+        Some(value!({ "n": 2 }))
+    );
+    assert_eq!(store.history("module", "a").unwrap().len(), 2);
+    assert_eq!(store.list("module").unwrap(), vec!["a".to_owned()]);
+    assert_eq!(store.kinds().unwrap(), vec!["module".to_owned()]);
+
+    // Refs actually landed under the custom namespace, not the default one.
+    assert!(repo.find_reference("refs/meta/rules-schema/module").is_ok());
+    assert!(repo.find_reference("refs/meta/rules/module/a").is_ok());
+    assert!(
+        repo.try_find_reference("refs/store/module/a")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn open_with_prefixes_rejects_invalid_prefixes() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let repo = gix::open(dir.path()).unwrap();
+
+    let err = Store::open_with_prefixes(&repo, "refs/../store", "refs/schema")
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, gix_store::Error::InvalidName { .. }),
+        "{err:?}"
+    );
+
+    let err = Store::open_with_prefixes(&repo, "/refs/store", "refs/schema")
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, gix_store::Error::InvalidName { .. }),
+        "{err:?}"
+    );
+
+    let err = Store::open_with_prefixes(&repo, "refs/store/", "refs/schema")
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, gix_store::Error::InvalidName { .. }),
+        "{err:?}"
+    );
+
+    let err = Store::open_with_prefixes(&repo, "refs//store", "refs/schema")
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, gix_store::Error::InvalidName { .. }),
+        "{err:?}"
+    );
+
+    let err = Store::open_with_prefixes(&repo, "refs/store", "")
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, gix_store::Error::InvalidName { .. }),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -144,8 +269,12 @@ fn delete_removes_an_entity() {
     let repo = gix::open(dir.path()).unwrap();
     let store = Store::open(&repo);
 
-    store.put_schema("counter", &schema_of::<Counter>().unwrap()).unwrap();
-    store.store("counter", "c", &value!({ "n": 1 }), None).unwrap();
+    store
+        .put_schema("counter", &schema_of::<Counter>().unwrap())
+        .unwrap();
+    store
+        .store("counter", "c", &value!({ "n": 1 }), None)
+        .unwrap();
 
     assert!(store.delete("counter", "c").unwrap());
     assert_eq!(store.retrieve("counter", "c").unwrap(), None);
