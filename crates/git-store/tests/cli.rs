@@ -33,7 +33,12 @@ fn run(dir: &Path, stdin: Option<&str>, args: &[&str]) -> (String, String, bool)
         .spawn()
         .unwrap();
     if let Some(input) = stdin {
-        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
     }
     let out = child.wait_with_output().unwrap();
     (
@@ -61,7 +66,10 @@ fn store_get_list_and_remove() {
     let (out, err, ok) = run(path, None, &["get", "recipe", "carbonara"]);
     assert!(ok, "get failed: {err}");
     assert!(out.contains("\"serves\": 4"), "get output: {out}");
-    assert!(out.contains("\"title\": \"Carbonara\""), "get output: {out}");
+    assert!(
+        out.contains("\"title\": \"Carbonara\""),
+        "get output: {out}"
+    );
 
     // A second version, then read the prior one via a revision folded into the
     // name (`carbonara~1`), and the same via the explicit `@` separator.
@@ -98,6 +106,61 @@ fn store_get_list_and_remove() {
     assert!(ok, "rm failed");
     let (_, _, ok) = run(path, None, &["get", "recipe", "carbonara"]);
     assert!(!ok, "get after rm should fail");
+}
+
+#[test]
+fn interactive_put_builds_value_from_prompts() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "schema put failed: {err}");
+
+    // One answer per prompt: title, serves, then the steps list (add? / value)
+    // until a `n` closes it.
+    let answers = "Carbonara\n4\ny\nboil\ny\nfry\nn\n";
+    let (_, err, ok) = run(path, Some(answers), &["put", "recipe", "carbonara", "-i"]);
+    assert!(ok, "interactive put failed: {err}");
+
+    let (out, err, ok) = run(path, None, &["get", "recipe", "carbonara"]);
+    assert!(ok, "get failed: {err}");
+    assert!(
+        out.contains("\"title\": \"Carbonara\""),
+        "get output: {out}"
+    );
+    assert!(out.contains("\"serves\": 4"), "get output: {out}");
+    assert!(out.contains("\"boil\""), "get output: {out}");
+    assert!(out.contains("\"fry\""), "get output: {out}");
+}
+
+#[test]
+fn interactive_schema_builds_kind_from_prompts() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    // Root struct with a string, a u64 (default width), and a bool field.
+    // Each field is gated by an "add a field?" confirm; a final `n` ends them.
+    let answers = "struct\ny\ntitle\nstring\ny\nserves\nuint\nu64\ny\ndone\nbool\nn\n";
+    let (_, err, ok) = run(path, Some(answers), &["schema", "put", "task", "-i"]);
+    assert!(ok, "interactive schema put failed: {err}");
+
+    let (out, _, ok) = run(path, None, &["schema", "show", "task"]);
+    assert!(ok);
+    assert!(out.contains("title: string"), "schema show: {out}");
+    assert!(out.contains("serves: uint"), "schema show: {out}");
+    assert!(out.contains("done: bool"), "schema show: {out}");
+
+    // The built schema accepts a conforming value round-trip.
+    let value = r#"{"title":"ship","serves":3,"done":true}"#;
+    let (_, err, ok) = run(path, Some(value), &["put", "task", "release"]);
+    assert!(ok, "put against built schema failed: {err}");
+    let (out, err, ok) = run(path, None, &["get", "task", "release"]);
+    assert!(ok, "get failed: {err}");
+    assert!(out.contains("\"serves\": 3"), "get output: {out}");
+    assert!(out.contains("\"done\": true"), "get output: {out}");
 }
 
 #[test]

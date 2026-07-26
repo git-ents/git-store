@@ -3,10 +3,13 @@
 //! [`Store`] underneath is oid-in/oid-out.
 //!
 //! Bare `git store` lists kinds. Writing is an explicit `git store put <kind>
-//! [<name>]`, taking content from `-F <file>`, stdin, or `$EDITOR`; reading is
-//! `git store get <kind> <name>`, where `<name>` may carry a git revision
+//! [<name>]`, taking content from `-F <file>`, stdin, `$EDITOR`, or — with
+//! `-i` — an interactive prompt walking the kind's schema; reading is `git
+//! store get <kind> <name>`, where `<name>` may carry a git revision
 //! (`<name>~1`, `<name>@{date}`) to read a past version. Everything else —
 //! `list`, `log`, `rm`, and the `schema` subgroup — mirrors git porcelain.
+
+mod interactive;
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
@@ -18,7 +21,11 @@ use facet_value::Value;
 use gix_store::{ObjectId, Store};
 
 #[derive(Parser)]
-#[command(name = "git-store", about = "Store anything in Git as a real tree", version)]
+#[command(
+    name = "git-store",
+    about = "Store anything in Git as a real tree",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -64,15 +71,24 @@ struct PutArgs {
     /// Edit the content in `$VISUAL`/`$EDITOR` before storing.
     #[arg(short = 'e', long = "edit")]
     edit: bool,
+    /// Build the value by prompting for each field the schema names, instead
+    /// of taking JSON from a file, stdin, or the editor.
+    #[arg(short = 'i', long = "interactive", conflicts_with_all = ["file", "edit"])]
+    interactive: bool,
 }
 
 #[derive(Subcommand)]
 enum SchemaCommand {
-    /// Define or evolve a kind from a JSON schema (`-F <file>` or stdin).
+    /// Define or evolve a kind from a JSON schema (`-F <file>`, stdin, or an
+    /// interactive `-i` prompt that walks the type grammar).
     Put {
         kind: String,
         #[arg(short = 'F', long = "file", value_name = "FILE")]
         file: Option<PathBuf>,
+        /// Build the schema by prompting for each type, instead of reading
+        /// JSON from a file or stdin.
+        #[arg(short = 'i', long = "interactive", conflicts_with = "file")]
+        interactive: bool,
     },
     /// Print a kind's current schema as JSON.
     Get { kind: String },
@@ -136,9 +152,17 @@ fn main() -> Result<()> {
             }
         }
         Some(Command::Schema { command }) => match command {
-            SchemaCommand::Put { kind, file } => {
-                let doc: SchemaDoc = facet_json::from_str(&read_source(file.as_ref())?)
-                    .map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))?;
+            SchemaCommand::Put {
+                kind,
+                file,
+                interactive,
+            } => {
+                let doc = if interactive {
+                    interactive::build_schema()?
+                } else {
+                    facet_json::from_str(&read_source(file.as_ref())?)
+                        .map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))?
+                };
                 println!("{}", store.put_schema(&kind, &doc)?);
             }
             SchemaCommand::Get { kind } => {
@@ -174,27 +198,31 @@ fn put(store: &Store, args: PutArgs) -> Result<()> {
         file,
         message,
         edit,
+        interactive,
     } = args;
     let name = name.as_deref().unwrap_or(&kind);
 
-    // Content source, in order: an explicit `-F <file>`, piped stdin, or —
-    // at a terminal with neither — the editor. This mirrors `git notes add`.
-    let base = if let Some(path) = &file {
-        Some(read_file(path)?)
-    } else if !std::io::stdin().is_terminal() {
-        Some(read_stdin()?)
+    let value = if interactive {
+        interactive::value_for_kind(store, &kind)?
     } else {
-        None
+        // Content source, in order: an explicit `-F <file>`, piped stdin, or —
+        // at a terminal with neither — the editor. This mirrors `git notes add`.
+        let base = if let Some(path) = &file {
+            Some(read_file(path)?)
+        } else if !std::io::stdin().is_terminal() {
+            Some(read_stdin()?)
+        } else {
+            None
+        };
+
+        let json = match base {
+            Some(content) if !edit => content,
+            Some(content) => edit_in_editor(&content)?,
+            None => edit_in_editor(&schema_skeleton(store, &kind)?)?,
+        };
+        facet_json::from_str(&json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?
     };
 
-    let json = match base {
-        Some(content) if !edit => content,
-        Some(content) => edit_in_editor(&content)?,
-        None => edit_in_editor(&schema_skeleton(store, &kind)?)?,
-    };
-
-    let value: Value =
-        facet_json::from_str(&json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?;
     println!("{}", store.store(&kind, name, &value, message.as_deref())?);
     Ok(())
 }
@@ -391,7 +419,7 @@ fn print_type(kind: &str, doc: &SchemaDoc) {
 /// Whether a schema node is a scalar — the same classification that decides
 /// map layout (name-keyed object vs. `{ k, v }` pair array) in
 /// `serialize_value_with_schema`.
-fn is_scalar_schema(schema: &Schema) -> bool {
+pub(crate) fn is_scalar_schema(schema: &Schema) -> bool {
     matches!(
         schema,
         Schema::Bool
@@ -415,7 +443,7 @@ fn is_scalar_schema(schema: &Schema) -> bool {
 }
 
 /// Follow a `Ref` to the definition it names; any other node is returned as-is.
-fn resolve<'d>(schema: &'d Schema, doc: &'d SchemaDoc) -> &'d Schema {
+pub(crate) fn resolve<'d>(schema: &'d Schema, doc: &'d SchemaDoc) -> &'d Schema {
     match schema {
         Schema::Ref(name) => doc.defs.get(name).map_or(schema, |s| resolve(s, doc)),
         other => other,

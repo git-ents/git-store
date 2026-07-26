@@ -15,6 +15,7 @@ facet-value = "0.50.0-rc.5"
 facet-json = "0.50.0-rc.5"
 gix = { version = "0.85.0", default-features = false, features = ["sha1", "zlib-rs", "interrupt", "revision"] }
 clap = { version = "4", features = ["derive"] }
+dialoguer = { version = "0.12", default-features = false }
 anyhow = "1"
 
 [dev-dependencies]

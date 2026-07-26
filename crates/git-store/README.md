@@ -81,13 +81,14 @@ git store put <kind> [<name>]               # store an entity; name defaults to 
     -F, --file <FILE>                       #   content from a file (else stdin, else $EDITOR)
     -m, --message <MSG>                     #   commit message for this version
     -e, --edit                              #   edit the content in $VISUAL/$EDITOR first
+    -i, --interactive                       #   build the value by prompting for each field
 git store get  <kind> <name>                # read back as JSON; <name> may carry a
                                             #   revision to read a past version:
                                             #   <name>~N, <name>@{date}, <name>@<oid>
 git store list [<kind>]   (alias: ls)       # kinds, or entity names within a kind
 git store log  <kind> <name>                # oid + date per version
 git store rm   <kind> <name>                # delete an entity
-git store schema put  <kind> [-F <file>]    # define or evolve a kind (else stdin)
+git store schema put  <kind> [-F <file>]    # define or evolve a kind (else stdin, or -i to prompt)
 git store schema get  <kind>                # the schema as JSON
 git store schema show [<kind>]              # field layout, human-readable (all kinds when omitted)
 git store schema list     (alias: ls)       # kinds that have a published schema
@@ -97,6 +98,13 @@ git store schema log  <kind>                # schema evolution history
 Writing is always an explicit `put`, and reads default to listing — the same
 shape as `git remote`/`git branch`. At a terminal with no `-F` and nothing
 piped, `put` opens `$EDITOR` seeded from the schema, like `git notes add`.
+
+`-i` skips the editor and walks you through the value one field at a time —
+arrow-key menus for enum variants and schema types, yes/no for options and list
+items, text and number inputs for leaves (a rich terminal UI at a tty, a plain
+one-answer-per-line reader when stdin is piped, so it stays scriptable). For
+`schema put`, the same `-i` walks the type grammar to build a schema without
+hand-written JSON.
 
 ## Authoring a schema
 

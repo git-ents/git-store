@@ -47,7 +47,9 @@ enum Priority {
 }
 
 fn main() {
-    let kind = std::env::args().nth(1).unwrap_or_else(|| "recipe".to_owned());
+    let kind = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "recipe".to_owned());
     let doc = match schema_for(&kind) {
         Ok(doc) => doc,
         Err(err) => {
