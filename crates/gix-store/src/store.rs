@@ -145,6 +145,44 @@ impl<'r> Store<'r> {
         self.commit_forward(&self.data_ref(kind, name), &msg, tree)
     }
 
+    pub fn store_anonymous(
+        &self,
+        kind: &str,
+        value: &Value,
+        message: Option<&str>,
+    ) -> Result<(String, ObjectId), Error> {
+        check_component("kind", kind)?;
+
+        let (schema_commit, doc) = self.current_schema(kind)?.ok_or_else(|| Error::NoSchema {
+            kind: kind.to_owned(),
+        })?;
+
+        let tree = serialize_value_with_schema(value, &doc, &self.repo.objects)?;
+        let default_summary = format!("store {kind}/<auto>");
+        let summary = message.unwrap_or(&default_summary);
+        let msg = format!("{summary}\n\nSchema: {schema_commit}\n");
+
+        // Write the commit object first, without touching any ref, so its hash
+        // is known before the name it determines is.
+        let commit_id = self
+            .repo
+            .new_commit(&msg, tree, None::<ObjectId>)
+            .map_err(Error::git)?
+            .id;
+
+        let name = commit_id.to_string()[..8].to_owned();
+        self.repo
+            .reference(
+                self.data_ref(kind, &name),
+                commit_id,
+                gix::refs::transaction::PreviousValue::MustNotExist,
+                "store anonymous",
+            )
+            .map_err(Error::git)?;
+
+        Ok((name, commit_id))
+    }
+
     /// The current value at `<data_prefix>/<kind>/<name>`, or `None` when absent.
     pub fn retrieve(&self, kind: &str, name: &str) -> Result<Option<Value>, Error> {
         check_component("kind", kind)?;
