@@ -2,9 +2,8 @@
 `docs/specification.adoc` is a careful normative document with 25-odd
 requirement IDs, and every one of them is about `facet-git-tree`. The layer
 that defines what a repository written by this project actually looks like -
-ref namespaces, the kind concept, the `Schema:` trailer, commit-forward
-semantics, locking - has no specification at all, only doc comments and a
-README.
+ref namespaces, the kind concept, schema binding, commit-forward semantics,
+locking - has no specification at all, only doc comments and a README.
 
 **Where**
 `docs/specification.adoc` (sections Compatibility, Serialization,
@@ -26,11 +25,14 @@ never writes it down, so the things a second implementation would need to agree
 on are undocumented:
 
 - the ref layout `<prefix>/<kind>/<name>` and `<prefix>/<kind>`
-- that a data commits schema binding is the *last* `Schema:` trailer line, and
-  that it names a schema **commit** rather than a schema **tree**
-  (`store.rs:275-287` explains why in a doc comment; nothing normative says so)
+- that a data commit's schema binding is a **subtree** (`schema/`, alongside
+  `value/`) inside the data commit's own tree (per `0b4a9b27`), with the
+  `Schema:` trailer kept only as a human-readable provenance label naming the
+  schema commit, not as the binding mechanism itself (`store.rs:275-287`
+  explains why in a doc comment; nothing normative says so)
 - that entity history is a first-parent walk
-- what a reader should do when the trailer is absent or its object is missing
+- what a reader should do when the `schema/` subtree is absent or its object is
+  missing (`Error::SchemaObjectMissing`)
 - whether a schema may be replaced incompatibly, and what that means for
   existing entities
 
@@ -50,9 +52,10 @@ question the design most invites.
 
 **Options**
 - Option A - add a `=== Storage` section to `docs/specification.adoc` with
-  requirement IDs for the ref layout, the schema binding, history semantics,
-  and the missing-schema behaviour. Same style as the existing sections; the
-  content already exists as doc comments and mostly needs promoting.
+  requirement IDs for the ref layout, the subtree schema binding, the
+  provenance trailer, history semantics, and the missing-schema behaviour. Same
+  style as the existing sections; the content already exists as doc comments
+  and mostly needs promoting.
 - Option B - a separate `docs/storage.adoc`, keeping `specification.adoc` as
   the format spec. Cleaner separation, matching the crate boundary. Trade-off:
   two documents to keep in sync, and readers have to find the second one.
@@ -62,8 +65,10 @@ question the design most invites.
 
 **Recommendation**
 Option A now for the ref layout and schema binding at minimum - they are the
-load-bearing conventions and they are currently private constants. Option C is
-worth considering given the family framing; "these four tools share one ref
-convention, here it is" is a stronger story than four tools that happen to look
-similar. High confidence that the gap matters; medium confidence on where the
-text should live.
+load-bearing conventions and they are currently private constants. This is
+blocked by `0b4a9b27` (Wave 1): writing the normative section before the
+binding mechanism changes from trailer to subtree would just mean rewriting it
+immediately after. Option C is worth considering given the family framing;
+"these four tools share one ref convention, here it is" is a stronger story
+than four tools that happen to look similar. High confidence that the gap
+matters; medium confidence on where the text should live.
