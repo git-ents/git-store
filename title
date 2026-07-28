@@ -1,0 +1,1 @@
+The value cargo feature gates correctness, not dependencies: the default build can only read lossily
