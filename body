@@ -11,10 +11,13 @@ supports have no command, and all output except `get` is untyped text.
 
 *No way to ask which schema a value uses.* This is the systems most
 distinctive property - every commit pins its schema - and it is unreachable
-from the CLI. `Store::retrieve_at` reads the `Schema:` trailer
-(`crates/gix-store/src/store.rs:204`) and throws the schema commit away. A user
-who wants to know why `carbonara` has a numeric `serves` while `schema show`
-says `string` has to run `git log --format=%B` and read a trailer by hand. A
+from the CLI. Today `Store::retrieve_at` reads the `Schema:` trailer
+(`crates/gix-store/src/store.rs:204`) and throws the schema commit away. Once
+`0b4a9b27` lands and schema binding moves from trailer to subtree, this
+becomes reading the `schema/` subtree of the data commit instead of scraping a
+trailer - a new `gix-store` accessor, not a text parse. Either way, a user who
+wants to know why `carbonara` has a numeric `serves` while `schema show` says
+`string` has to run `git log --format=%B` and read a trailer by hand today. A
 `git store schema of <kind> <name> [rev]` would surface the best idea in the
 project.
 
@@ -46,7 +49,10 @@ script cannot distinguish "kind has no entities" from "kind does not exist".
   <kind> <name> [revA] [revB]`, and a global `--format=text|json`. Roughly one
   new subcommand each and a serializer switch; `diff` can be a value-level
   comparison of two decoded `Value`s, which is straightforward and reads far
-  better than the tree diff.
+  better than the tree diff. `schema of` needs a new `gix-store` accessor
+  either way - reading a trailer today, reading the `schema/` subtree once
+  `0b4a9b27` lands - since `retrieve_at` currently discards the schema
+  entirely.
 - Option B - add only `--format json` and lean on `git` itself for the rest
   (`git log --format=%B` for the trailer, `git diff` for changes). Trade-off:
   ideologically consistent with "git is the query language", but per the
@@ -59,4 +65,7 @@ Option A, high confidence on the value of `schema of` in particular - it is a
 handful of lines, it makes an invisible design decision visible, and it is the
 command that turns "every commit pins its schema" from a bullet point into
 something you can type on stage. `--format json` is table stakes for a tool
-that expects to be scripted.
+that expects to be scripted. This item is blocked by `0b4a9b27` (Wave 1): the
+`schema of` accessor should be built against the subtree-binding design so it
+is not written once against the trailer and rewritten once the binding
+changes underneath it.
