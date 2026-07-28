@@ -1,0 +1,1 @@
+Unit-like values are invisible to every recursive Git tool, which breaks the git-is-the-query-language pitch
