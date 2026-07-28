@@ -38,7 +38,10 @@ fn dump(oid: &ObjectId, store: &ObjectStore, depth: usize) {
             }
         }
         Some(GitObject::Blob(blob)) => {
-            println!("{pad}= {}", String::from_utf8_lossy(&blob.data));
+            // Every leaf blob carries a mandatory trailing newline; strip the
+            // one the encoder added so the dump stays one line per value.
+            let text = String::from_utf8_lossy(&blob.data);
+            println!("{pad}= {}", text.strip_suffix('\n').unwrap_or(&text));
         }
         _ => println!("{pad}<missing>"),
     }

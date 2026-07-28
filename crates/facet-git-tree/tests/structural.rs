@@ -7,7 +7,7 @@ use facet::Facet;
 use facet_git_tree::serialize;
 
 mod common;
-use common::{Config, HELLO_BLOB_OID, Point, WithVec};
+use common::{Config, HELLO_LEAF_BLOB_OID, Point, WithVec};
 
 // --- structural.comparison.equality ---
 
@@ -101,10 +101,12 @@ fn vec_order_matters() {
 
 /// A leaf blob's object ID equals the SHA-1 git would compute for the same blob.
 ///
-/// The `name` field of this `Config` serializes to the blob `b"hello"`. Git hashes
-/// blobs as `sha1("blob 5\0hello")`; [`HELLO_BLOB_OID`] is reproducible with
-/// `printf 'hello' | git hash-object --stdin`. (Tree-level git compatibility is
-/// pinned by `object_store::tree_oid_matches_git`.)
+/// The `name` field of this `Config` serializes to the blob `b"hello\n"` — a
+/// leaf blob's mandatory trailing newline included, per
+/// `serialization.design.leaves.encoding`. Git hashes blobs as
+/// `sha1("blob 6\0hello\n")`; [`HELLO_LEAF_BLOB_OID`] is reproducible with
+/// `printf 'hello\n' | git hash-object --stdin`. (Tree-level git compatibility
+/// is pinned by `object_store::tree_oid_matches_git`.)
 #[test]
 fn leaf_blob_id_matches_git() {
     let (root_id, store) = serialize(&Config {
@@ -121,7 +123,7 @@ fn leaf_blob_id_matches_git() {
 
     assert_eq!(
         name_entry.oid.as_bytes(),
-        HELLO_BLOB_OID.as_slice(),
-        "leaf blob id must match git's SHA-1 of `blob 5\\0hello`"
+        HELLO_LEAF_BLOB_OID.as_slice(),
+        "leaf blob id must match git's SHA-1 of `blob 6\\0hello\\n`"
     );
 }

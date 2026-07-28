@@ -153,7 +153,30 @@ pub(crate) fn find_blob_bytes<F: Find + ?Sized>(
     if data.kind != Kind::Blob {
         return Err(DeserializeError::NotABlob(*id));
     }
-    Ok(data.data.to_owned())
+    strip_leaf_newline(id, data.data.to_owned())
+}
+
+/// Strip the mandatory single trailing `\n` from a leaf blob's raw bytes.
+///
+/// The read-side counterpart to [`crate::ser::write_leaf_blob`]: every leaf
+/// blob carries exactly one trailing newline, so its absence marks the object
+/// as foreign or corrupt — reported as [`DeserializeError::MissingLeafNewline`]
+/// rather than silently accepted as though the byte were merely optional (the
+/// rule is "exactly one, always present", not "at most one").
+///
+/// Shared by every site that reads a leaf blob's content: [`find_blob_bytes`]
+/// (scalars, byte sequences, `Bytes`) and the two sites that must branch on
+/// the fetched object's kind before they know they are looking at a blob at
+/// all — [`extract_enum_entry`]'s unit-variant name blob and
+/// [`deser_dynamic`]'s `String`/`Bytes` decode.
+pub(crate) fn strip_leaf_newline(
+    id: &ObjectId,
+    mut bytes: Vec<u8>,
+) -> Result<Vec<u8>, DeserializeError> {
+    if bytes.pop() != Some(b'\n') {
+        return Err(DeserializeError::MissingLeafNewline(*id));
+    }
+    Ok(bytes)
 }
 
 /// Sort sequence entries into ascending ordinal order, rejecting any entry whose
@@ -292,9 +315,9 @@ pub(crate) fn extract_enum_entry<F: Find + ?Sized>(
     let mut buf = Vec::new();
     let data = find_object(oid, &mut buf, store)?;
     if data.kind == Kind::Blob {
-        let name =
-            std::str::from_utf8(data.data).map_err(|_| DeserializeError::NonUtf8Blob(*oid))?;
-        return Ok((name.to_owned(), None));
+        let bytes = strip_leaf_newline(oid, data.data.to_owned())?;
+        let name = String::from_utf8(bytes).map_err(|_| DeserializeError::NonUtf8Blob(*oid))?;
+        return Ok((name, None));
     }
     let entries = tree_entries_from_data(&data, oid)?;
     if entries.len() != 1 {
@@ -646,7 +669,10 @@ fn deser_into<'facet, F: Find + ?Sized>(
 /// The encoding writes no type markers, so the value's shape is recovered by
 /// a normative — and documented lossy — heuristic:
 ///
-/// - a blob is a String when its bytes are valid UTF-8, otherwise Bytes;
+/// - a blob's mandatory trailing `\n` ([`strip_leaf_newline`]) is stripped, and
+///   the remaining bytes are a String when valid UTF-8, otherwise Bytes; a
+///   blob missing that trailing byte is a malformed object, reported as
+///   [`DeserializeError::MissingLeafNewline`];
 /// - a non-empty tree whose entry names are all decimal ordinals is an Array;
 /// - any other tree — including the presence-marker tree (`crate::marker`)
 ///   written for `Null` and an empty `Array`/`Object` — is an Object.
@@ -674,9 +700,11 @@ fn deser_dynamic<'facet, F: Find + ?Sized>(
     let mut buf = Vec::new();
     let data = find_object(oid, &mut buf, store)?;
 
-    // Blob → String or Bytes, decided by UTF-8 validity.
+    // Blob → String or Bytes, decided by UTF-8 validity (of the content with
+    // its mandatory trailing newline already stripped).
     if data.kind == Kind::Blob {
-        return match String::from_utf8(data.data.to_owned()) {
+        let bytes = strip_leaf_newline(oid, data.data.to_owned())?;
+        return match String::from_utf8(bytes) {
             Ok(s) => partial.set::<String>(s).map_err(reflect),
             Err(e) => partial.set::<Vec<u8>>(e.into_bytes()).map_err(reflect),
         };

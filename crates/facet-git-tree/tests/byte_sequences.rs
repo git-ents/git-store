@@ -58,7 +58,8 @@ fn byte_array_roundtrip() {
 }
 
 /// A `Vec<u8>` field is stored as a single blob, not a per-byte tree, and that
-/// blob holds the bytes verbatim.
+/// blob holds the bytes verbatim followed by the mandatory trailing newline
+/// every leaf blob carries (`serialization.design.leaves.encoding`).
 #[test]
 fn vec_u8_is_a_single_blob() {
     let bytes = b"\x00\x01\x02hello\xff".to_vec();
@@ -68,7 +69,9 @@ fn vec_u8_is_a_single_blob() {
     .expect("serialize");
     let (kind, oid) = common::get_tree_entry_mode(&store, &root, "data");
     assert_eq!(kind, EntryKind::Blob, "byte sequence must be a blob");
-    assert_eq!(store.get_blob(&oid).expect("blob"), bytes);
+    let mut expected = bytes;
+    expected.push(b'\n');
+    assert_eq!(store.get_blob(&oid).expect("blob"), expected);
 }
 
 /// Two byte-identical buffers deduplicate to the same blob object.

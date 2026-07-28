@@ -26,12 +26,12 @@ use core::fmt::Write as _;
 
 use facet::Peek;
 use facet_value::{VArray, VNumber, Value};
-use gix_object::{Kind, Write};
+use gix_object::Write;
 
 use crate::de::MAX_DEPTH;
 use crate::error::{SchemaWriteError, SerializeError};
 use crate::schema::{FieldSchema, Schema, SchemaDoc, VariantKind};
-use crate::ser::{float_text, serialize_node};
+use crate::ser::{float_text, serialize_node, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
 
 /// Serialize `value` into `store` as the tree `doc` describes, returning the
@@ -628,9 +628,7 @@ fn blob<W: Write + ?Sized>(
     store: &W,
     bytes: &[u8],
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
-    let oid = store
-        .write_buf(Kind::Blob, bytes)
-        .map_err(SerializeError::Backend)?;
+    let oid = write_leaf_blob(store, bytes)?;
     Ok((oid, EntryKind::Blob))
 }
 

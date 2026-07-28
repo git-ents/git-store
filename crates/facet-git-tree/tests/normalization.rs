@@ -99,7 +99,7 @@ fn negative_zero_structural_equality() {
 fn f64_nan_normalized_to_string_nan() {
     let bytes = serialize_scalar_f64(f64::NAN);
     assert_eq!(
-        bytes, b"nan",
+        bytes, b"nan\n",
         "f64 NaN must serialize to the unquoted string `nan`"
     );
 }
@@ -110,7 +110,7 @@ fn f64_nan_normalized_to_string_nan() {
 fn f32_nan_normalized_to_string_nan() {
     let bytes = serialize_scalar_f32(f32::NAN);
     assert_eq!(
-        bytes, b"nan",
+        bytes, b"nan\n",
         "f32 NaN must serialize to the unquoted string `nan`"
     );
 }
@@ -131,5 +131,5 @@ fn different_nan_payloads_normalize_identically() {
         bytes1, bytes2,
         "all NaN payloads must normalize to the same representation"
     );
-    assert_eq!(bytes1, b"nan");
+    assert_eq!(bytes1, b"nan\n");
 }

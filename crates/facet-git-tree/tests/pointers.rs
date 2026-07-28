@@ -96,7 +96,9 @@ fn arc_byte_slice_is_a_single_blob() {
     .expect("serialize");
     let (kind, oid) = common::get_tree_entry_mode(&store, &root, "blob");
     assert_eq!(kind, EntryKind::Blob);
-    assert_eq!(store.get_blob(&oid).expect("blob"), bytes);
+    let mut expected = bytes.to_vec();
+    expected.push(b'\n');
+    assert_eq!(store.get_blob(&oid).expect("blob"), expected);
 }
 
 /// A non-`u8` slice pointee (`Arc<[u32]>`) is a tree, and roundtrips with order

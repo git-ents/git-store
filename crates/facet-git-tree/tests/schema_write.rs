@@ -415,8 +415,11 @@ fn priority_field_change_is_a_visible_blob_diff() {
         low_entry.oid, high_entry.oid,
         "the `priority` entry's oid must differ — this is what makes `git diff` non-empty"
     );
-    assert_eq!(low_store.get_blob(&low_entry.oid).expect("blob"), b"Low");
-    assert_eq!(high_store.get_blob(&high_entry.oid).expect("blob"), b"High");
+    assert_eq!(low_store.get_blob(&low_entry.oid).expect("blob"), b"Low\n");
+    assert_eq!(
+        high_store.get_blob(&high_entry.oid).expect("blob"),
+        b"High\n"
+    );
 }
 
 /// An empty collection (here, an empty `tags: List<String>`) writes the

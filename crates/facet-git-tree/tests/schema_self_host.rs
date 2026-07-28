@@ -58,11 +58,16 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 /// blob holding its name instead of a tree wrapping an empty tree, so
 /// `Person`'s schema — three unit-variant scalar fields — reproduces to a
 /// different, but still deterministic, root id.
+///
+/// Updated again for the leaf trailing-newline rule (issue 5b39f084): every
+/// leaf blob, including a unit variant's name blob, now carries a mandatory
+/// trailing `\n`, which changes every blob (and therefore every containing
+/// tree) in the document.
 #[test]
 fn person_schema_golden_oid() -> anyhow::Result<()> {
     let doc = schema_of::<Person>()?;
     let (root, _store) = serialize(&doc)?;
-    assert_eq!(root.to_string(), "867c324f4eaa5f10a6ec272f6f2e95250933b21a");
+    assert_eq!(root.to_string(), "8dc7a659cc4e3976fd90968c6f72f01889280729");
     Ok(())
 }
 
@@ -124,11 +129,11 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
     );
     assert_eq!(
         before_store.get_blob(&before_schema.oid).expect("blob"),
-        b"U32"
+        b"U32\n"
     );
     assert_eq!(
         after_store.get_blob(&after_schema.oid).expect("blob"),
-        b"String"
+        b"String\n"
     );
     Ok(())
 }

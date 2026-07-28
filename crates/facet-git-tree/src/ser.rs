@@ -119,9 +119,7 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
     // Scalar leaf → blob
     if matches!(shape.def, Def::Scalar) {
         let bytes = scalar_bytes(peek)?;
-        let oid = store
-            .write_buf(Kind::Blob, &bytes)
-            .map_err(SerializeError::Backend)?;
+        let oid = write_leaf_blob(store, &bytes)?;
         return Ok((oid, EntryKind::Blob));
     }
 
@@ -134,9 +132,7 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
         for item in seq.iter() {
             bytes.push(*item.get::<u8>().map_err(reflect)?);
         }
-        let oid = store
-            .write_buf(Kind::Blob, &bytes)
-            .map_err(SerializeError::Backend)?;
+        let oid = write_leaf_blob(store, &bytes)?;
         return Ok((oid, EntryKind::Blob));
     }
 
@@ -296,9 +292,7 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
         let variant_name = pe.variant_name_active().map_err(reflect)?;
 
         if variant.data.fields.is_empty() {
-            let oid = store
-                .write_buf(Kind::Blob, variant_name.as_bytes())
-                .map_err(SerializeError::Backend)?;
+            let oid = write_leaf_blob(store, variant_name.as_bytes())?;
             return Ok((oid, EntryKind::Blob));
         }
 
@@ -365,12 +359,13 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
 /// the dynamic value can be rendered at all*: strings are their UTF-8 bytes,
 /// bytes a raw blob, booleans and numbers their textual form, arrays
 /// ordinal-keyed trees, and objects name-keyed trees (each key validated by
-/// [`check_key`]). Null is the [`crate::marker`] presence-marker tree — an
-/// empty blob would collide with `""` and empty bytes, which are far more
-/// common than null, and a literal empty tree would be invisible to
-/// `ls-tree -r`/`diff`, exactly the problem the marker exists to avoid. An
-/// empty `Array` or `Object` writes the same marker tree, for the same
-/// reason.
+/// [`check_key`]). Null is the [`crate::marker`] presence-marker tree,
+/// because a literal empty tree would be invisible to `ls-tree -r`/`diff` —
+/// exactly the problem the marker exists to avoid. An empty `Array` or
+/// `Object` writes the same marker tree, for the same reason. (The marker
+/// once also avoided a collision with `""` and empty bytes; now that every
+/// leaf blob carries a mandatory trailing newline the empty blob is the
+/// marker's alone, so only the invisibility argument still applies.)
 ///
 /// The generic vtable cannot render every kind exactly: integers beyond 64
 /// bits, QNames, and UUIDs need the `value`-feature downcast to
@@ -388,9 +383,7 @@ fn serialize_dynamic<W: Write + ?Sized>(
     let dv = peek.into_dynamic_value().map_err(reflect)?;
 
     let blob = |bytes: &[u8]| -> Result<(ObjectId, EntryKind), SerializeError> {
-        let oid = store
-            .write_buf(Kind::Blob, bytes)
-            .map_err(SerializeError::Backend)?;
+        let oid = write_leaf_blob(store, bytes)?;
         Ok((oid, EntryKind::Blob))
     };
     let tree = |entries: Vec<TreeEntry>| -> Result<(ObjectId, EntryKind), SerializeError> {
@@ -707,6 +700,33 @@ pub(crate) fn float_text<F: FloatScalar>(v: F) -> Vec<u8> {
     }
     let v = if v == F::ZERO { F::ZERO } else { v };
     v.to_string().into_bytes()
+}
+
+/// Write `content` as a leaf blob, with exactly one trailing `\n` appended.
+///
+/// Every leaf blob — a scalar ([`scalar_bytes`]), a byte sequence, a unit
+/// enum variant's name blob, and their dynamic/schema-directed counterparts —
+/// goes through this function, per `serialization.design.leaves.encoding`.
+/// The rule is "exactly one, always present", not "at most one": the byte is
+/// appended unconditionally, even when `content` already ends in `\n`, which
+/// is what makes the transform exactly invertible by
+/// [`crate::de::strip_leaf_newline`] on read. Without the unconditional
+/// append, `"x"` and `"x\n"` would collide on the same blob and the
+/// transform would not be lossless.
+///
+/// The [presence marker](crate::marker) is a different, structural object —
+/// not a value leaf — and MUST NOT be routed through this function; it stays
+/// the literal empty blob.
+pub(crate) fn write_leaf_blob<W: Write + ?Sized>(
+    store: &W,
+    content: &[u8],
+) -> Result<ObjectId, SerializeError> {
+    let mut bytes = Vec::with_capacity(content.len() + 1);
+    bytes.extend_from_slice(content);
+    bytes.push(b'\n');
+    store
+        .write_buf(Kind::Blob, &bytes)
+        .map_err(SerializeError::Backend)
 }
 
 fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, SerializeError> {

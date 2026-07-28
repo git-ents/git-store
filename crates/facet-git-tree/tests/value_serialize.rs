@@ -11,7 +11,7 @@ use facet_git_tree::{EntryKind, SerializeError, serialize};
 use facet_value::{VDateTime, VObject, Value, value};
 
 mod common;
-use common::{HELLO_BLOB_OID, WithValue, find_entry, tree_entries};
+use common::{HELLO_LEAF_BLOB_OID, WithValue, find_entry, tree_entries};
 
 // --- scalar kinds ---
 
@@ -22,8 +22,8 @@ fn string_blob_matches_typed_string() -> anyhow::Result<()> {
     let (dyn_root, dyn_store) = serialize(&Value::from("hello"))?;
     let (typed_root, _) = serialize(&"hello".to_string())?;
     assert_eq!(dyn_root, typed_root);
-    assert_eq!(dyn_root.as_bytes(), HELLO_BLOB_OID.as_slice());
-    assert_eq!(dyn_store.get_blob(&dyn_root).expect("blob"), b"hello");
+    assert_eq!(dyn_root.as_bytes(), HELLO_LEAF_BLOB_OID.as_slice());
+    assert_eq!(dyn_store.get_blob(&dyn_root).expect("blob"), b"hello\n");
     Ok(())
 }
 
@@ -31,7 +31,7 @@ fn string_blob_matches_typed_string() -> anyhow::Result<()> {
 #[test]
 fn bool_is_textual_blob() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::from(true))?;
-    assert_eq!(store.get_blob(&root).expect("blob"), b"true");
+    assert_eq!(store.get_blob(&root).expect("blob"), b"true\n");
     Ok(())
 }
 
@@ -40,24 +40,25 @@ fn bool_is_textual_blob() -> anyhow::Result<()> {
 #[test]
 fn numbers_are_decimal_blobs() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::from(42i64))?;
-    assert_eq!(store.get_blob(&root).expect("blob"), b"42");
+    assert_eq!(store.get_blob(&root).expect("blob"), b"42\n");
 
     let (root, store) = serialize(&Value::from(-7i64))?;
-    assert_eq!(store.get_blob(&root).expect("blob"), b"-7");
+    assert_eq!(store.get_blob(&root).expect("blob"), b"-7\n");
 
     let (root, store) = serialize(&Value::from(u64::MAX))?;
     assert_eq!(
         store.get_blob(&root).expect("blob"),
-        b"18446744073709551615"
+        b"18446744073709551615\n"
     );
     Ok(())
 }
 
 /// Null is the presence-marker tree (`crate::marker`): a single blob entry
-/// named `"_"`, not a literal empty tree. An empty blob would collide with
-/// `""` and empty bytes (far more common than null), and a literal empty
-/// tree would be invisible to `git ls-tree -r`/`diff` — exactly the
-/// invisibility the marker exists to avoid.
+/// named `"_"`, not a literal empty tree, which would be invisible to
+/// `git ls-tree -r`/`diff` — exactly the invisibility the marker exists to
+/// avoid. The empty blob is now the marker's alone: every leaf blob carries
+/// a mandatory trailing newline, so `""` and empty bytes can no longer
+/// collide with it.
 #[test]
 fn null_is_marker_tree() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::NULL)?;
@@ -89,7 +90,7 @@ fn array_is_ordinal_tree() -> anyhow::Result<()> {
         .collect();
     assert_eq!(names, ["0000", "0001", "0002"]);
     let first = find_entry(&store, &root, "0000");
-    assert_eq!(store.get_blob(&first.oid).expect("blob"), b"a");
+    assert_eq!(store.get_blob(&first.oid).expect("blob"), b"a\n");
     Ok(())
 }
 
@@ -107,7 +108,7 @@ fn object_is_sorted_name_keyed_tree() -> anyhow::Result<()> {
         .collect();
     assert_eq!(names, ["alpha", "zeta"]);
     let alpha = find_entry(&store, &root, "alpha");
-    assert_eq!(store.get_blob(&alpha.oid).expect("blob"), b"a");
+    assert_eq!(store.get_blob(&alpha.oid).expect("blob"), b"a\n");
     Ok(())
 }
 
@@ -149,7 +150,7 @@ fn value_nested_in_typed_struct() -> anyhow::Result<()> {
     let (standalone_root, _) = serialize(&meta)?;
     assert_eq!(entry.oid, standalone_root);
     let k = find_entry(&store, &entry.oid, "k");
-    assert_eq!(store.get_blob(&k.oid).expect("blob"), b"v");
+    assert_eq!(store.get_blob(&k.oid).expect("blob"), b"v\n");
     Ok(())
 }
 
@@ -200,7 +201,7 @@ fn avogadro_float_matches_typed_f64() -> anyhow::Result<()> {
 fn datetime_negative_year_is_zero_padded_by_magnitude() -> anyhow::Result<()> {
     let dt = VDateTime::new_local_date(-5, 6, 15);
     let (root, store) = serialize(&Value::from(dt))?;
-    assert_eq!(store.get_blob(&root).expect("blob"), b"-0005-06-15");
+    assert_eq!(store.get_blob(&root).expect("blob"), b"-0005-06-15\n");
     Ok(())
 }
 

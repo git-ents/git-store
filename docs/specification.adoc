@@ -97,7 +97,7 @@ A struct's fields are named by their field name; a tuple's fields are named by t
 --
 An enum value MUST be encoded as follows, externally tagged by the active variant's name.
 
-. A unit variant (no payload) MUST be encoded as a single Git blob holding the variant name's bytes verbatim, with no wrapping tree. The variant name is the *entire* information content of a unit variant, and a blob is what makes it visible to blob-oriented tooling: a tree entry whose target is a tree with no blob underneath it does not appear at all in `git ls-tree -r`'s recursive blob listing and contributes nothing to `git diff`, so a unit variant written as an (empty) tree is indistinguishable, to that tooling, from the field never having existed. Encoding it as a blob instead means a field changing between two unit variants (or between a unit variant and any other payload shape) shows as an ordinary content change.
+. A unit variant (no payload) MUST be encoded as a single Git blob holding the variant name's bytes verbatim, followed by the mandatory trailing newline defined by link:#serialization.design.leaves.encoding[leaf byte encoding] — this blob is a leaf blob like any other — with no wrapping tree. The variant name is the *entire* information content of a unit variant, and a blob is what makes it visible to blob-oriented tooling: a tree entry whose target is a tree with no blob underneath it does not appear at all in `git ls-tree -r`'s recursive blob listing and contributes nothing to `git diff`, so a unit variant written as an (empty) tree is indistinguishable, to that tooling, from the field never having existed. Encoding it as a blob instead means a field changing between two unit variants (or between a unit variant and any other payload shape) shows as an ordinary content change.
 . Every other variant MUST be encoded as a Git tree holding exactly one entry, named after the active variant, whose value encodes the variant's payload as follows.
 .. A newtype variant (one field) resolves directly to the encoding of that field.
 .. A struct variant resolves to a tree whose entries are named by field name.
@@ -115,10 +115,13 @@ A unit variant and every other variant therefore have *different* tree shapes at
 .Presence Marker for an Otherwise-Empty Tree
 --
 `None`, a dynamic `Null`, and an empty collection (`Array`, `Vec`, slice, or `Map`, per link:#serialization.design.trees.collections[collection encoding]; likewise an empty dynamic `Array` or `Object`, per link:#serialization.design.dynamic[dynamic value encoding]) MUST be encoded as a Git tree holding exactly one entry, rather than a literal empty tree: a blob entry named `_` (the *presence marker*) whose content is the empty byte sequence.
+The marker blob MUST remain the literal empty blob unconditionally: it is a structural presence sentinel, not a value leaf, and is therefore exempt from link:#serialization.design.leaves.encoding[the leaf trailing-newline requirement] that applies to every other blob this encoding writes.
 
 A literal empty tree — the encoding these cases used before this marker was introduced — contributes nothing to `git ls-tree -r` (which lists only reachable blobs, recursively, and an empty tree recurses to zero lines) and nothing to `git diff` (which compares blob content by path). A field that becomes empty, or that was always empty, is therefore indistinguishable, to that tooling, from a field that never existed. Writing the single marker entry instead keeps the path visible — `git ls-tree -r` shows (for example) `tags/_` — and keeps it participating in blob-level diffs when a collection transitions to or from empty.
 
 A single shared marker (one reserved name, one empty-content blob) covers every one of these cases; no case gets a distinct marker. The marker's only role is presence-signaling for git tooling, not disambiguation: every reader decodes a possibly-marked tree against a known target (a `Facet` type or a link:#schema.representation[schema] node) that already determines, independent of the tree's content, whether `None`/`Null`/an empty `List`/an empty `Map`/etc. is expected at that path. The one reader without such a target — link:#deserialization.dynamic.heuristic[the dynamic value read heuristic] — already documented `Null` and an empty `Array`/`Object` as collapsing to the same lossy empty-`Object` reading before this marker existed; a shared marker preserves that reading exactly, rather than introducing a new distinction the heuristic has no way to use.
+
+Because every leaf blob (link:#serialization.design.leaves.encoding[leaf byte encoding]) now carries a mandatory trailing `\n` while the marker blob never does, an empty `String` — which serializes to the one-byte blob `\n` — can no longer collide with the marker's blob: the two are always distinguishable, on disk, from a byte length alone (`1` versus `0`). This is a deliberate side effect of the trailing-newline requirement, not a separate rule.
 
 The marker name `_` is reserved: link:#serialization.design.trees.collections[a dynamic (map or dynamic-object) key] MUST NOT equal it, and MUST be rejected if it does, for the same reason a key MUST NOT contain `/` — a real entry named exactly `_` would otherwise be indistinguishable, on read, from the marker. A schema-declared struct field name MUST be rejected on the same terms: a link:#schema.representation[schema document] is data, and one authored by hand rather than derived from a Rust type can name a field anything at all. An link:#serialization.design.trees.ordering[ordinal name], being always decimal digits, can never collide and needs no such check.
 
@@ -145,7 +148,7 @@ No type marker is recorded; element and key types are recovered from the target 
 [role="requirement", id="serialization.design.bytes"]
 .Byte-Sequence Encoding
 --
-A sequence of `u8` — `Vec<u8>`, `[u8; N]`, or a `[u8]` slice — MUST be stored as a single Git blob whose content is the bytes verbatim, rather than as a tree with one entry per byte.
+A sequence of `u8` — `Vec<u8>`, `[u8; N]`, or a `[u8]` slice — MUST be stored as a single Git blob whose content is the bytes verbatim, followed by the mandatory trailing newline defined by link:#serialization.design.leaves.encoding[leaf byte encoding] (this blob is a leaf blob, and the rule applies uniformly regardless of the byte sequence's own content), rather than as a tree with one entry per byte.
 
 This is the Git-native representation of a byte buffer: it lets identical buffers deduplicate to one object and avoids the cost of a per-byte tree. The distinction is recovered from the element type on read; no marker is stored.
 --
@@ -184,12 +187,20 @@ Two entries whose names parse to the same numeric index (e.g. `"0"` and `"0000"`
 [role="requirement", id="serialization.design.leaves.encoding"]
 .Leaf Byte Encoding
 --
-A leaf's blob content MUST be the value's raw representation, with no delimiters, quoting, or trailing newline.
-A `String` is stored as its UTF-8 bytes verbatim; a scalar is stored as the bytes of its textual form.
+A *leaf blob* — a scalar, a byte sequence (link:#serialization.design.bytes[byte-sequence encoding]), or a unit enum variant's name blob (link:#serialization.design.trees.variants[variant encoding]) — MUST be encoded as the value's raw representation, with no delimiters or quoting, followed by exactly one trailing `\n` byte.
+A `String` is stored as its UTF-8 bytes verbatim plus that one byte; a scalar is stored as the bytes of its textual form plus that one byte; a byte sequence is stored as its bytes verbatim plus that one byte.
+
+The trailing byte MUST be unconditional: it MUST be appended whether or not the value's raw representation already ends in `\n`, and MUST be present exactly once, never zero times and never more than once. On read, exactly one trailing `\n` MUST be stripped to recover the value; a leaf blob whose final byte is not `\n` MUST be treated as malformed — necessarily a foreign or corrupt object — and rejected with an error, never accepted leniently as though the byte were merely optional.
+
+The link:#serialization.design.trees.empty-marker[presence marker] blob is *not* a leaf blob and is exempt from this requirement: it is a structural presence sentinel, not a value's own representation, and remains the literal empty blob.
 
 [NOTE]
 ====
-This is the representation that link:#serialization.design.normalization.leaves[leaf normalization] operates on, and the content that Git wraps in its canonical `blob <len>\0…` encoding to compute link:#compatibility.git.hash[the object identity], just as the `git` CLI would.
+The rule is "exactly one, always present" — not "at most one, if present". Only the unconditional form is exactly invertible: under an "at most one" reading, the `String` values `"x"` and `"x\n"` would both decode from the blob `x\n`, which is not a lossless round-trip. Under the rule actually specified here they diverge: `"x"` writes `x\n`; `"x\n"` writes `x\n\n`; and an empty `String` writes the single byte `\n` — no longer the empty blob, which is now reserved for the presence marker alone (see the note there).
+
+The purpose is cosmetic but real: without a trailing newline, every leaf blob is a file "without a final newline" to Git, and `git diff` annotates *both* sides of every changed leaf with `\ No newline at end of file` — noise that scales one-to-one with every changed field. A leaf blob is never read by a human as a working-tree file; it exists to be diffed. The trailing byte costs nothing semantically and removes that noise from every leaf-level change.
+
+This is the representation that link:#serialization.design.normalization.leaves[leaf normalization] operates on (before the trailing byte is appended), and the content — trailing byte included — that Git wraps in its canonical `blob <len>\0…` encoding to compute link:#compatibility.git.hash[the object identity], just as the `git` CLI would.
 ====
 --
 
@@ -200,12 +211,17 @@ The following leaf representations MUST be normalized on-write.
 
 . Negative zero MUST be normalized to positive zero.
 . The _not a number_ (`nan`) value MUST be normalized to the unquoted string `nan`.
+
+[NOTE]
+====
+Normalization operates on the value's raw representation, before link:#serialization.design.leaves.encoding[the mandatory trailing newline] is appended; it has no bearing on that byte, which is appended unconditionally regardless of what normalization did or did not change.
+====
 --
 
 [role="requirement", id="serialization.design.dynamic"]
 .Dynamic Value Encoding
 --
-A dynamic value — one whose shape is dynamic (`Def::DynamicValue`, e.g. `facet_value::Value`), carrying its kind at runtime rather than in a static shape — MUST be encoded according to the kind held at write time, as follows.
+A dynamic value — one whose shape is dynamic (`Def::DynamicValue`, e.g. `facet_value::Value`), carrying its kind at runtime rather than in a static shape — MUST be encoded according to the kind held at write time, as follows. Every kind below that is stored as a blob (`Bool`, `Number`, `Char`, `String`, `Bytes`, `DateTime`, `Uuid`, `QName`) writes a leaf blob and is therefore subject to link:#serialization.design.leaves.encoding[the mandatory trailing-newline requirement] like any other leaf, in addition to the rules given here.
 
 . `Null` MUST be encoded as the presence-marker tree, per link:#serialization.design.trees.empty-marker[the presence-marker requirement], rather than a literal empty tree.
 . `Bool` MUST be encoded as a `true` or `false` blob, per link:#serialization.design.booleans[boolean serialization].
@@ -249,7 +265,7 @@ Deserialization of a data which was serialized via `facet-git-tree` MUST result 
 --
 When the deserialization target is a dynamic value, no schema is available on disk and none is supplied by the target type, so the reader MUST apply the following heuristic.
 
-. A blob whose content is valid UTF-8 MUST be read as a `String`; any other blob MUST be read as `Bytes`.
+. A blob MUST end with the mandatory trailing `\n` byte required of every leaf blob (link:#serialization.design.leaves.encoding[leaf byte encoding]); its absence MUST be an error, not a lenient accept. That byte MUST be stripped first; the remaining content, if valid UTF-8, MUST be read as a `String`, otherwise as `Bytes`.
 . A non-empty tree in which every entry name parses as a decimal ordinal MUST be read as an `Array`, with elements ordered by numeric index per link:#serialization.design.trees.ordering[entry name ordering].
 . Any other tree — including the presence-marker tree (link:#serialization.design.trees.empty-marker[presence marker]), which MUST be stripped before this classification so it is not misread as a one-member `Object` — MUST be read as an `Object`, with one member per entry.
 
@@ -283,6 +299,8 @@ Recovering full fidelity requires either a typed read — supplying the original
 .Schema-Driven Deserialization
 --
 Given a link:#schema.representation[schema document], the schema-driven reader (`deserialize_value_with_schema`) MUST recover a faithful dynamic value from a tree written by this crate's encoding, without the original `Facet` type, according to the following mapping from schema node to value.
+
+Every blob referenced in the table below is a leaf blob per link:#serialization.design.leaves.encoding[leaf byte encoding]: "the blob's textual form" or "the blob's content" means that blob's bytes with the mandatory trailing `\n` already stripped, and a blob missing that byte MUST fail the read rather than be accepted with the byte folded into the value.
 
 [cols="1,2", options="header"]
 |===
@@ -424,6 +442,8 @@ Shape recursion MUST be bounded by the same maximum nesting depth that bounds or
 .Schema-Directed Serialization
 --
 Given a link:#schema.representation[schema document], the schema-directed writer (`serialize_value_with_schema`) MUST encode a dynamic value as the Git objects the schema describes, producing byte-for-byte — and therefore object-id — identical output to link:#serialization.design.dynamic[dynamic encoding] of the equivalent typed value, according to the following mapping from schema node to accepted value.
+
+Every blob produced in the table below is a leaf blob per link:#serialization.design.leaves.encoding[leaf byte encoding]: the mandatory trailing `\n` is appended automatically by the encoding described and is not itself part of the "textual form" named in the table.
 
 Encoding and conformance are one operation: a value that does not conform MUST fail — naming the path within the value at which the mismatch occurred — rather than be encoded lossily or ambiguously.
 The accepted set MUST be exactly the image of link:#deserialization.schema-driven[schema-driven deserialization] — every value that read can produce MUST re-encode — together with the two deterministic bridges a value authored without type information (for example, parsed from JSON) requires: a lossless integer supplied for a floating-point node, and a `String` supplied for a `Bytes` node.

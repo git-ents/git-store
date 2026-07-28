@@ -100,6 +100,20 @@ pub enum DeserializeError {
     /// parsed from them.
     #[error("blob {0} is not valid UTF-8")]
     NonUtf8Blob(ObjectId),
+    /// A leaf blob's final byte is not `\n`.
+    ///
+    /// Every leaf blob (a scalar, a byte sequence, or a unit enum variant's
+    /// name blob) MUST carry exactly one trailing newline
+    /// (`serialization.design.leaves.encoding`); this is *not* "at most one",
+    /// so a leaf blob missing that byte can only be a foreign or corrupt
+    /// object, rejected here rather than accepted leniently. The presence
+    /// marker (`crate::marker`) is a separate, structural object and is never
+    /// checked against this rule.
+    #[error(
+        "leaf blob {0} is missing its mandatory trailing newline — it predates \
+         the trailing-newline leaf encoding and must be re-stored"
+    )]
+    MissingLeafNewline(ObjectId),
     /// Deserialization exceeded the maximum supported nesting depth.
     ///
     /// A guard against unbounded recursion — and thus stack overflow — when

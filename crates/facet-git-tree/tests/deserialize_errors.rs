@@ -13,6 +13,7 @@
 //!   DeserializeError::MalformedOption  — a literal empty tree is no longer a valid `None`
 //!   DeserializeError::UnitVariantIsTree    — a unit variant tagged with a tree, not a blob
 //!   DeserializeError::VariantPayloadIsBlob — a non-unit variant tagged with a blob, not a tree
+//!   DeserializeError::MissingLeafNewline   — a leaf blob is missing its mandatory trailing newline
 
 use facet::Facet;
 use facet_git_tree::{
@@ -188,7 +189,11 @@ fn unit_variant_tagged_with_tree_is_rejected() {
 #[test]
 fn non_unit_variant_tagged_with_blob_is_rejected() {
     let store = ObjectStore::default();
-    let blob_id = store.write_buf(Kind::Blob, b"Circle").expect("write blob");
+    // A well-formed leaf blob (trailing newline included) so this exercises
+    // the variant-shape mismatch specifically, not `MissingLeafNewline`.
+    let blob_id = store
+        .write_buf(Kind::Blob, b"Circle\n")
+        .expect("write blob");
 
     let result: Result<Shape, _> = deserialize(&blob_id, &store);
     assert!(
@@ -197,6 +202,23 @@ fn non_unit_variant_tagged_with_blob_is_rejected() {
             Err(DeserializeError::VariantPayloadIsBlob { variant }) if variant == "Circle"
         ),
         "a non-unit variant tagged with a blob must be rejected, got {result:?}"
+    );
+}
+
+/// A leaf blob missing its mandatory trailing newline — here, a unit
+/// variant's name blob written without it — is rejected as
+/// `MissingLeafNewline` rather than silently accepted as if the byte were
+/// optional. Per `serialization.design.leaves.encoding`, the rule is
+/// "exactly one, always present", not "at most one".
+#[test]
+fn leaf_blob_missing_trailing_newline_is_rejected() {
+    let store = ObjectStore::default();
+    let blob_id = store.write_buf(Kind::Blob, b"Unit").expect("write blob");
+
+    let result: Result<Shape, _> = deserialize(&blob_id, &store);
+    assert!(
+        matches!(&result, Err(DeserializeError::MissingLeafNewline(oid)) if *oid == blob_id),
+        "a leaf blob without its trailing newline must be MissingLeafNewline, got {result:?}"
     );
 }
 

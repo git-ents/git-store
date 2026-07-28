@@ -79,8 +79,8 @@ fn string_field_blob_content() {
         .get_blob(&entry.oid)
         .expect("name blob must be present");
     assert_eq!(
-        bytes, b"Alice",
-        "string field should encode as its UTF-8 bytes"
+        bytes, b"Alice\n",
+        "string field should encode as its UTF-8 bytes plus the mandatory trailing newline"
     );
 }
 

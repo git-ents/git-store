@@ -66,8 +66,9 @@ fn unit_variant_is_a_bare_name_blob() {
         store
             .get_blob(&root_id)
             .expect("unit variant must serialize to a blob"),
-        b"Unit",
-        "a unit variant's entire encoding is a blob holding the variant name"
+        b"Unit\n",
+        "a unit variant's entire encoding is a blob holding the variant name, \
+         plus the mandatory trailing newline every leaf blob carries"
     );
 }
 
@@ -90,8 +91,8 @@ fn unit_variant_field_is_a_bare_name_blob() {
     );
     assert_eq!(
         store.get_blob(&entry.oid).expect("blob"),
-        b"High",
-        "the blob content must be the variant name"
+        b"High\n",
+        "the blob content must be the variant name plus the mandatory trailing newline"
     );
 }
 
@@ -119,8 +120,11 @@ fn unit_variant_field_change_changes_the_blob() {
         low_entry.oid, high_entry.oid,
         "the `priority` entry's own oid must differ, not just the root"
     );
-    assert_eq!(low_store.get_blob(&low_entry.oid).expect("blob"), b"Low");
-    assert_eq!(high_store.get_blob(&high_entry.oid).expect("blob"), b"High");
+    assert_eq!(low_store.get_blob(&low_entry.oid).expect("blob"), b"Low\n");
+    assert_eq!(
+        high_store.get_blob(&high_entry.oid).expect("blob"),
+        b"High\n"
+    );
 }
 
 /// A tuple variant's sole entry is named after it.

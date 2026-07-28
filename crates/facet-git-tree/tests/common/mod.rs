@@ -87,9 +87,27 @@ pub enum Event {
 // --- git ground truth ---
 
 /// The git blob OID of `b"hello"`, i.e. `printf 'hello' | git hash-object --stdin`.
+///
+/// Ground truth for raw [`ObjectStore`] / Git object-format compatibility
+/// tests, which write this exact buffer directly and are independent of this
+/// crate's leaf encoding. A leaf blob this crate itself writes for the string
+/// `"hello"` carries the mandatory trailing newline instead — see
+/// [`HELLO_LEAF_BLOB_OID`].
 pub const HELLO_BLOB_OID: [u8; 20] = [
     0xb6, 0xfc, 0x4c, 0x62, 0x0b, 0x67, 0xd9, 0x5f, 0x95, 0x3a, 0x5c, 0x1c, 0x12, 0x30, 0xaa, 0xab,
     0x5d, 0xb5, 0xa1, 0xb0,
+];
+
+/// The git blob OID of `b"hello\n"` — a leaf blob's mandatory trailing newline
+/// (`serialization.design.leaves.encoding`) included — i.e.
+/// `printf 'hello\n' | git hash-object --stdin`.
+///
+/// This is the object id this crate's own encoder writes for the string
+/// value `"hello"`; contrast [`HELLO_BLOB_OID`], the raw (no-newline) ground
+/// truth used by the [`ObjectStore`] compatibility tests.
+pub const HELLO_LEAF_BLOB_OID: [u8; 20] = [
+    0xce, 0x01, 0x36, 0x25, 0x03, 0x0b, 0xa8, 0xdb, 0xa9, 0x06, 0xf7, 0x56, 0x96, 0x7f, 0x9e, 0x9c,
+    0xa3, 0x94, 0x46, 0x4a,
 ];
 
 // --- tree accessors ---
