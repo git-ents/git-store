@@ -6,16 +6,18 @@
 //!     — schemas are self-hosted with no special-cased representation, and
 //!       their on-disk form is a public, semver-major contract (guarded here
 //!       by a golden object id).
-//!   schema.representation.version
-//!     — every stored document carries a `version` marker readable out of
-//!       band, off a fixed top-level entry name, before any attempt to
-//!       deserialize the rest of it.
+//!   schema.representation.pin
+//!     — every stored document pins the schema-schema tree it was written
+//!       against as a `schema` entry spliced in at write time; an absent pin
+//!       is legitimate only for a known root generation (the genesis rule);
+//!       and the pin is read out of band, before any attempt to deserialize
+//!       the rest of the document.
 
 use std::collections::BTreeMap;
 
 use facet_git_tree::{
-    DeserializeError, EntryKind, FieldSchema, Schema, SchemaDoc, SchemaVersionError, deserialize,
-    schema_of, serialize,
+    DeserializeError, EntryKind, ObjectId, ObjectStore, Schema, SchemaDoc, SchemaPinError,
+    SchemaSchema, deserialize, schema_of, serialize, serialize_into,
 };
 use gix_object::Write as _;
 
@@ -70,15 +72,25 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 /// trailing `\n`, which changes every blob (and therefore every containing
 /// tree) in the document.
 ///
-/// Updated again for the `SchemaDoc::version` marker (issue d4f8aaaf): every
-/// `SchemaDoc` — including the one `schema_of::<Person>()` returns — now
-/// carries an extra top-level `version` entry, which changes the document's
-/// root id even though `Person`'s own schema shape did not change.
+/// Updated again for name-keyed struct/enum schema nodes: `Schema::Struct`
+/// and `Schema::Enum` are now `BTreeMap`s keyed by field/variant name rather
+/// than ordinal-indexed lists of `FieldSchema`/`VariantSchema` pairs, so a
+/// struct's fields serialize directly under their own names (`Struct/name`)
+/// instead of behind an ordinal directory holding separate `name`/`schema`
+/// entries (`Struct/0000/{name,schema}`). Declaration order is no longer
+/// recorded — it was never load-bearing for the codec — so `Person`'s schema
+/// reproduces to a different, but still deterministic, root id.
+///
+/// Updated again for the schema-schema pin: `SchemaDoc::version` is gone —
+/// `schema_of::<Person>()` itself is unpinned, so this golden id covers only
+/// the bare document (`root`/`defs`, no `version` entry). The pin is a
+/// storage-layer splice [`SchemaDoc::write_pinned`] adds on top, covered
+/// separately by `genesis_constant_is_real`.
 #[test]
 fn person_schema_golden_oid() -> anyhow::Result<()> {
     let doc = schema_of::<Person>()?;
     let (root, _store) = serialize(&doc)?;
-    assert_eq!(root.to_string(), "ae6b94fb40c62a58635655e12473faf1a5e7dece");
+    assert_eq!(root.to_string(), "1d84b81de5fd6b23b48a9035c5008fd55a64e4bc");
     Ok(())
 }
 
@@ -98,13 +110,9 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
         let mut defs = BTreeMap::new();
         defs.insert(
             "Recipe".to_string(),
-            Schema::Struct(vec![FieldSchema {
-                name: "servings".into(),
-                schema: servings_schema,
-            }]),
+            Schema::Struct(BTreeMap::from([("servings".to_string(), servings_schema)])),
         );
         SchemaDoc {
-            version: SchemaDoc::CURRENT_VERSION,
             root: Schema::Ref("Recipe".into()),
             defs,
         }
@@ -117,14 +125,13 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
         "changing the field's schema must change the document's root id"
     );
 
-    // Walk the same path in both trees: defs → Recipe → Struct → 0000 (the
-    // sole field) → schema.
+    // Walk the same path in both trees: defs → Recipe → Struct → servings —
+    // the field is now name-keyed rather than living under an ordinal.
     let walk = |store: &facet_git_tree::ObjectStore, root: &facet_git_tree::ObjectId| {
         let defs = find_entry(store, root, "defs");
         let recipe = find_entry(store, &defs.oid, "Recipe");
         let struct_ = find_entry(store, &recipe.oid, "Struct");
-        let field0 = find_entry(store, &struct_.oid, "0000");
-        find_entry(store, &field0.oid, "schema")
+        find_entry(store, &struct_.oid, "servings")
     };
     let before_schema = walk(&before_store, &before_root);
     let after_schema = walk(&after_store, &after_root);
@@ -150,97 +157,190 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
     Ok(())
 }
 
-// --- version marker (issue d4f8aaaf) ---
+// --- schema-schema pin ---
 
-/// The `version` marker reads back to [`SchemaDoc::CURRENT_VERSION`] for any
-/// document this crate generates, via the out-of-band pre-read alone — no
-/// full typed deserialize needed.
+/// Golden object id of [`SchemaSchema::GENESIS`]: `serialize(&schema_of::<
+/// SchemaDoc>()?)`'s root, with no pin spliced in — the value the compiled-in
+/// hex constant in `pin.rs` must match.
+///
+/// This is the golden-oid guard for the whole format, one level above
+/// [`person_schema_golden_oid`]: if this id changes, either `SchemaDoc`'s own
+/// shape changed or the encoding did, and every schema tree in every
+/// downstream repository pins a generation that no longer exists. Do not
+/// update the compiled-in constant without releasing accordingly.
 #[test]
-fn read_stored_version_reads_the_current_version() -> anyhow::Result<()> {
-    let doc = schema_of::<Nested>()?;
-    let (root, store) = serialize(&doc)?;
-    assert_eq!(
-        SchemaDoc::read_stored_version(&root, &store)?,
-        SchemaDoc::CURRENT_VERSION
+fn genesis_constant_is_real() -> anyhow::Result<()> {
+    let doc = schema_of::<SchemaDoc>()?;
+    let (root, _store) = serialize(&doc)?;
+    assert_eq!(&root, SchemaSchema::GENESIS.tree());
+    Ok(())
+}
+
+/// A document written by [`SchemaDoc::write_pinned`] carries a top-level
+/// `schema` tree entry naming [`SchemaSchema::CURRENT`], that pinned object
+/// is actually present in the store, and [`SchemaDoc::read_pin`] resolves it
+/// back to [`SchemaSchema::CURRENT`].
+#[test]
+fn write_pinned_document_has_a_resolvable_pin() -> anyhow::Result<()> {
+    let doc = schema_of::<Person>()?;
+    let store = ObjectStore::default();
+    let root = doc.write_pinned(&store)?;
+
+    let pin_entry = find_entry(&store, &root, SchemaSchema::ENTRY);
+    assert_eq!(pin_entry.mode.kind(), EntryKind::Tree);
+    assert_eq!(&pin_entry.oid, SchemaSchema::CURRENT.tree());
+    assert!(
+        matches!(
+            store.get(&pin_entry.oid),
+            Some(facet_git_tree::GitObject::Tree(_))
+        ),
+        "the pinned schema-schema tree must actually be present in the store"
     );
+
+    let recognized = SchemaDoc::read_pin(&root, &store)?;
+    assert_eq!(recognized.tree(), SchemaSchema::CURRENT.tree());
     Ok(())
 }
 
-/// The `version` entry is a leaf blob carrying the mandatory trailing
-/// newline (issue 5b39f084) exactly like every other leaf, so it reads with
-/// nothing more than `git cat-file blob <tree>:version`.
+/// No pin entry, but the tree's own id is a known root generation
+/// ([`SchemaSchema::GENESIS`], written unpinned via plain [`serialize`]):
+/// legitimate, and [`SchemaDoc::read_pin`] reads it as genesis.
 #[test]
-fn version_blob_carries_its_trailing_newline() -> anyhow::Result<()> {
-    let doc = schema_of::<Nested>()?;
+fn absent_pin_on_a_known_root_reads_as_genesis() -> anyhow::Result<()> {
+    let doc = schema_of::<SchemaDoc>()?;
     let (root, store) = serialize(&doc)?;
-    let version_entry = find_entry(&store, &root, "version");
-    assert_eq!(version_entry.mode.kind(), EntryKind::Blob);
-    let raw = store
-        .get_blob(&version_entry.oid)
-        .expect("version entry must be a blob");
-    assert_eq!(raw, b"1\n");
+
+    let recognized = SchemaDoc::read_pin(&root, &store)?;
+    assert_eq!(recognized.tree(), SchemaSchema::GENESIS.tree());
+    assert!(recognized.parent().is_none());
     Ok(())
 }
 
-/// A stored schema tree with no `version` entry at all — a document stored
-/// before the field existed — is reported as [`SchemaVersionError::Missing`],
-/// never silently treated as version 0 or 1.
+/// No pin entry, and the tree's own id is *not* a known root generation: a
+/// truncated or hand-written document, rejected as
+/// [`SchemaPinError::Unpinned`] rather than read as though it were genesis.
 #[test]
-fn read_stored_version_reports_a_missing_entry() -> anyhow::Result<()> {
-    let doc = schema_of::<Nested>()?;
-    let (root, store) = serialize(&doc)?;
+fn absent_pin_on_an_unknown_tree_is_rejected() -> anyhow::Result<()> {
+    let doc = schema_of::<Person>()?;
+    let store = ObjectStore::default();
+    let root = doc.write_pinned(&store)?;
+
     let entries: Vec<_> = store
         .get_tree(&root)
         .expect("root is a tree")
         .into_iter()
-        .filter(|e| e.filename != "version")
+        .filter(|e| e.filename != SchemaSchema::ENTRY)
         .collect();
     let stripped = store.write(&gix_object::Tree { entries }).unwrap();
 
-    let err = SchemaDoc::read_stored_version(&stripped, &store).unwrap_err();
+    let err = SchemaDoc::read_pin(&stripped, &store).unwrap_err();
     assert!(
-        matches!(err, SchemaVersionError::Missing(oid) if oid == stripped),
+        matches!(err, SchemaPinError::Unpinned(oid) if oid == stripped),
         "{err:?}"
     );
     Ok(())
 }
 
-/// The whole point of reading `version` out of band: it succeeds even when
-/// the rest of the document is not intelligible to this binary — simulated
-/// here as a `root` tagged with a hypothetical `DateTime` variant `Schema`
-/// does not define, the same repro the issue names. A full typed
-/// deserialize of the same tree fails on that unknown variant with a
-/// reflection error, which is exactly the failure `read_stored_version`
-/// lets a caller check for *before* it happens.
+/// The whole point of reading the pin out of band: an unrecognized pin is
+/// caught *before* a full typed deserialize is attempted, which is exactly
+/// what lets it catch a document a full deserialize could not otherwise get
+/// through. Simulated here exactly as the old version-marker tests did: the
+/// pin is repointed at some other, non-schema-schema tree (the genesis
+/// document's own `defs` subtree), and `root` is separately corrupted into a
+/// bogus blob tagged with a hypothetical `DateTime` variant `Schema` does not
+/// define.
 #[test]
-fn read_stored_version_ignores_an_undecodable_document() -> anyhow::Result<()> {
+fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyhow::Result<()> {
     let doc = schema_of::<Nested>()?;
-    let (root, store) = serialize(&doc)?;
+    let store = ObjectStore::default();
+    let root = doc.write_pinned(&store)?;
 
-    let mut entries = store.get_tree(&root).expect("root is a tree");
-    let bogus_root = store
+    let genesis_doc = schema_of::<SchemaDoc>()?;
+    let genesis_root = serialize_into(&genesis_doc, &store)?;
+    let bogus_pin = find_entry(&store, &genesis_root, "defs").oid;
+
+    let bogus_root_blob = store
         .write_buf(gix_object::Kind::Blob, b"DateTime\n")
         .unwrap();
+
+    let mut entries = store.get_tree(&root).expect("root is a tree");
     for entry in &mut entries {
-        if entry.filename == "root" {
-            entry.oid = bogus_root;
+        if entry.filename == SchemaSchema::ENTRY {
+            entry.oid = bogus_pin;
+        } else if entry.filename == "root" {
+            entry.oid = bogus_root_blob;
             entry.mode = gix_object::tree::EntryKind::Blob.into();
         }
     }
     let corrupt = store.write(&gix_object::Tree { entries }).unwrap();
 
-    // The out-of-band read does not care: it inspects only `version`.
-    assert_eq!(
-        SchemaDoc::read_stored_version(&corrupt, &store)?,
-        SchemaDoc::CURRENT_VERSION
+    let err = SchemaDoc::read_pin(&corrupt, &store).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            SchemaPinError::Unrecognized { tree, pinned }
+                if *tree == corrupt && *pinned == bogus_pin
+        ),
+        "{err:?}"
     );
 
     // A full typed deserialize, in contrast, cannot get past the unknown
-    // variant — a reflection error, not a version error.
+    // variant — a reflection error, not a pin error — confirming the check
+    // really did land before a deserialize that could not have completed.
     let err = deserialize::<SchemaDoc>(&corrupt, &store).unwrap_err();
     assert!(
         matches!(&err, DeserializeError::Reflect(msg) if msg.contains("DateTime")),
         "{err:?}"
     );
     Ok(())
+}
+
+/// `git ls-tree -r` shape of a small struct's `write_pinned` document: the
+/// exact sorted set of blob leaves under `defs`/`root` reads like a type
+/// declaration, plus a `schema` subtree at the top level (its own contents —
+/// the genesis schema-schema document — are covered by the pin tests above,
+/// not re-walked here).
+#[test]
+fn write_pinned_ls_tree_shape_matches_the_type_declaration() -> anyhow::Result<()> {
+    let doc = schema_of::<Person>()?;
+    let store = ObjectStore::default();
+    let root = doc.write_pinned(&store)?;
+
+    let mut leaves = Vec::new();
+    for top in ["defs", "root"] {
+        let entry = find_entry(&store, &root, top);
+        walk_blobs(&store, &entry.oid, top, &mut leaves);
+    }
+    leaves.sort();
+
+    assert_eq!(
+        leaves,
+        vec![
+            ("defs/Person/Struct/active".to_owned(), b"Bool\n".to_vec()),
+            ("defs/Person/Struct/age".to_owned(), b"U32\n".to_vec()),
+            ("defs/Person/Struct/name".to_owned(), b"String\n".to_vec()),
+            ("root/Ref".to_owned(), b"Person\n".to_vec()),
+        ]
+    );
+
+    let pin_entry = find_entry(&store, &root, SchemaSchema::ENTRY);
+    assert_eq!(pin_entry.mode.kind(), EntryKind::Tree);
+    assert_eq!(&pin_entry.oid, SchemaSchema::CURRENT.tree());
+    Ok(())
+}
+
+/// Recursively collect every blob leaf under `root` as `(slash-joined path,
+/// content)` pairs, `git ls-tree -r` style.
+fn walk_blobs(store: &ObjectStore, root: &ObjectId, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
+    for entry in store.get_tree(root).expect("tree present") {
+        let name = String::from_utf8_lossy(&entry.filename);
+        let path = format!("{prefix}/{name}");
+        match entry.mode.kind() {
+            EntryKind::Blob => {
+                let content = store.get_blob(&entry.oid).expect("blob present");
+                out.push((path, content));
+            }
+            _ => walk_blobs(store, &entry.oid, &path, out),
+        }
+    }
 }

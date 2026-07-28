@@ -9,13 +9,13 @@
 //!       set is the image of the schema-driven read plus the JSON bridges
 //!       (integer into a float node, string into a `Bytes` node).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 
 use facet::Facet;
 use facet_git_tree::{
-    EntryKind, FieldSchema, ObjectStore, RawTree, Schema, SchemaDoc, SchemaWriteError, VariantKind,
-    VariantSchema, deserialize_value_with_schema, schema_of, serialize, serialize_into,
+    EntryKind, ObjectStore, RawTree, Schema, SchemaDoc, SchemaWriteError, VariantKind,
+    deserialize_value_with_schema, schema_of, serialize, serialize_into,
     serialize_value_with_schema,
 };
 use facet_value::{VObject, Value, value};
@@ -29,6 +29,11 @@ use common::{
 /// must reproduce.
 fn typed_root<T: for<'a> Facet<'a>>(value: &T) -> facet_git_tree::ObjectId {
     serialize(value).expect("typed serialize").0
+}
+
+/// A single-field [`Schema::Struct`] body, for tests that only need one field.
+fn one_field(name: &str, schema: Schema) -> BTreeMap<String, Schema> {
+    BTreeMap::from([(name.to_owned(), schema)])
 }
 
 /// Every value the schema-driven *read* can produce must re-encode to the exact
@@ -201,7 +206,6 @@ fn raw_tree_reference_matches_typed() {
 #[test]
 fn dynamic_node_matches_plain_serialize() {
     let doc = SchemaDoc {
-        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Dynamic,
         defs: Default::default(),
     };
@@ -266,7 +270,6 @@ fn float_into_integer_field_is_rejected() {
 fn integer_too_large_for_f64_is_refused() {
     // 2^53 + 1 has no exact f64 representation.
     let doc = SchemaDoc {
-        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::F64,
         defs: Default::default(),
     };
@@ -345,7 +348,6 @@ fn multi_member_enum_object_is_rejected() {
 #[test]
 fn unknown_ref_is_rejected() {
     let doc = SchemaDoc {
-        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Ref("missing".into()),
         defs: Default::default(),
     };
@@ -369,26 +371,13 @@ fn unknown_ref_is_rejected() {
 /// same empty-tree payload).
 #[test]
 fn priority_field_change_is_a_visible_blob_diff() {
-    let priority_variants = vec![
-        VariantSchema {
-            name: "Low".into(),
-            kind: VariantKind::Unit,
-        },
-        VariantSchema {
-            name: "Medium".into(),
-            kind: VariantKind::Unit,
-        },
-        VariantSchema {
-            name: "High".into(),
-            kind: VariantKind::Unit,
-        },
-    ];
+    let priority_variants = BTreeMap::from([
+        ("Low".to_owned(), VariantKind::Unit),
+        ("Medium".to_owned(), VariantKind::Unit),
+        ("High".to_owned(), VariantKind::Unit),
+    ]);
     let doc = SchemaDoc {
-        version: SchemaDoc::CURRENT_VERSION,
-        root: Schema::Struct(vec![FieldSchema {
-            name: "priority".into(),
-            schema: Schema::Enum(priority_variants),
-        }]),
+        root: Schema::Struct(one_field("priority", Schema::Enum(priority_variants))),
         defs: Default::default(),
     };
 
@@ -432,11 +421,7 @@ fn priority_field_change_is_a_visible_blob_diff() {
 #[test]
 fn empty_tags_list_is_visible_as_a_marker_entry() {
     let doc = SchemaDoc {
-        version: SchemaDoc::CURRENT_VERSION,
-        root: Schema::Struct(vec![FieldSchema {
-            name: "tags".into(),
-            schema: Schema::List(Box::new(Schema::String)),
-        }]),
+        root: Schema::Struct(one_field("tags", Schema::List(Box::new(Schema::String)))),
         defs: Default::default(),
     };
     let store = ObjectStore::default();
@@ -463,7 +448,6 @@ fn ref_cycle_hits_the_depth_bound() {
     let mut defs = std::collections::BTreeMap::new();
     defs.insert("loop".to_string(), Schema::Ref("loop".into()));
     let doc = SchemaDoc {
-        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Ref("loop".into()),
         defs,
     };
@@ -491,11 +475,7 @@ fn ref_cycle_hits_the_depth_bound() {
 #[test]
 fn an_empty_tuple_is_not_markered_and_reads_back() {
     let doc = SchemaDoc {
-        version: SchemaDoc::CURRENT_VERSION,
-        root: Schema::Struct(vec![FieldSchema {
-            name: "nothing".into(),
-            schema: Schema::Tuple(vec![]),
-        }]),
+        root: Schema::Struct(one_field("nothing", Schema::Tuple(vec![]))),
         defs: Default::default(),
     };
     let store = ObjectStore::default();
@@ -534,11 +514,7 @@ fn zero_field_tuple_struct_matches_typed() {
 #[test]
 fn a_schema_field_named_as_the_presence_marker_is_rejected() {
     let doc = SchemaDoc {
-        version: SchemaDoc::CURRENT_VERSION,
-        root: Schema::Struct(vec![FieldSchema {
-            name: "_".into(),
-            schema: Schema::String,
-        }]),
+        root: Schema::Struct(one_field("_", Schema::String)),
         defs: Default::default(),
     };
     let store = ObjectStore::default();

@@ -118,9 +118,10 @@ fn interactive_put_builds_value_from_prompts() {
     let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
     assert!(ok, "schema put failed: {err}");
 
-    // One answer per prompt: title, serves, then the steps list (add? / value)
-    // until a `n` closes it.
-    let answers = "Carbonara\n4\ny\nboil\ny\nfry\nn\n";
+    // A schema's fields are prompted in name order (`Schema::Struct` is
+    // name-keyed, not declaration-ordered): serves, then the steps list
+    // (add? / value until a `n` closes it), then title.
+    let answers = "4\ny\nboil\ny\nfry\nn\nCarbonara\n";
     let (_, err, ok) = run(path, Some(answers), &["put", "recipe", "carbonara", "-i"]);
     assert!(ok, "interactive put failed: {err}");
 
@@ -173,12 +174,14 @@ fn unknown_kind_reports_no_schema() {
     assert!(err.contains("no schema published"), "stderr: {err}");
 }
 
-/// A hand-authored schema JSON document with no top-level `version` key —
-/// exactly the shape every file under `crates/git-store/schemas/*.json`
-/// has — is accepted and published stamped with the current version, so
-/// those pre-existing files keep working unmodified.
+/// A hand-authored schema JSON document — exactly the shape every file under
+/// `crates/git-store/schemas/*.json` has — carries no `version` key because
+/// there is no such field any more: the schema-schema pin is a storage-layer
+/// splice `schema put` adds on write, not something a caller declares. It
+/// publishes unmodified, and `schema get` prints back only what the document
+/// actually holds.
 #[test]
-fn schema_put_json_without_version_key_is_accepted_and_stamped() {
+fn hand_authored_schema_json_publishes_with_no_version_key() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let path = dir.path();
@@ -187,10 +190,10 @@ fn schema_put_json_without_version_key_is_accepted_and_stamped() {
         "root": { "Ref": "Book" },
         "defs": {
             "Book": {
-                "Struct": [
-                    { "name": "title", "schema": "String" },
-                    { "name": "year", "schema": "U16" }
-                ]
+                "Struct": {
+                    "title": "String",
+                    "year": "U16"
+                }
             }
         }
     }"#;
@@ -200,49 +203,19 @@ fn schema_put_json_without_version_key_is_accepted_and_stamped() {
     let (out, err, ok) = run(path, None, &["schema", "get", "book"]);
     assert!(ok, "schema get failed: {err}");
     assert!(
-        out.contains("\"version\": 1"),
-        "a version-less document must be stamped with the current version: {out}"
+        !out.contains("\"version\""),
+        "schema get output must carry no version key: {out}"
     );
 
     // And it accepts a conforming value, exactly as a schema published from
     // a `#[derive(Facet)]` type would.
     let value = r#"{"title":"Dune","year":1965}"#;
     let (_, err, ok) = run(path, Some(value), &["put", "book", "dune"]);
-    assert!(ok, "put against version-less schema failed: {err}");
+    assert!(ok, "put against hand-authored schema failed: {err}");
 }
 
-/// A hand-authored schema JSON document that *does* declare a `version` —
-/// one above what this binary writes — is rejected outright, not silently
-/// downgraded to the current version.
-#[test]
-fn schema_put_json_declaring_a_future_version_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    init_repo(dir.path());
-    let path = dir.path();
-
-    let future_schema = r#"{
-        "version": 999999,
-        "root": { "Ref": "Book" },
-        "defs": {
-            "Book": { "Struct": [ { "name": "title", "schema": "String" } ] }
-        }
-    }"#;
-    let (_, err, ok) = run(path, Some(future_schema), &["schema", "put", "book"]);
-    assert!(!ok, "schema put should have been rejected");
-    assert!(
-        err.contains("999999") && err.contains("version"),
-        "stderr should name the unsupported version: {err}"
-    );
-
-    let (_, _, ok) = run(path, None, &["schema", "get", "book"]);
-    assert!(
-        !ok,
-        "a rejected schema put must not have published anything"
-    );
-}
-
-/// The actual hand-authored files under `crates/git-store/schemas/*.json` —
-/// written before `version` existed — load through `-F` unmodified.
+/// The actual hand-authored files under `crates/git-store/schemas/*.json`
+/// load through `-F`.
 #[test]
 fn preexisting_schema_json_files_load_via_file_flag() {
     let dir = tempfile::tempdir().unwrap();

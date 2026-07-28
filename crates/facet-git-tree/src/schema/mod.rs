@@ -11,6 +11,7 @@
 //! The normative rules live in `docs/specification.adoc` under
 //! `schema.representation` and `schema.generation`.
 
+pub mod pin;
 #[cfg(feature = "value")]
 pub mod read;
 #[cfg(feature = "value")]
@@ -19,12 +20,10 @@ pub mod write;
 use std::collections::{BTreeMap, HashMap};
 
 use facet::{ConstTypeId, Def, Facet, ScalarType, Shape};
-use gix_object::Find;
 
-use crate::ObjectId;
 use crate::RawTree;
-use crate::de::{MAX_DEPTH, collapse_shape, find_blob_bytes, find_tree_entries};
-use crate::error::{SchemaError, SchemaVersionError};
+use crate::de::{MAX_DEPTH, collapse_shape};
+use crate::error::SchemaError;
 use crate::ser::is_byte_seq;
 
 /// A complete, self-contained schema document.
@@ -34,36 +33,12 @@ use crate::ser::is_byte_seq;
 /// names that [`Schema::Ref`] nodes use. A `BTreeMap` keeps the encoding
 /// order-independent of construction, so equal documents share an object id.
 ///
-/// # `version`
-///
-/// `version` is the format version of the *stored representation as a
-/// whole* — both this type's own on-disk shape and the value encoding a
-/// schema of that version describes — versioned in lockstep, deliberately
-/// (`schema.representation.version`). Subtree schema binding (a `gix-store`
-/// convention) already puts a value's schema tree right beside the value it
-/// governs, so one number carried on the schema pins the codec for the data
-/// too; a reader that refuses a
-/// schema version above its own thereby also refuses to misread values a
-/// newer codec wrote, with no separate value-format version needed anywhere.
-/// One consequence of that coupling: a codec change that does not touch
-/// `SchemaDoc`'s own shape at all still bumps this number, because it changed
-/// what a schema of that version describes.
-///
-/// `version` is a leaf blob at a fixed top-level tree entry name
-/// (`"version"`), so it stays readable with nothing more than
-/// `git cat-file blob <tree>:version` even when the rest of the document is
-/// not intelligible to the reader — see
-/// [`read_stored_version`](SchemaDoc::read_stored_version), which reads
-/// exactly that, out of band, *before* attempting a full typed deserialize of
-/// the document. That is the property that makes `version` a usable
-/// bootstrap/upgrade marker: a document written by a newer binary — one
-/// whose `Schema` carries a variant this binary has never heard of — would
-/// otherwise fail with an opaque reflection error before the version was ever
-/// consulted, defeating the whole point of having one.
+/// This type carries no format-version field: a stored document instead pins
+/// the schema-schema tree it was written against as a `schema` entry spliced
+/// onto the tree at write time — see [`pin`](crate::schema::pin) — which is a
+/// storage-layer concern, not part of this Rust type.
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct SchemaDoc {
-    /// The format version of the stored representation. See the type docs.
-    pub version: u32,
     /// The schema of the value itself. Named user types appear as
     /// [`Schema::Ref`] nodes resolved through `defs`.
     pub root: Schema,
@@ -118,8 +93,9 @@ pub enum Schema {
     F64,
     /// A byte sequence (`Vec<u8>`, `[u8; N]`, `[u8]`): a single blob.
     Bytes,
-    /// A named-field struct: a tree with one entry per field.
-    Struct(Vec<FieldSchema>),
+    /// A named-field struct: a tree with one entry per field, keyed by field
+    /// name — the map key *is* the tree entry name (`schema.representation`).
+    Struct(BTreeMap<String, Schema>),
     /// A tuple or tuple struct: a tree with ordinal-named entries.
     Tuple(Vec<Schema>),
     /// A variable-length sequence (`Vec<T>`, `[T]`): an ordinal-named tree.
@@ -145,33 +121,15 @@ pub enum Schema {
     Optional(Box<Schema>),
     /// An enum: externally tagged by the live variant's name — a bare blob
     /// holding that name for a unit variant ([`VariantKind::Unit`]), a
-    /// single-entry tree naming it for every other variant.
-    Enum(Vec<VariantSchema>),
+    /// single-entry tree naming it for every other variant. Keyed by variant
+    /// name, which is also the tag.
+    Enum(BTreeMap<String, VariantKind>),
     /// A [`RawTree`]: a verbatim tree reference.
     RawTree,
     /// A dynamic value (`facet_value::Value`): shape decided at runtime.
     Dynamic,
     /// A reference to a named definition in the document's `defs` table.
     Ref(String),
-}
-
-/// One field of a [`Schema::Struct`] (or [`VariantKind::Struct`]) node.
-#[derive(Debug, Clone, PartialEq, Facet)]
-pub struct FieldSchema {
-    /// The field name, which is the tree entry name.
-    pub name: String,
-    /// The field's schema.
-    pub schema: Schema,
-}
-
-/// One variant of a [`Schema::Enum`] node.
-#[derive(Debug, Clone, PartialEq, Facet)]
-pub struct VariantSchema {
-    /// The variant name: the blob content for a [`VariantKind::Unit`]
-    /// variant, or the single tree entry's name for every other variant.
-    pub name: String,
-    /// The variant's payload shape.
-    pub kind: VariantKind,
 }
 
 /// The payload shape of one enum variant, mirroring the encoder's four
@@ -190,7 +148,7 @@ pub enum VariantKind {
     /// A multi-field tuple variant: an ordinal-named tree.
     Tuple(Vec<Schema>),
     /// A struct variant: a name-keyed tree.
-    Struct(Vec<FieldSchema>),
+    Struct(BTreeMap<String, Schema>),
 }
 
 /// Generate the [`SchemaDoc`] describing how `T` is encoded.
@@ -217,18 +175,6 @@ pub fn schema_of<T: for<'a> Facet<'a>>() -> Result<SchemaDoc, SchemaError> {
 }
 
 impl SchemaDoc {
-    /// The highest [`version`](SchemaDoc::version) this build understands.
-    ///
-    /// [`from_shape`](Self::from_shape) (and therefore [`schema_of`]) stamps
-    /// every schema it generates with this value: a document generated by a
-    /// given binary is, by construction, exactly as new as that binary.
-    /// [`gix_store::Store::put_schema`](https://docs.rs/gix-store) rejects
-    /// publishing a document that declares a version above this one, and
-    /// [`gix_store::Store::read_schema`](https://docs.rs/gix-store) (via
-    /// [`read_stored_version`](Self::read_stored_version)) rejects reading
-    /// one back for the same reason.
-    pub const CURRENT_VERSION: u32 = 1;
-
     /// Generate the [`SchemaDoc`] describing how values of `shape` are
     /// encoded.
     ///
@@ -239,10 +185,6 @@ impl SchemaDoc {
     /// [`defs`](SchemaDoc::defs) and referenced by [`Schema::Ref`]; names are
     /// assigned deterministically in pre-order, so the same shape always
     /// yields an identical — and identically-encoded — document.
-    ///
-    /// The returned document's [`version`](SchemaDoc::version) is always
-    /// [`CURRENT_VERSION`](Self::CURRENT_VERSION): a schema this binary
-    /// generates describes exactly what this binary's codec writes.
     pub fn from_shape(shape: &'static Shape) -> Result<Self, SchemaError> {
         Self::from_shape_with_limit(shape, MAX_DEPTH)
     }
@@ -258,69 +200,9 @@ impl SchemaDoc {
         let mut walker = Walker::new(limit);
         let root = walker.node(shape, 0)?;
         Ok(SchemaDoc {
-            version: Self::CURRENT_VERSION,
             root,
             defs: walker.defs,
         })
-    }
-
-    /// Read a stored `SchemaDoc` tree's `version` entry directly, without
-    /// attempting to deserialize the rest of the document.
-    ///
-    /// This is the out-of-band pre-read the bootstrap/upgrade story depends
-    /// on (see the type docs): it looks up exactly one top-level tree entry
-    /// named `"version"`, reads it as a leaf blob (stripping its mandatory
-    /// trailing newline, `serialization.design.leaves.encoding`), and parses
-    /// it as decimal `u32` text — the same three steps `git cat-file blob
-    /// <tree>:version` plus a `parse` would perform by hand. Nothing else in
-    /// `tree` is inspected, so this succeeds (or fails on its own, narrow
-    /// terms) even when the rest of the document contains a `Schema` variant
-    /// this binary has never heard of and could not otherwise deserialize at
-    /// all.
-    ///
-    /// Returns [`SchemaVersionError::Missing`] when `tree` has no top-level
-    /// `version` entry — a document stored before the field existed, which
-    /// must be re-stored rather than assumed to be any particular version —
-    /// and [`SchemaVersionError::Parse`] when the entry exists but is not
-    /// decimal `u32` text. Every other failure (an absent backing object, a
-    /// malformed tree, a leaf blob missing its trailing newline, ...)
-    /// surfaces through [`SchemaVersionError::Deserialize`] exactly as an
-    /// ordinary typed read would.
-    ///
-    /// Callers that must refuse a version above what they understand — as
-    /// `gix_store::Store::read_schema` does — compare the returned value
-    /// against [`CURRENT_VERSION`](Self::CURRENT_VERSION) themselves,
-    /// *before* calling [`deserialize`](crate::deserialize) on the same
-    /// `tree`: doing that comparison after a full deserialize would defeat
-    /// the point, since a document new enough to need the check is exactly
-    /// the document a full deserialize cannot necessarily get through.
-    pub fn read_stored_version<F: Find + ?Sized>(
-        tree: &ObjectId,
-        store: &F,
-    ) -> Result<u32, SchemaVersionError> {
-        let entries = find_tree_entries(tree, store)?;
-        let Some((_, oid, _)) = entries.iter().find(|(name, _, _)| name == "version") else {
-            return Err(SchemaVersionError::Missing(*tree));
-        };
-        let bytes = find_blob_bytes(oid, store)?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| SchemaVersionError::Parse {
-            tree: *tree,
-            text: String::from_utf8_lossy(&bytes).into_owned(),
-        })?;
-        let version = text.parse::<u32>().map_err(|_| SchemaVersionError::Parse {
-            tree: *tree,
-            text: text.to_owned(),
-        })?;
-        // Numbering starts at 1, so `0` is not a version this format ever
-        // wrote; accepting it would contradict the reasoning that lets a
-        // missing entry be reported rather than assumed.
-        if version == 0 {
-            return Err(SchemaVersionError::Invalid {
-                tree: *tree,
-                version,
-            });
-        }
-        Ok(version)
     }
 }
 
@@ -428,7 +310,7 @@ impl Walker {
         // classified exactly as the encoder classifies it.
         if let facet::Type::User(facet::UserType::Enum(et)) = shape.ty {
             return self.define(shape, |walker| {
-                let mut variants = Vec::with_capacity(et.variants.len());
+                let mut variants = BTreeMap::new();
                 for variant in et.variants {
                     let positional = matches!(variant.data.kind, facet::StructKind::TupleStruct);
                     let newtype = positional && variant.data.fields.len() == 1;
@@ -445,10 +327,7 @@ impl Walker {
                             walker.named_field_schemas(variant.data.fields, depth + 1)?,
                         )
                     };
-                    variants.push(VariantSchema {
-                        name: variant.name.to_owned(),
-                        kind,
-                    });
+                    variants.insert(variant.name.to_owned(), kind);
                 }
                 Ok(Schema::Enum(variants))
             });
@@ -466,20 +345,15 @@ impl Walker {
         fields.iter().map(|f| self.node(f.shape(), depth)).collect()
     }
 
-    /// The named schemas of struct fields, in declaration order.
+    /// The schemas of struct fields, keyed by field name.
     fn named_field_schemas(
         &mut self,
         fields: &'static [facet::Field],
         depth: usize,
-    ) -> Result<Vec<FieldSchema>, SchemaError> {
+    ) -> Result<BTreeMap<String, Schema>, SchemaError> {
         fields
             .iter()
-            .map(|f| {
-                Ok(FieldSchema {
-                    name: f.name.to_owned(),
-                    schema: self.node(f.shape(), depth)?,
-                })
-            })
+            .map(|f| Ok((f.name.to_owned(), self.node(f.shape(), depth)?)))
             .collect()
     }
 

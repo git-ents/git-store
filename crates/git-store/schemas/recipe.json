@@ -4,28 +4,16 @@
   },
   "defs": {
     "Recipe": {
-      "Struct": [
-        {
-          "name": "title",
-          "schema": "String"
+      "Struct": {
+        "title": "String",
+        "serves": "U32",
+        "ingredients": {
+          "List": "String"
         },
-        {
-          "name": "serves",
-          "schema": "U32"
-        },
-        {
-          "name": "ingredients",
-          "schema": {
-            "List": "String"
-          }
-        },
-        {
-          "name": "steps",
-          "schema": {
-            "List": "String"
-          }
+        "steps": {
+          "List": "String"
         }
-      ]
+      }
     }
   }
 }

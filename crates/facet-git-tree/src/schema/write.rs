@@ -23,6 +23,7 @@
 //! `serialization.schema-directed`.
 
 use core::fmt::Write as _;
+use std::collections::BTreeMap;
 
 use facet::Peek;
 use facet_value::{VArray, VNumber, Value};
@@ -30,7 +31,7 @@ use gix_object::Write;
 
 use crate::de::MAX_DEPTH;
 use crate::error::{SchemaWriteError, SerializeError};
-use crate::schema::{FieldSchema, Schema, SchemaDoc, VariantKind};
+use crate::schema::{Schema, SchemaDoc, VariantKind};
 use crate::ser::{float_text, serialize_node, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
 
@@ -327,7 +328,7 @@ fn write_node<W: Write + ?Sized>(
 /// define is rejected, since the read path never emits one.
 fn write_named_tree<W: Write + ?Sized>(
     value: &Value,
-    fields: &[FieldSchema],
+    fields: &BTreeMap<String, Schema>,
     doc: &SchemaDoc,
     store: &W,
     path: &Path,
@@ -335,7 +336,7 @@ fn write_named_tree<W: Write + ?Sized>(
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
     let obj = as_object(value, path)?;
     for k in obj.keys() {
-        if !fields.iter().any(|f| f.name == k.as_str()) {
+        if !fields.contains_key(k.as_str()) {
             return Err(SchemaWriteError::UnknownField {
                 path: path.show(),
                 field: k.as_str().to_owned(),
@@ -343,25 +344,18 @@ fn write_named_tree<W: Write + ?Sized>(
         }
     }
     let mut entries = Vec::with_capacity(fields.len());
-    for field in fields {
+    for (name, schema) in fields {
         // A `SchemaDoc` is data — `git store schema put` ingests one from
         // hand-authored JSON — so a field name is untrusted input here, unlike
         // a `#[derive(Facet)]` name which is always a Rust identifier. Without
         // this, a field named exactly `crate::marker::MARKER_KEY` would encode
         // to the very tree that means "empty", and read back as empty.
-        check_key(&field.name).map_err(SerializeError::from)?;
-        if let Some(fv) = obj.get(&field.name) {
-            let (oid, kind) = write_node(
-                fv,
-                &field.schema,
-                doc,
-                store,
-                &path.field(&field.name),
-                depth + 1,
-            )?;
+        check_key(name).map_err(SerializeError::from)?;
+        if let Some(fv) = obj.get(name.as_str()) {
+            let (oid, kind) = write_node(fv, schema, doc, store, &path.field(name), depth + 1)?;
             entries.push(TreeEntry {
                 mode: EntryMode::from(kind),
-                filename: field.name.as_str().into(),
+                filename: name.as_str().into(),
                 oid,
             });
         }
@@ -476,7 +470,7 @@ fn write_composite_map<W: Write + ?Sized>(
 /// single-entry tree keyed by the name.
 fn write_enum<W: Write + ?Sized>(
     value: &Value,
-    variants: &[crate::schema::VariantSchema],
+    variants: &BTreeMap<String, VariantKind>,
     doc: &SchemaDoc,
     store: &W,
     path: &Path,
@@ -491,23 +485,23 @@ fn write_enum<W: Write + ?Sized>(
     }
     let (name, payload) = obj.iter().next().expect("length checked to be 1 above");
     let name = name.as_str();
-    let variant = variants.iter().find(|v| v.name == name).ok_or_else(|| {
-        SchemaWriteError::UnknownVariant {
+    let kind = variants
+        .get(name)
+        .ok_or_else(|| SchemaWriteError::UnknownVariant {
             path: path.show(),
             variant: name.to_owned(),
-            expected: variants.iter().map(|v| v.name.clone()).collect(),
-        }
-    })?;
+            expected: variants.keys().cloned().collect(),
+        })?;
     let vpath = path.field(name);
 
-    if let VariantKind::Unit = &variant.kind {
+    if let VariantKind::Unit = kind {
         if !payload.is_null() {
             return Err(expected(&vpath, "null", payload));
         }
         return blob(store, name.as_bytes());
     }
 
-    let (inner_oid, inner_kind) = match &variant.kind {
+    let (inner_oid, inner_kind) = match kind {
         VariantKind::Unit => unreachable!("handled above"),
         VariantKind::Newtype(inner) => write_node(payload, inner, doc, store, &vpath, depth + 1)?,
         VariantKind::Tuple(elems) => {

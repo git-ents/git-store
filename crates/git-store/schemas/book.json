@@ -4,24 +4,12 @@
   },
   "defs": {
     "Book": {
-      "Struct": [
-        {
-          "name": "title",
-          "schema": "String"
-        },
-        {
-          "name": "author",
-          "schema": "String"
-        },
-        {
-          "name": "year",
-          "schema": "U16"
-        },
-        {
-          "name": "read",
-          "schema": "Bool"
-        }
-      ]
+      "Struct": {
+        "title": "String",
+        "author": "String",
+        "year": "U16",
+        "read": "Bool"
+      }
     }
   }
 }

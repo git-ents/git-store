@@ -1,8 +1,8 @@
 //! Error types, one per operation: [`KeyError`] for key validation,
 //! [`SerializeError`] for the write side, [`DeserializeError`] for the
-//! read side, [`SchemaError`] for schema generation, [`SchemaReadError`]
-//! for schema-driven reads, and [`SchemaWriteError`] for schema-directed
-//! writes.
+//! read side, [`SchemaError`] for schema generation, [`SchemaPinError`] for
+//! the schema-schema pin, [`SchemaReadError`] for schema-driven reads, and
+//! [`SchemaWriteError`] for schema-directed writes.
 
 use gix_hash::ObjectId;
 
@@ -259,55 +259,38 @@ pub enum SchemaError {
     MaxDepth(usize),
 }
 
-/// An error produced by [`SchemaDoc::read_stored_version`](crate::SchemaDoc::read_stored_version),
-/// which reads a stored schema's `version` marker out of band — directly off
-/// the tree, by a fixed entry name — before any attempt to deserialize the
-/// rest of the document.
+/// An error produced by the schema-schema pin
+/// ([`SchemaDoc::write_pinned`](crate::SchemaDoc::write_pinned) and
+/// [`SchemaDoc::read_pinned`](crate::SchemaDoc::read_pinned)/[`read_pin`](crate::SchemaDoc::read_pin)).
 #[derive(Debug, thiserror::Error)]
-pub enum SchemaVersionError {
-    /// The tree has no top-level `version` entry at all.
+pub enum SchemaPinError {
+    /// The document pins a schema-schema this build does not speak.
     ///
-    /// A schema stored before the `version` field existed. There is no sound
-    /// value to assume in its place — 1 and 2 are both real, later,
-    /// versions, not "no version" — so this is reported rather than silently
-    /// treated as some particular version, mirroring
-    /// [`DeserializeError::MissingLeafNewline`] and
-    /// `gix_store::Error::NotSubtreeBound`'s "must be re-stored" posture
-    /// toward a tree that predates a format addition.
+    /// An oid pin gives equality only, never ordering, so this cannot
+    /// distinguish an older generation from a newer one — it can only say
+    /// which generations this build recognizes.
     #[error(
-        "schema tree {0} has no version entry — it predates schema versioning and must be \
-         re-stored"
+        "schema tree {tree} was written against schema-schema {pinned}, which this build does \
+         not recognize; it speaks {}", crate::schema::pin::known_generations()
     )]
-    Missing(ObjectId),
-    /// The `version` entry parses as a number, but not as a version any
-    /// writer emits.
-    ///
-    /// Numbering starts at 1, so a stored `0` is forged or corrupt rather
-    /// than a document to attempt reading. Refusing it keeps [`Missing`]'s
-    /// reasoning honest: that variant declines to assume a version for an
-    /// unversioned tree on the grounds that every number is a real version,
-    /// which would not hold if `0` were simultaneously accepted as one.
-    ///
-    /// [`Missing`]: SchemaVersionError::Missing
-    #[error("schema tree {tree} declares version {version}, which is not a valid schema version")]
-    Invalid {
-        /// The schema tree whose `version` entry is out of range.
+    Unrecognized {
+        /// The schema tree carrying the unrecognized pin.
         tree: ObjectId,
-        /// The declared version.
-        version: u32,
+        /// The pinned schema-schema tree id.
+        pinned: ObjectId,
     },
-    /// The `version` entry exists but its content is not decimal `u32` text.
-    #[error("schema tree {tree} version entry does not parse as a version number: {text:?}")]
-    Parse {
-        /// The schema tree whose `version` entry was unparsable.
-        tree: ObjectId,
-        /// The entry's decoded (newline-stripped) text.
-        text: String,
-    },
-    /// The underlying tree/blob read failed exactly as an ordinary typed
-    /// deserialize would: a missing backing object, a non-tree/non-blob
-    /// object where one was expected, or a leaf blob missing its mandatory
-    /// trailing newline.
+    /// The document carries no `schema` pin entry, and is not itself a known
+    /// schema-schema root.
+    ///
+    /// A truncated or hand-written document must be rejected here, not read
+    /// as though it were the genesis generation.
+    #[error("schema tree {0} carries no schema-schema pin and is not itself a known root")]
+    Unpinned(ObjectId),
+    /// Writing the document, or the schema-schema tree it pins, failed.
+    #[error(transparent)]
+    Serialize(#[from] SerializeError),
+    /// Reading the pin entry, or the document itself, failed exactly as an
+    /// ordinary typed deserialize would.
     #[error(transparent)]
     Deserialize(#[from] DeserializeError),
 }

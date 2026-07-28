@@ -3,15 +3,16 @@
 use std::collections::HashSet;
 
 use facet::Facet;
-use facet_git_tree::{DeserializeError, SchemaDoc, SchemaVersionError, schema_of};
+use facet_git_tree::{DeserializeError, SchemaPinError, schema_of};
 use facet_value::value;
 use gix_store::Store;
 use test_support::init_repo;
 
 /// Rewrite `tree`'s top-level entries via `f`, write the result, and return
-/// its object id. Shared by the `version`-marker tests below, which hand-edit
-/// a normally-published schema tree to look like a document written by a
-/// different (older or newer) binary.
+/// its object id. Shared by the schema-schema pin tests below, which
+/// hand-edit a normally-published schema tree to look like a document
+/// written against a schema-schema this binary does not recognize, or with
+/// no pin at all.
 fn rewrite_tree(
     repo: &gix::Repository,
     tree: gix::ObjectId,
@@ -594,73 +595,26 @@ fn delete_removes_an_entity() {
     assert!(!store.delete("counter", "c").unwrap());
 }
 
-// --- schema version marker (issue d4f8aaaf) ---
+// --- schema-schema pin ---
 
-/// [`Store::put_schema`] refuses a document that declares a `version` above
-/// what this binary writes, rather than silently downgrading it — and
-/// publishes nothing when it does.
+/// A stored schema tree with no `schema` pin entry at all — the shape every
+/// schema published before pinning existed has — is refused as
+/// [`SchemaPinError::Unpinned`], naming re-publishing as the remedy, not
+/// silently read as though it were the genesis generation (it is not: only a
+/// known root generation's own tree id is entitled to that reading).
 #[test]
-fn put_schema_rejects_a_document_declaring_a_future_version() {
+fn schema_with_no_pin_entry_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let repo = gix::open(dir.path()).unwrap();
     let store = Store::open(&repo);
 
-    let mut doc = schema_of::<Counter>().unwrap();
-    doc.version = SchemaDoc::CURRENT_VERSION + 1;
-
-    let err = store.put_schema("counter", &doc).unwrap_err();
-    assert!(
-        matches!(
-            &err,
-            gix_store::Error::SchemaVersionUnsupported { kind, found, supported }
-                if kind == "counter"
-                    && *found == SchemaDoc::CURRENT_VERSION + 1
-                    && *supported == SchemaDoc::CURRENT_VERSION
-        ),
-        "{err:?}"
-    );
-    assert_eq!(
-        store.schema("counter").unwrap(),
-        None,
-        "a rejected put_schema must not publish anything"
-    );
-}
-
-/// [`Store::put_schema`] always stamps [`SchemaDoc::CURRENT_VERSION`] on what
-/// it publishes, regardless of whatever placeholder the caller's document
-/// carried — the version of a schema this binary writes is a property of the
-/// binary, not something a caller can under- or over-state.
-#[test]
-fn put_schema_stamps_the_current_version_regardless_of_the_callers_placeholder() {
-    let dir = tempfile::tempdir().unwrap();
-    init_repo(dir.path());
-    let repo = gix::open(dir.path()).unwrap();
-    let store = Store::open(&repo);
-
-    let mut doc = schema_of::<Counter>().unwrap();
-    doc.version = 0;
-    store.put_schema("counter", &doc).unwrap();
-
-    let stored = store.schema("counter").unwrap().unwrap();
-    assert_eq!(stored.version, SchemaDoc::CURRENT_VERSION);
-}
-
-/// A stored schema tree with no `version` entry at all — the shape every
-/// schema published before the field existed has — is refused as
-/// [`SchemaVersionError::Missing`], naming re-storing as the remedy, not
-/// silently treated as version 0 or 1.
-#[test]
-fn schema_with_no_version_entry_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    init_repo(dir.path());
-    let repo = gix::open(dir.path()).unwrap();
-    let store = Store::open(&repo);
-
-    let good_tree =
-        facet_git_tree::serialize_into(&schema_of::<Counter>().unwrap(), &repo.objects).unwrap();
+    let good_tree = schema_of::<Counter>()
+        .unwrap()
+        .write_pinned(&repo.objects)
+        .unwrap();
     let stripped = rewrite_tree(&repo, good_tree, |entries| {
-        entries.retain(|e| e.filename != "version");
+        entries.retain(|e| e.filename != "schema");
     });
     repo.commit(
         "refs/schema/counter",
@@ -674,36 +628,38 @@ fn schema_with_no_version_entry_is_refused() {
     assert!(
         matches!(
             &err,
-            gix_store::Error::SchemaVersion(SchemaVersionError::Missing(oid)) if *oid == stripped
+            gix_store::Error::SchemaPin(SchemaPinError::Unpinned(oid)) if *oid == stripped
         ),
         "{err:?}"
     );
 }
 
-/// The critical case the whole `version` marker exists for: a schema tree
-/// that both declares a version above this binary's, *and* contains a
-/// `Schema` variant this binary has never heard of (simulated as a `root`
-/// tagged `DateTime`, the same repro the issue names) — something a full
-/// typed deserialize cannot get through. [`Store::schema`] must report
-/// [`Error::SchemaVersionTooNew`] here, not the reflection error the corrupt
-/// content would otherwise produce, which is only possible because
-/// `read_schema` reads `version` out of band *before* attempting to
-/// deserialize the rest of the document.
+/// The critical case the whole schema-schema pin exists for: a schema tree
+/// that both pins a schema-schema this binary does not recognize, *and*
+/// contains a `Schema` variant this binary has never heard of (simulated as
+/// a `root` tagged `DateTime`, the same repro the old version-marker issue
+/// named) — something a full typed deserialize cannot get through.
+/// [`Store::schema`] must report the pin error here, not the reflection error
+/// the corrupt content would otherwise produce, which is only possible
+/// because [`facet_git_tree::SchemaDoc::read_pinned`] checks the pin out of band *before*
+/// attempting to deserialize the rest of the document.
 #[test]
-fn future_version_is_refused_before_a_reflection_incompatible_read_is_attempted() {
+fn unrecognized_pin_is_refused_before_a_reflection_incompatible_read_is_attempted() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let repo = gix::open(dir.path()).unwrap();
     let store = Store::open(&repo);
 
-    let good_tree =
-        facet_git_tree::serialize_into(&schema_of::<Counter>().unwrap(), &repo.objects).unwrap();
-    let future_version = repo.write_blob(b"2\n").unwrap().detach();
+    let good_tree = schema_of::<Counter>()
+        .unwrap()
+        .write_pinned(&repo.objects)
+        .unwrap();
+    let bogus_pin = repo.write_blob(b"not a schema-schema\n").unwrap().detach();
     let bogus_root = repo.write_blob(b"DateTime\n").unwrap().detach();
     let corrupt = rewrite_tree(&repo, good_tree, |entries| {
         for entry in entries.iter_mut() {
-            if entry.filename == "version" {
-                entry.oid = future_version;
+            if entry.filename == "schema" {
+                entry.oid = bogus_pin;
             } else if entry.filename == "root" {
                 entry.mode = gix::objs::tree::EntryKind::Blob.into();
                 entry.oid = bogus_root;
@@ -721,30 +677,33 @@ fn future_version_is_refused_before_a_reflection_incompatible_read_is_attempted(
     let err = store.schema("counter").unwrap_err();
     assert!(
         matches!(
-            err,
-            gix_store::Error::SchemaVersionTooNew { oid, found: 2, supported: 1 } if oid == corrupt
+            &err,
+            gix_store::Error::SchemaPin(SchemaPinError::Unrecognized { tree, pinned })
+                if *tree == corrupt && *pinned == bogus_pin
         ),
-        "expected SchemaVersionTooNew (the out-of-band pre-read catching the future version \
-         before a full deserialize is attempted), got {err:?} instead — a reflection error here \
-         would mean the version check ran too late to matter"
+        "expected SchemaPin(Unrecognized) (the out-of-band pin check catching the unrecognized \
+         pin before a full deserialize is attempted), got {err:?} instead — a reflection error \
+         here would mean the pin check ran too late to matter"
     );
 }
 
 /// The negative control for the test above: the very same `DateTime`-tagged
-/// root, but at the *current* version, is not caught by the version check
-/// (there is nothing to catch) and instead fails during the full typed
-/// deserialize with a reflection error — confirming the corrupted content
-/// really would break an ordinary read, so the version check in the previous
-/// test is not simply vacuous.
+/// root, but with the pin left intact and recognized, is not caught by the
+/// pin check (there is nothing to catch) and instead fails during the full
+/// typed deserialize with a reflection error — confirming the corrupted
+/// content really would break an ordinary read, so the pin check in the
+/// previous test is not simply vacuous.
 #[test]
-fn an_unknown_variant_at_the_current_version_fails_as_a_reflection_error() {
+fn an_unknown_variant_with_a_recognized_pin_fails_as_a_reflection_error() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let repo = gix::open(dir.path()).unwrap();
     let store = Store::open(&repo);
 
-    let good_tree =
-        facet_git_tree::serialize_into(&schema_of::<Counter>().unwrap(), &repo.objects).unwrap();
+    let good_tree = schema_of::<Counter>()
+        .unwrap()
+        .write_pinned(&repo.objects)
+        .unwrap();
     let bogus_root = repo.write_blob(b"DateTime\n").unwrap().detach();
     let corrupt = rewrite_tree(&repo, good_tree, |entries| {
         for entry in entries.iter_mut() {
@@ -766,71 +725,31 @@ fn an_unknown_variant_at_the_current_version_fails_as_a_reflection_error() {
     assert!(
         matches!(
             &err,
-            gix_store::Error::Deserialize(DeserializeError::Reflect(msg))
+            gix_store::Error::SchemaPin(SchemaPinError::Deserialize(DeserializeError::Reflect(msg)))
                 if msg.contains("DateTime")
         ),
         "{err:?}"
     );
 }
 
-/// `0` is not a version any writer emits — numbering starts at 1 — so a
-/// stored `0` is refused rather than read as though it were a real document.
-/// Accepting it would contradict the reasoning behind
-/// [`SchemaVersionError::Missing`], which declines to assume a version for an
-/// unversioned tree precisely because every number is a real one.
+/// Publishing over a schema tip pinned to a schema-schema this binary does
+/// not recognize is refused. Declining to *read* such a schema while
+/// overwriting it anyway would make the same unkeepable claim from the other
+/// direction.
 #[test]
-fn a_stored_version_of_zero_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    init_repo(dir.path());
-    let repo = gix::open(dir.path()).unwrap();
-    let store = Store::open(&repo);
-
-    let good_tree =
-        facet_git_tree::serialize_into(&schema_of::<Counter>().unwrap(), &repo.objects).unwrap();
-    let zero = repo.write_blob(b"0\n").unwrap().detach();
-    let corrupt = rewrite_tree(&repo, good_tree, |entries| {
-        for entry in entries.iter_mut() {
-            if entry.filename == "version" {
-                entry.oid = zero;
-            }
-        }
-    });
-    repo.commit(
-        "refs/schema/counter",
-        "schema counter\n",
-        corrupt,
-        None::<gix::ObjectId>,
-    )
-    .unwrap();
-
-    let err = store.schema("counter").unwrap_err();
-    assert!(
-        matches!(
-            &err,
-            gix_store::Error::SchemaVersion(SchemaVersionError::Invalid { tree, version: 0 })
-                if *tree == corrupt
-        ),
-        "{err:?}"
-    );
-}
-
-/// Publishing over a schema tip whose version this binary cannot read is
-/// refused. Declining to *read* a future schema while overwriting it anyway
-/// would make the same unkeepable claim from the other direction.
-#[test]
-fn put_schema_refuses_to_publish_over_a_future_version_tip() {
+fn put_schema_refuses_to_publish_over_a_tip_with_an_unrecognized_pin() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let repo = gix::open(dir.path()).unwrap();
     let store = Store::open(&repo);
 
     let doc = schema_of::<Counter>().unwrap();
-    let good_tree = facet_git_tree::serialize_into(&doc, &repo.objects).unwrap();
-    let future_version = repo.write_blob(b"2\n").unwrap().detach();
+    let good_tree = doc.write_pinned(&repo.objects).unwrap();
+    let bogus_pin = repo.write_blob(b"not a schema-schema\n").unwrap().detach();
     let ahead = rewrite_tree(&repo, good_tree, |entries| {
         for entry in entries.iter_mut() {
-            if entry.filename == "version" {
-                entry.oid = future_version;
+            if entry.filename == "schema" {
+                entry.oid = bogus_pin;
             }
         }
     });
@@ -846,28 +765,29 @@ fn put_schema_refuses_to_publish_over_a_future_version_tip() {
     assert!(
         matches!(
             err,
-            gix_store::Error::SchemaVersionTooNew { oid, found: 2, supported: 1 } if oid == ahead
+            gix_store::Error::SchemaPin(SchemaPinError::Unrecognized { tree, pinned })
+                if tree == ahead && pinned == bogus_pin
         ),
-        "expected publishing over an unreadable future schema to be refused, got {err:?}"
+        "expected publishing over an unrecognized-pin tip to be refused, got {err:?}"
     );
 }
 
-/// The counterpart to the test above, and the reason it checks the tip's
-/// version rather than merely that it *has* one: a tip that predates
-/// versioning stays overwritable. Republishing is the remedy
-/// [`SchemaVersionError::Missing`] names, so refusing here would strand every
-/// pre-versioning repository with no way to migrate.
+/// The counterpart to the test above, and the reason publishing checks the
+/// tip's pin rather than merely that it *has* one: a tip that predates
+/// pinning — or is otherwise unpinned — stays overwritable. Republishing is
+/// the remedy [`SchemaPinError::Unpinned`] names, so refusing here would
+/// strand every pre-pinning repository with no way to migrate.
 #[test]
-fn put_schema_still_republishes_over_a_pre_versioning_tip() {
+fn put_schema_still_republishes_over_an_unpinned_tip() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let repo = gix::open(dir.path()).unwrap();
     let store = Store::open(&repo);
 
     let doc = schema_of::<Counter>().unwrap();
-    let good_tree = facet_git_tree::serialize_into(&doc, &repo.objects).unwrap();
+    let good_tree = doc.write_pinned(&repo.objects).unwrap();
     let stripped = rewrite_tree(&repo, good_tree, |entries| {
-        entries.retain(|e| e.filename != "version");
+        entries.retain(|e| e.filename != "schema");
     });
     repo.commit(
         "refs/schema/counter",
@@ -885,18 +805,18 @@ fn put_schema_still_republishes_over_a_pre_versioning_tip() {
     assert_eq!(store.schema("counter").unwrap().as_ref(), Some(&doc));
 }
 
-/// The *data* read path is version-gated too, not only [`Store::schema`].
+/// The *data* read path is pin-gated too, not only [`Store::schema`].
 ///
 /// Subtree binding puts the schema inside every data commit (`{schema/,
 /// value/}`) precisely so a fetched value stays readable where its kind was
 /// never published — which makes the data path the one that most needs this
 /// gate, and the one a reader in another repository actually travels.
-/// `retrieve_at` resolves `schema/` through the same version-checked
+/// `retrieve_at` resolves `schema/` through the same pin-checked
 /// `read_schema` as everything else; without this test, a refactor inlining a
 /// plain deserialize there would drop the gate on exactly that path and leave
 /// the rest of the suite green.
 #[test]
-fn a_future_version_in_a_data_commits_schema_subtree_is_refused_on_retrieve() {
+fn an_unrecognized_pin_in_a_data_commits_schema_subtree_is_refused_on_retrieve() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let repo = gix::open(dir.path()).unwrap();
@@ -909,7 +829,7 @@ fn a_future_version_in_a_data_commits_schema_subtree_is_refused_on_retrieve() {
     store
         .store("recipe", "carbonara", &carbonara, None)
         .unwrap();
-    // Reading works before the rewrite, so the failure below is the version
+    // Reading works before the rewrite, so the failure below is the pin
     // gate rather than a fixture that never read in the first place.
     assert_eq!(
         store.retrieve("recipe", "carbonara").unwrap(),
@@ -925,14 +845,14 @@ fn a_future_version_in_a_data_commits_schema_subtree_is_refused_on_retrieve() {
     let root_tree = repo.find_tree(root).unwrap();
     let schema_tree = root_tree.find_entry("schema").unwrap().object_id();
 
-    // Bump only the `version` blob inside the bound schema subtree: the
+    // Repoint only the pin entry inside the bound schema subtree: the
     // document stays perfectly decodable, so nothing but the gate can reject
     // it.
-    let future_version = repo.write_blob(b"2\n").unwrap().detach();
+    let bogus_pin = repo.write_blob(b"not a schema-schema\n").unwrap().detach();
     let corrupt_schema = rewrite_tree(&repo, schema_tree, |entries| {
         for entry in entries.iter_mut() {
-            if entry.filename == "version" {
-                entry.oid = future_version;
+            if entry.filename == "schema" {
+                entry.oid = bogus_pin;
             }
         }
     });
@@ -955,11 +875,11 @@ fn a_future_version_in_a_data_commits_schema_subtree_is_refused_on_retrieve() {
     assert!(
         matches!(
             err,
-            gix_store::Error::SchemaVersionTooNew { oid, found: 2, supported: 1 }
-                if oid == corrupt_schema
+            gix_store::Error::SchemaPin(SchemaPinError::Unrecognized { tree, pinned })
+                if tree == corrupt_schema && pinned == bogus_pin
         ),
-        "expected the data read path to refuse a future-version bound schema, got {err:?} — a \
-         successful read here would mean a value fetched from a newer writer is decoded against \
-         a schema this binary cannot vouch for"
+        "expected the data read path to refuse an unrecognized-pin bound schema, got {err:?} — a \
+         successful read here would mean a value fetched from elsewhere is decoded against a \
+         schema this binary cannot vouch for"
     );
 }

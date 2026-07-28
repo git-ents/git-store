@@ -7,12 +7,13 @@
 //! answer per line. Both satisfy [`Ask`], so the walk is written once. Either
 //! way prompts render to stderr, leaving stdout for the commit id `put` prints.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, StdinLock, Write as _};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input, Select};
-use facet_git_tree::{FieldSchema, Schema, SchemaDoc, VariantKind, VariantSchema};
+use facet_git_tree::{Schema, SchemaDoc, VariantKind};
 use facet_value::{VArray, VObject, Value};
 use gix_store::Store;
 
@@ -31,7 +32,6 @@ pub fn value_for_kind(store: &Store, kind: &str) -> Result<Value> {
 pub fn build_schema() -> Result<SchemaDoc> {
     let root = build_schema_node(prompter().as_mut(), "root type")?;
     Ok(SchemaDoc {
-        version: SchemaDoc::CURRENT_VERSION,
         root,
         defs: Default::default(),
     })
@@ -238,15 +238,15 @@ where
 }
 
 fn build_struct(
-    fields: &[FieldSchema],
+    fields: &BTreeMap<String, Schema>,
     doc: &SchemaDoc,
     label: &str,
     ask: &mut dyn Ask,
 ) -> Result<Value> {
     let mut obj = VObject::new();
-    for f in fields {
-        let value = build_value(&f.schema, doc, &field(label, &f.name), ask)?;
-        obj.insert(f.name.as_str(), value);
+    for (name, schema) in fields {
+        let value = build_value(schema, doc, &field(label, name), ask)?;
+        obj.insert(name.as_str(), value);
     }
     Ok(obj.into())
 }
@@ -283,15 +283,16 @@ fn build_map(
 }
 
 fn build_enum(
-    variants: &[VariantSchema],
+    variants: &BTreeMap<String, VariantKind>,
     doc: &SchemaDoc,
     label: &str,
     ask: &mut dyn Ask,
 ) -> Result<Value> {
-    let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
-    let variant = &variants[ask.select(&format!("{label} variant"), &names, 0)?];
-    let vlabel = field(label, &variant.name);
-    let payload = match &variant.kind {
+    let names: Vec<&str> = variants.keys().map(String::as_str).collect();
+    let name = names[ask.select(&format!("{label} variant"), &names, 0)?];
+    let kind = &variants[name];
+    let vlabel = field(label, name);
+    let payload = match kind {
         VariantKind::Unit => Value::NULL,
         VariantKind::Newtype(inner) => build_value(inner, doc, &vlabel, ask)?,
         VariantKind::Tuple(elems) => {
@@ -304,7 +305,7 @@ fn build_enum(
         VariantKind::Struct(fields) => build_struct(fields, doc, &vlabel, ask)?,
     };
     let mut obj = VObject::new();
-    obj.insert(variant.name.as_str(), payload);
+    obj.insert(name, payload);
     Ok(obj.into())
 }
 
@@ -364,18 +365,18 @@ fn width(ask: &mut dyn Ask, names: &[&str], schemas: &[Schema]) -> Result<Schema
 
 /// Named fields for a struct or struct enum variant, gathered until the user
 /// declines to add another (an empty set is a valid unit-like struct).
-fn collect_fields(ask: &mut dyn Ask) -> Result<Vec<FieldSchema>> {
-    let mut fields = Vec::new();
+fn collect_fields(ask: &mut dyn Ask) -> Result<BTreeMap<String, Schema>> {
+    let mut fields = BTreeMap::new();
     while ask.confirm("add a field?", fields.is_empty())? {
         let name = nonempty(ask, "field name")?;
         let schema = build_schema_node(ask, "field type")?;
-        fields.push(FieldSchema { name, schema });
+        fields.insert(name, schema);
     }
     Ok(fields)
 }
 
 fn enum_schema(ask: &mut dyn Ask) -> Result<Schema> {
-    let mut variants = Vec::new();
+    let mut variants = BTreeMap::new();
     loop {
         let first = variants.is_empty();
         let q = if first {
@@ -390,10 +391,8 @@ fn enum_schema(ask: &mut dyn Ask) -> Result<Schema> {
             return Ok(Schema::Enum(variants));
         }
         let name = nonempty(ask, "variant name")?;
-        variants.push(VariantSchema {
-            name,
-            kind: variant_kind(ask)?,
-        });
+        let kind = variant_kind(ask)?;
+        variants.insert(name, kind);
     }
 }
 

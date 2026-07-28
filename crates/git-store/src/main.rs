@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use facet_git_tree::{FieldSchema, Schema, SchemaDoc, VariantKind};
+use facet_git_tree::{Schema, SchemaDoc, VariantKind};
 use facet_value::{Value, from_value};
 use gix_store::{ObjectId, Store};
 
@@ -279,29 +279,9 @@ fn read_stdin() -> Result<String> {
 }
 
 /// Parse a hand-authored schema JSON document into a [`SchemaDoc`].
-///
-/// A document with no top-level `version` key predates the field — every
-/// file under `crates/git-store/schemas/*.json` is one — and is accepted: a
-/// placeholder `0` is inserted before conversion, purely so the mandatory
-/// `version: u32` field has *something* to read (`SchemaDoc` carries no
-/// `#[facet(default)]` — see `SchemaDoc::read_stored_version`'s docs for why
-/// a missing `version` must stay a hard error on the stored-tree side, which
-/// rules out leaning on the same mechanism here). The placeholder's exact
-/// value is inert: [`Store::put_schema`] always stamps the version it
-/// actually publishes and only ever rejects a document that *explicitly*
-/// declares one above what this binary writes, and `0` never does.
-///
-/// A document that does declare a `version` — above or at
-/// [`SchemaDoc::CURRENT_VERSION`] — passes it through unchanged; `put_schema`
-/// is what decides whether to accept it.
 fn schema_doc_from_json(json: &str) -> Result<SchemaDoc> {
-    let mut value: Value =
+    let value: Value =
         facet_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))?;
-    if let Some(obj) = value.as_object_mut()
-        && obj.get("version").is_none()
-    {
-        obj.insert("version", 0u32);
-    }
     from_value(value).map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))
 }
 
@@ -378,7 +358,7 @@ fn skeleton(schema: &Schema, doc: &SchemaDoc) -> String {
         Schema::Struct(fields) => {
             let body: Vec<_> = fields
                 .iter()
-                .map(|FieldSchema { name, schema }| format!("{name:?}:{}", skeleton(schema, doc)))
+                .map(|(name, schema)| format!("{name:?}:{}", skeleton(schema, doc)))
                 .collect();
             format!("{{{}}}", body.join(","))
         }
@@ -395,9 +375,9 @@ fn skeleton(schema: &Schema, doc: &SchemaDoc) -> String {
         Schema::Map { key, .. } if is_scalar_schema(resolve(key, doc)) => "{}".into(),
         Schema::List(_) | Schema::Map { .. } => "[]".into(),
         Schema::Optional(_) | Schema::Unit | Schema::RawTree | Schema::Dynamic => "null".into(),
-        Schema::Enum(variants) => match variants.first() {
-            Some(variant) => {
-                let payload = match &variant.kind {
+        Schema::Enum(variants) => match variants.first_key_value() {
+            Some((name, kind)) => {
+                let payload = match kind {
                     VariantKind::Unit => "null".to_owned(),
                     VariantKind::Newtype(inner) => skeleton(inner, doc),
                     VariantKind::Tuple(elems) => {
@@ -406,7 +386,7 @@ fn skeleton(schema: &Schema, doc: &SchemaDoc) -> String {
                     }
                     VariantKind::Struct(fields) => skeleton(&Schema::Struct(fields.clone()), doc),
                 };
-                format!("{{{:?}:{}}}", variant.name, payload)
+                format!("{{{name:?}:{payload}}}")
             }
             None => "null".into(),
         },
@@ -434,7 +414,7 @@ fn print_type(kind: &str, doc: &SchemaDoc) {
     println!("{kind}");
     match resolve(&doc.root, doc) {
         Schema::Struct(fields) => {
-            for FieldSchema { name, schema } in fields {
+            for (name, schema) in fields {
                 println!("  {name}: {}", label(schema));
             }
         }
@@ -502,9 +482,9 @@ fn label(schema: &Schema) -> String {
         Schema::Enum(variants) => {
             let names: Vec<_> = variants
                 .iter()
-                .map(|v| match &v.kind {
-                    VariantKind::Unit => v.name.clone(),
-                    _ => format!("{}(…)", v.name),
+                .map(|(name, kind)| match kind {
+                    VariantKind::Unit => name.clone(),
+                    _ => format!("{name}(…)"),
                 })
                 .collect();
             names.join(" | ")

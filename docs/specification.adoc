@@ -369,7 +369,6 @@ The schema types are defined as follows.
 [source,rust]
 ----
 pub struct SchemaDoc {
-    pub version: u32,
     pub root: Schema,
     pub defs: BTreeMap<String, Schema>,
 }
@@ -381,26 +380,16 @@ pub enum Schema {
     U8, U16, U32, U64, U128, USize,
     F32, F64,
     Bytes,
-    Struct(Vec<FieldSchema>),
+    Struct(BTreeMap<String, Schema>),
     Tuple(Vec<Schema>),
     List(Box<Schema>),
     Array { elem: Box<Schema>, len: usize },
     Map { key: Box<Schema>, value: Box<Schema> },
     Optional(Box<Schema>),
-    Enum(Vec<VariantSchema>),
+    Enum(BTreeMap<String, VariantKind>),
     RawTree,
     Dynamic,
     Ref(String),
-}
-
-pub struct FieldSchema {
-    pub name: String,
-    pub schema: Schema,
-}
-
-pub struct VariantSchema {
-    pub name: String,
-    pub kind: VariantKind,
 }
 
 #[repr(u8)]
@@ -408,25 +397,59 @@ pub enum VariantKind {
     Unit,
     Newtype(Box<Schema>),
     Tuple(Vec<Schema>),
-    Struct(Vec<FieldSchema>),
+    Struct(BTreeMap<String, Schema>),
 }
+----
+
+A struct node's fields and an enum node's variants MUST be keyed by name, so the name IS the tree entry name under link:#serialization.design.trees.collections[the scalar-key map layout] — no ordinal indirection, and no special case in the encoder: the schema types are ordinary `Facet` values walked by the same generic encoding, which is what this requirement's self-hosting claim already demands.
+
+Field and variant declaration order is consequently NOT recorded and MUST NOT be relied upon.
+It is not load-bearing anywhere in the encoding — struct values encode name-keyed and enum variants tag by name — so nothing a reader does depends on it.
+
+A field or variant name MUST be a legal tree entry name — the same constraint link:#serialization.design.trees.empty-marker[a dynamic map key] is under — and MUST be rejected otherwise.
+
+A schema tree therefore reads like a type declaration, as `git ls-tree -r` of a published `Issue` schema shows (trimmed to the relevant entries):
+
+[source]
+----
+defs/Issue/Struct/id                     -> "String\n"
+defs/Issue/Struct/labels/List            -> "String\n"
+defs/Issue/Struct/parent/Optional        -> "String\n"
+root/Ref                                 -> "Issue\n"
 ----
 --
 
-[role="requirement", id="schema.representation.version"]
-.Schema Version
+[role="requirement", id="schema.representation.pin"]
+.Schema-Schema Pin
 --
-`SchemaDoc::version` is the format version of the *stored representation as a whole* — both `SchemaDoc`'s own on-disk shape (this section) and the value encoding a schema of that version describes (link:#serialization.schema-directed[schema-directed serialization] and link:#deserialization.schema-driven[schema-driven deserialization]) — versioned in lockstep, deliberately.
-A stored value's schema tree travels bound to the value it governs (subtree schema binding, owned by `gix-store`), so one number carried on the schema is sufficient to pin the codec for the data too: a reader that refuses a schema version above the highest one it understands thereby also refuses to misread a value written by a newer codec, with no separate value-format version needed anywhere.
-One consequence of that coupling MUST be honored by implementers: a codec change that does not alter `SchemaDoc`'s own encoded shape at all still MUST bump `version`, because it changed what a schema of that version describes, even though `schema.representation`'s semver-major trigger (a change to the encoded shape) did not fire.
+Every stored schema document MUST carry, at the fixed top-level tree entry name `schema`, a reference to the tree of the schema-schema generation it was written against.
+That entry is a storage-layer splice added when a document is written, NOT a field of `SchemaDoc`: a `schema:` field on the type would make `schema_of::<SchemaDoc>()` describe the pin and recurse without bottom.
+This is the same construction as `gix-store`'s subtree schema binding, which splices `{value/, schema/}` onto a data commit's tree.
 
-`version` MUST be a leaf blob at a fixed top-level tree entry name, `version`, holding its decimal value exactly as link:#serialization.design.leaves.encoding[leaf encoding] renders a `u32` (including the mandatory trailing newline). Fixing both the name and the encoding is what lets `version` be read with nothing more than `git cat-file blob <tree>:version` — a plain leaf lookup — independent of whatever the rest of the document contains. This is the bootstrap/upgrade property the field exists for: a reader MUST read `version` this way, out of band, *before* attempting to deserialize the document as a whole, and MUST refuse a tree whose `version` exceeds the highest value that reader understands without attempting that deserialize. A document written by a newer binary may contain a `Schema` variant the reader has never heard of, which a full deserialize attempted first would fail on with an opaque reflection error — never reaching a version check performed only after that failure. Reading `version` out of band first, and rejecting there, is what turns that failure into a diagnosable "this document is too new" instead.
+A generation's tree is the serialization of `schema_of::<SchemaDoc>()` — the document describing `SchemaDoc`'s own shape — under that generation's encoding.
 
-Version numbering starts at `1`, so `0` is not a value any writer emits and a reader MUST reject a stored `version` of `0` rather than decode the document. This keeps the preceding rule's reasoning sound: the absence of a `version` entry cannot be read as `0` precisely because every number that *can* appear is a real version.
+The recursion bottoms out at a root generation, whose tree is written with no pin spliced in.
+Absence of a `schema` entry therefore means "this is the root of the tower", and is legitimate ONLY when the tree's own object id is one the reader recognizes as a root generation.
+A reader MUST reject an unpinned tree whose own id it does not recognize as a root: that is a truncated or hand-written document, not the bottom.
+A reader MUST carry the recognized generations as compiled-in constants; the genesis tree of this format version is `ac6765ad5cb7f41804706777260a43751eb2db41`.
 
-A stored tree with no top-level `version` entry at all predates this field. A reader MUST reject it rather than treat the absence as any particular version — `1` and `2` are both real, later, values, not "no version" — reporting the condition distinctly from an unsupported (too-high) version so that the two situations remain diagnosable as what they are: a genuinely too-new document, versus one written before this requirement existed.
+Generation N's own tree MUST pin generation N−1 under its own `schema` entry.
+Ancestry through those entries is what restores the ordering a version number gave and a bare object id does not; there is one generation today, so the chain has length zero, but the format reserves the shape.
 
-Publishing a schema is governed by the same refusal as reading one: a writer MUST NOT replace a published schema whose declared version exceeds what it understands, since overwriting a document whose meaning was never established asserts the same guarantee that reading it would have. A published schema that is unversioned or otherwise unreadable MUST remain replaceable, republishing being the remedy those conditions name.
+A reader MUST determine what a document was written against, and refuse it if it does not recognize it, WITHOUT deserializing the document.
+The read is `git ls-tree <tree> schema` — one tree entry lookup, strictly cheaper than the `git cat-file blob <tree>:version` it replaces, since the pinned id is in the entry itself and no object need be read.
+This ordering is load-bearing, for the same reason the old `version` pre-read was: a document written by a newer binary may contain a `Schema` variant the reader has never heard of, and a typed deserialize attempted first fails with an opaque reflection error before the check is ever reached.
+
+An object-id pin admits equality only.
+A reader MUST NOT infer that an unrecognized pin is newer or older than what it speaks, and the diagnostic MUST say what it honestly knows: this document was written against schema-schema `<oid>`, which I do not recognize; I speak `<the recognized set>`.
+
+Publishing a schema is governed by the same refusal as reading one: a writer MUST NOT replace a published schema pinned to a schema-schema it does not recognize, since overwriting a document whose meaning was never established asserts the same guarantee that reading it would have.
+A published schema that is unpinned or otherwise unreadable MUST remain replaceable, republishing being the remedy those conditions name.
+
+The pin covers less than `version` did, and this requirement does not claim otherwise.
+`version` bound `SchemaDoc`'s own on-disk shape and the value codec a schema of that version describes together, in lockstep: a reader that rejected an unrecognized version thereby also refused to misread a value written by a newer codec, with no separate value-format version needed anywhere.
+The schema-schema pin covers only which generation of `Schema`/`SchemaDoc` a document's schema tree belongs to; it carries no information about the codec that interprets values against that schema (link:#serialization.schema-directed[schema-directed serialization], link:#deserialization.schema-driven[schema-driven deserialization]).
+A codec change that leaves `SchemaDoc`'s own encoded shape untouched is invisible to this pin — the format currently has no mechanism that would catch it.
 --
 
 [role="requirement", id="schema.generation"]

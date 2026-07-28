@@ -9,6 +9,8 @@
 //! The normative mapping lives in `docs/specification.adoc` under
 //! `deserialization.schema-driven`.
 
+use std::collections::BTreeMap;
+
 use facet_value::{VArray, VNumber, VObject, Value};
 use gix_object::{Find, Kind};
 
@@ -210,13 +212,13 @@ fn read_node<F: Find + ?Sized>(
         }
         Schema::Enum(variants) => {
             let (variant_name, inner_oid) = extract_enum_entry(oid, store)?;
-            let Some(variant) = variants.iter().find(|v| v.name == variant_name) else {
+            let Some(kind) = variants.get(&variant_name) else {
                 return Err(SchemaReadError::UnknownVariant {
                     variant: variant_name,
-                    expected: variants.iter().map(|v| v.name.clone()).collect(),
+                    expected: variants.keys().cloned().collect(),
                 });
             };
-            let payload = match (&variant.kind, inner_oid) {
+            let payload = match (kind, inner_oid) {
                 // Unit variant, tagged with a blob (the normal case): the
                 // variant name is the payload's entire content.
                 (VariantKind::Unit, None) => Value::NULL,
@@ -245,7 +247,7 @@ fn read_node<F: Find + ?Sized>(
                 }
             };
             let mut object = VObject::new();
-            object.insert(variant.name.clone(), payload);
+            object.insert(variant_name, payload);
             Ok(object.into())
         }
         // A raw tree is opaque to the schema: surface the reference itself,
@@ -281,17 +283,16 @@ fn read_node<F: Find + ?Sized>(
 /// missing — the same leniency the typed decoder applies.
 fn read_struct<F: Find + ?Sized>(
     entries: &Entries,
-    fields: &[crate::schema::FieldSchema],
+    fields: &BTreeMap<String, Schema>,
     doc: &SchemaDoc,
     store: &F,
     depth: usize,
 ) -> Result<VObject, SchemaReadError> {
     let mut object = VObject::new();
-    for field in fields {
-        let entry = entries.iter().find(|(name, _, _)| *name == field.name);
-        if let Some((_, child_oid, _)) = entry {
-            let v = read_node(child_oid, &field.schema, doc, store, depth + 1)?;
-            object.insert(field.name.clone(), v);
+    for (name, schema) in fields {
+        if let Some((_, child_oid, _)) = entries.iter().find(|(n, _, _)| n == name) {
+            let v = read_node(child_oid, schema, doc, store, depth + 1)?;
+            object.insert(name.clone(), v);
         }
     }
     Ok(object)
