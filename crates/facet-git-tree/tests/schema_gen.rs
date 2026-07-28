@@ -36,6 +36,7 @@ fn re(name: &str) -> Schema {
 
 fn doc(root: Schema, defs: Vec<(&str, Schema)>) -> SchemaDoc {
     SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root,
         defs: defs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
     }

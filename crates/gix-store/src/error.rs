@@ -100,6 +100,55 @@ pub enum Error {
     /// Typed deserialization of a stored `SchemaDoc` failed.
     #[error(transparent)]
     Deserialize(#[from] facet_git_tree::DeserializeError),
+    /// The out-of-band pre-read of a stored schema's `version` marker failed:
+    /// the tree has no `version` entry at all (a pre-versioning document,
+    /// which must be re-stored), or the entry does not parse as a version
+    /// number.
+    ///
+    /// Reported by [`Store::read_schema`](crate::Store) *before* any attempt
+    /// to deserialize the rest of the document — see
+    /// [`SchemaDoc::read_stored_version`](facet_git_tree::SchemaDoc::read_stored_version)
+    /// for why that ordering matters.
+    #[error(transparent)]
+    SchemaVersion(#[from] facet_git_tree::SchemaVersionError),
+    /// A stored schema declares a `version` newer than this binary
+    /// understands ([`SchemaDoc::CURRENT_VERSION`](facet_git_tree::SchemaDoc::CURRENT_VERSION)).
+    ///
+    /// Caught by the out-of-band pre-read, before a full deserialize is even
+    /// attempted, so this fires instead of an opaque reflection error on a
+    /// document containing a `Schema` variant this binary has never heard of.
+    #[error(
+        "schema tree {oid} declares version {found}, but this binary only understands up to \
+         version {supported} — upgrade to read it"
+    )]
+    SchemaVersionTooNew {
+        /// The schema tree that declared the unsupported version.
+        oid: ObjectId,
+        /// The version it declared.
+        found: u32,
+        /// The highest version this binary understands.
+        supported: u32,
+    },
+    /// A caller asked to publish a schema declaring a `version` newer than
+    /// this binary writes.
+    ///
+    /// [`Store::put_schema`](crate::Store) always stamps a published document
+    /// with [`SchemaDoc::CURRENT_VERSION`](facet_git_tree::SchemaDoc::CURRENT_VERSION)
+    /// once it accepts it, so this can only mean the caller explicitly
+    /// declared a version this binary does not know how to write — publishing
+    /// it anyway would claim a codec guarantee this binary cannot keep.
+    #[error(
+        "cannot publish schema for kind {kind:?}: it declares version {found}, but this binary \
+         only writes up to version {supported}"
+    )]
+    SchemaVersionUnsupported {
+        /// The kind the schema was published for.
+        kind: String,
+        /// The version the document declared.
+        found: u32,
+        /// The highest version this binary writes.
+        supported: u32,
+    },
     /// Schema-directed deserialization of a stored value failed.
     #[error(transparent)]
     SchemaRead(#[from] facet_git_tree::SchemaReadError),

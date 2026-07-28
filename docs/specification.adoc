@@ -369,6 +369,7 @@ The schema types are defined as follows.
 [source,rust]
 ----
 pub struct SchemaDoc {
+    pub version: u32,
     pub root: Schema,
     pub defs: BTreeMap<String, Schema>,
 }
@@ -410,6 +411,22 @@ pub enum VariantKind {
     Struct(Vec<FieldSchema>),
 }
 ----
+--
+
+[role="requirement", id="schema.representation.version"]
+.Schema Version
+--
+`SchemaDoc::version` is the format version of the *stored representation as a whole* — both `SchemaDoc`'s own on-disk shape (this section) and the value encoding a schema of that version describes (link:#serialization.schema-directed[schema-directed serialization] and link:#deserialization.schema-driven[schema-driven deserialization]) — versioned in lockstep, deliberately.
+A stored value's schema tree travels bound to the value it governs (subtree schema binding, owned by `gix-store`), so one number carried on the schema is sufficient to pin the codec for the data too: a reader that refuses a schema version above the highest one it understands thereby also refuses to misread a value written by a newer codec, with no separate value-format version needed anywhere.
+One consequence of that coupling MUST be honored by implementers: a codec change that does not alter `SchemaDoc`'s own encoded shape at all still MUST bump `version`, because it changed what a schema of that version describes, even though `schema.representation`'s semver-major trigger (a change to the encoded shape) did not fire.
+
+`version` MUST be a leaf blob at a fixed top-level tree entry name, `version`, holding its decimal value exactly as link:#serialization.design.leaves.encoding[leaf encoding] renders a `u32` (including the mandatory trailing newline). Fixing both the name and the encoding is what lets `version` be read with nothing more than `git cat-file blob <tree>:version` — a plain leaf lookup — independent of whatever the rest of the document contains. This is the bootstrap/upgrade property the field exists for: a reader MUST read `version` this way, out of band, *before* attempting to deserialize the document as a whole, and MUST refuse a tree whose `version` exceeds the highest value that reader understands without attempting that deserialize. A document written by a newer binary may contain a `Schema` variant the reader has never heard of, which a full deserialize attempted first would fail on with an opaque reflection error — never reaching a version check performed only after that failure. Reading `version` out of band first, and rejecting there, is what turns that failure into a diagnosable "this document is too new" instead.
+
+Version numbering starts at `1`, so `0` is not a value any writer emits and a reader MUST reject a stored `version` of `0` rather than decode the document. This keeps the preceding rule's reasoning sound: the absence of a `version` entry cannot be read as `0` precisely because every number that *can* appear is a real version.
+
+A stored tree with no top-level `version` entry at all predates this field. A reader MUST reject it rather than treat the absence as any particular version — `1` and `2` are both real, later, values, not "no version" — reporting the condition distinctly from an unsupported (too-high) version so that the two situations remain diagnosable as what they are: a genuinely too-new document, versus one written before this requirement existed.
+
+Publishing a schema is governed by the same refusal as reading one: a writer MUST NOT replace a published schema whose declared version exceeds what it understands, since overwriting a document whose meaning was never established asserts the same guarantee that reading it would have. A published schema that is unversioned or otherwise unreadable MUST remain replaceable, republishing being the remedy those conditions name.
 --
 
 [role="requirement", id="schema.generation"]

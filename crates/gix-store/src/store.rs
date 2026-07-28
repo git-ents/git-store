@@ -100,9 +100,62 @@ impl<'r> Store<'r> {
 
     /// Publish (or evolve) the schema for `kind`, committing it forward over
     /// the current schema tip. Returns the new schema commit id.
+    ///
+    /// `doc` is always published under [`SchemaDoc::CURRENT_VERSION`] — its
+    /// own `version` field is overwritten with that value before writing,
+    /// since a document this binary publishes is by construction exactly as
+    /// new as this binary's codec. The one thing `doc.version` still
+    /// controls is rejection: a value above `CURRENT_VERSION` fails as
+    /// [`Error::SchemaVersionUnsupported`] rather than being silently
+    /// downgraded, since a caller that declared a future version meant
+    /// something by it that stamping over cannot honor.
+    ///
+    /// The currently published tip is gated on the same terms: publishing
+    /// over a schema whose version this binary cannot read fails as
+    /// [`Error::SchemaVersionTooNew`], rather than silently replacing a
+    /// document whose meaning it never established. A tip that is merely
+    /// unversioned or unreadable stays overwritable — that is the migration
+    /// path off a pre-versioning schema.
     pub fn put_schema(&self, kind: &str, doc: &SchemaDoc) -> Result<ObjectId, Error> {
         check_component("kind", kind)?;
-        let tree = serialize_into(doc, &self.repo.objects)?;
+        if doc.version > SchemaDoc::CURRENT_VERSION {
+            return Err(Error::SchemaVersionUnsupported {
+                kind: kind.to_owned(),
+                found: doc.version,
+                supported: SchemaDoc::CURRENT_VERSION,
+            });
+        }
+        // Refusing to *read* a future schema but overwriting it anyway would
+        // make the same unkeepable codec claim from the other direction, so
+        // the published tip is gated as well as the incoming document.
+        //
+        // Only a version that reads successfully and is too new blocks the
+        // write. A tip that is unversioned, unparsable, or otherwise
+        // unreadable is deliberately still overwritable: republishing is
+        // exactly the "must be re-stored" remedy those errors name, and
+        // refusing here would strand such a repository with no way forward.
+        //
+        // The check is not atomic with the write — `commit_forward` takes the
+        // ref lock afterwards — so a writer racing in between can still land a
+        // future version. That narrows to a race a single-writer repository
+        // does not have, rather than closing it.
+        if let Some(commit) = self.tip(&self.schema_ref(kind))? {
+            let tip_tree = self.commit_tree(commit)?;
+            if let Ok(found) = SchemaDoc::read_stored_version(&tip_tree, &self.repo.objects)
+                && found > SchemaDoc::CURRENT_VERSION
+            {
+                return Err(Error::SchemaVersionTooNew {
+                    oid: tip_tree,
+                    found,
+                    supported: SchemaDoc::CURRENT_VERSION,
+                });
+            }
+        }
+        let stamped = SchemaDoc {
+            version: SchemaDoc::CURRENT_VERSION,
+            ..doc.clone()
+        };
+        let tree = serialize_into(&stamped, &self.repo.objects)?;
         self.commit_forward(&self.schema_ref(kind), &format!("schema {kind}\n"), tree)
     }
 
@@ -311,7 +364,24 @@ impl<'r> Store<'r> {
     }
 
     /// Deserialize the tree `oid` as a stored [`SchemaDoc`].
+    ///
+    /// Reads the document's `version` marker out of band *first* — directly
+    /// off the tree, by [`SchemaDoc::read_stored_version`], before any
+    /// attempt to deserialize the rest — and refuses a version above
+    /// [`SchemaDoc::CURRENT_VERSION`] as [`Error::SchemaVersionTooNew`]. That
+    /// ordering is load-bearing: a document new enough to need refusing may
+    /// contain a `Schema` variant this binary has never heard of, which a
+    /// typed deserialize attempted first would fail on with an opaque
+    /// reflection error instead of ever reaching this check.
     fn read_schema(&self, oid: ObjectId) -> Result<SchemaDoc, Error> {
+        let version = SchemaDoc::read_stored_version(&oid, &self.repo.objects)?;
+        if version > SchemaDoc::CURRENT_VERSION {
+            return Err(Error::SchemaVersionTooNew {
+                oid,
+                found: version,
+                supported: SchemaDoc::CURRENT_VERSION,
+            });
+        }
         Ok(deserialize(&oid, &self.repo.objects)?)
     }
 
@@ -373,8 +443,14 @@ impl<'r> Store<'r> {
     /// One pre-binding shape stays out of reach: a value with exactly two
     /// top-level fields named `value` and `schema` where `schema` is itself a
     /// tree is indistinguishable here from a real binding, and surfaces
-    /// further in as a schema that will not deserialize. It still fails, just
-    /// less pointedly, and no commit written from here on can take that shape.
+    /// further in as a schema that will not read — in practice now as
+    /// [`SchemaVersionError::Missing`], the version pre-read being the first
+    /// thing that touches that subtree, which diagnoses such a tree as
+    /// predating schema versioning rather than as the unrelated value it
+    /// actually is. It still fails, just less pointedly, and no commit
+    /// written from here on can take that shape.
+    ///
+    /// [`SchemaVersionError::Missing`]: facet_git_tree::SchemaVersionError::Missing
     ///
     /// Both objects are then confirmed present, so an incomplete transfer
     /// names the absent subtree instead of collapsing to a bare `gix`

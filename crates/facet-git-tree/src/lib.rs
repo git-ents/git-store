@@ -23,7 +23,8 @@ pub use gix_object::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 
 pub use de::{check_key, deserialize, deserialize_into};
 pub use error::{
-    DeserializeError, KeyError, SchemaError, SchemaReadError, SchemaWriteError, SerializeError,
+    DeserializeError, KeyError, SchemaError, SchemaReadError, SchemaVersionError, SchemaWriteError,
+    SerializeError,
 };
 pub use raw_tree::RawTree;
 #[cfg(feature = "value")]

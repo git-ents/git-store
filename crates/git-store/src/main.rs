@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use facet_git_tree::{FieldSchema, Schema, SchemaDoc, VariantKind};
-use facet_value::Value;
+use facet_value::{Value, from_value};
 use gix_store::{ObjectId, Store};
 
 #[derive(Parser)]
@@ -160,8 +160,7 @@ fn main() -> Result<()> {
                 let doc = if interactive {
                     interactive::build_schema()?
                 } else {
-                    facet_json::from_str(&read_source(file.as_ref())?)
-                        .map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))?
+                    schema_doc_from_json(&read_source(file.as_ref())?)?
                 };
                 println!("{}", store.put_schema(&kind, &doc)?);
             }
@@ -277,6 +276,33 @@ fn read_stdin() -> Result<String> {
         .read_to_string(&mut buf)
         .context("reading stdin")?;
     Ok(buf)
+}
+
+/// Parse a hand-authored schema JSON document into a [`SchemaDoc`].
+///
+/// A document with no top-level `version` key predates the field — every
+/// file under `crates/git-store/schemas/*.json` is one — and is accepted: a
+/// placeholder `0` is inserted before conversion, purely so the mandatory
+/// `version: u32` field has *something* to read (`SchemaDoc` carries no
+/// `#[facet(default)]` — see `SchemaDoc::read_stored_version`'s docs for why
+/// a missing `version` must stay a hard error on the stored-tree side, which
+/// rules out leaning on the same mechanism here). The placeholder's exact
+/// value is inert: [`Store::put_schema`] always stamps the version it
+/// actually publishes and only ever rejects a document that *explicitly*
+/// declares one above what this binary writes, and `0` never does.
+///
+/// A document that does declare a `version` — above or at
+/// [`SchemaDoc::CURRENT_VERSION`] — passes it through unchanged; `put_schema`
+/// is what decides whether to accept it.
+fn schema_doc_from_json(json: &str) -> Result<SchemaDoc> {
+    let mut value: Value =
+        facet_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))?;
+    if let Some(obj) = value.as_object_mut()
+        && obj.get("version").is_none()
+    {
+        obj.insert("version", 0u32);
+    }
+    from_value(value).map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))
 }
 
 /// Content from `-F <file>`, or stdin when no file is given.

@@ -1,17 +1,23 @@
 //! Integration tests for schema self-hosting: `SchemaDoc` is an ordinary
 //! `Facet` value stored through this crate's own encoding.
 //!
-//! Covers spec requirement:
+//! Covers spec requirements:
 //!   schema.representation
 //!     — schemas are self-hosted with no special-cased representation, and
 //!       their on-disk form is a public, semver-major contract (guarded here
 //!       by a golden object id).
+//!   schema.representation.version
+//!     — every stored document carries a `version` marker readable out of
+//!       band, off a fixed top-level entry name, before any attempt to
+//!       deserialize the rest of it.
 
 use std::collections::BTreeMap;
 
 use facet_git_tree::{
-    EntryKind, FieldSchema, Schema, SchemaDoc, deserialize, schema_of, serialize,
+    DeserializeError, EntryKind, FieldSchema, Schema, SchemaDoc, SchemaVersionError, deserialize,
+    schema_of, serialize,
 };
+use gix_object::Write as _;
 
 mod common;
 use common::{Event, Nested, Person, TreeNode, find_entry};
@@ -63,11 +69,16 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 /// leaf blob, including a unit variant's name blob, now carries a mandatory
 /// trailing `\n`, which changes every blob (and therefore every containing
 /// tree) in the document.
+///
+/// Updated again for the `SchemaDoc::version` marker (issue d4f8aaaf): every
+/// `SchemaDoc` — including the one `schema_of::<Person>()` returns — now
+/// carries an extra top-level `version` entry, which changes the document's
+/// root id even though `Person`'s own schema shape did not change.
 #[test]
 fn person_schema_golden_oid() -> anyhow::Result<()> {
     let doc = schema_of::<Person>()?;
     let (root, _store) = serialize(&doc)?;
-    assert_eq!(root.to_string(), "8dc7a659cc4e3976fd90968c6f72f01889280729");
+    assert_eq!(root.to_string(), "ae6b94fb40c62a58635655e12473faf1a5e7dece");
     Ok(())
 }
 
@@ -93,6 +104,7 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
             }]),
         );
         SchemaDoc {
+            version: SchemaDoc::CURRENT_VERSION,
             root: Schema::Ref("Recipe".into()),
             defs,
         }
@@ -134,6 +146,101 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
     assert_eq!(
         after_store.get_blob(&after_schema.oid).expect("blob"),
         b"String\n"
+    );
+    Ok(())
+}
+
+// --- version marker (issue d4f8aaaf) ---
+
+/// The `version` marker reads back to [`SchemaDoc::CURRENT_VERSION`] for any
+/// document this crate generates, via the out-of-band pre-read alone — no
+/// full typed deserialize needed.
+#[test]
+fn read_stored_version_reads_the_current_version() -> anyhow::Result<()> {
+    let doc = schema_of::<Nested>()?;
+    let (root, store) = serialize(&doc)?;
+    assert_eq!(
+        SchemaDoc::read_stored_version(&root, &store)?,
+        SchemaDoc::CURRENT_VERSION
+    );
+    Ok(())
+}
+
+/// The `version` entry is a leaf blob carrying the mandatory trailing
+/// newline (issue 5b39f084) exactly like every other leaf, so it reads with
+/// nothing more than `git cat-file blob <tree>:version`.
+#[test]
+fn version_blob_carries_its_trailing_newline() -> anyhow::Result<()> {
+    let doc = schema_of::<Nested>()?;
+    let (root, store) = serialize(&doc)?;
+    let version_entry = find_entry(&store, &root, "version");
+    assert_eq!(version_entry.mode.kind(), EntryKind::Blob);
+    let raw = store
+        .get_blob(&version_entry.oid)
+        .expect("version entry must be a blob");
+    assert_eq!(raw, b"1\n");
+    Ok(())
+}
+
+/// A stored schema tree with no `version` entry at all — a document stored
+/// before the field existed — is reported as [`SchemaVersionError::Missing`],
+/// never silently treated as version 0 or 1.
+#[test]
+fn read_stored_version_reports_a_missing_entry() -> anyhow::Result<()> {
+    let doc = schema_of::<Nested>()?;
+    let (root, store) = serialize(&doc)?;
+    let entries: Vec<_> = store
+        .get_tree(&root)
+        .expect("root is a tree")
+        .into_iter()
+        .filter(|e| e.filename != "version")
+        .collect();
+    let stripped = store.write(&gix_object::Tree { entries }).unwrap();
+
+    let err = SchemaDoc::read_stored_version(&stripped, &store).unwrap_err();
+    assert!(
+        matches!(err, SchemaVersionError::Missing(oid) if oid == stripped),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+/// The whole point of reading `version` out of band: it succeeds even when
+/// the rest of the document is not intelligible to this binary — simulated
+/// here as a `root` tagged with a hypothetical `DateTime` variant `Schema`
+/// does not define, the same repro the issue names. A full typed
+/// deserialize of the same tree fails on that unknown variant with a
+/// reflection error, which is exactly the failure `read_stored_version`
+/// lets a caller check for *before* it happens.
+#[test]
+fn read_stored_version_ignores_an_undecodable_document() -> anyhow::Result<()> {
+    let doc = schema_of::<Nested>()?;
+    let (root, store) = serialize(&doc)?;
+
+    let mut entries = store.get_tree(&root).expect("root is a tree");
+    let bogus_root = store
+        .write_buf(gix_object::Kind::Blob, b"DateTime\n")
+        .unwrap();
+    for entry in &mut entries {
+        if entry.filename == "root" {
+            entry.oid = bogus_root;
+            entry.mode = gix_object::tree::EntryKind::Blob.into();
+        }
+    }
+    let corrupt = store.write(&gix_object::Tree { entries }).unwrap();
+
+    // The out-of-band read does not care: it inspects only `version`.
+    assert_eq!(
+        SchemaDoc::read_stored_version(&corrupt, &store)?,
+        SchemaDoc::CURRENT_VERSION
+    );
+
+    // A full typed deserialize, in contrast, cannot get past the unknown
+    // variant — a reflection error, not a version error.
+    let err = deserialize::<SchemaDoc>(&corrupt, &store).unwrap_err();
+    assert!(
+        matches!(&err, DeserializeError::Reflect(msg) if msg.contains("DateTime")),
+        "{err:?}"
     );
     Ok(())
 }

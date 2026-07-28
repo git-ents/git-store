@@ -259,6 +259,59 @@ pub enum SchemaError {
     MaxDepth(usize),
 }
 
+/// An error produced by [`SchemaDoc::read_stored_version`](crate::SchemaDoc::read_stored_version),
+/// which reads a stored schema's `version` marker out of band — directly off
+/// the tree, by a fixed entry name — before any attempt to deserialize the
+/// rest of the document.
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaVersionError {
+    /// The tree has no top-level `version` entry at all.
+    ///
+    /// A schema stored before the `version` field existed. There is no sound
+    /// value to assume in its place — 1 and 2 are both real, later,
+    /// versions, not "no version" — so this is reported rather than silently
+    /// treated as some particular version, mirroring
+    /// [`DeserializeError::MissingLeafNewline`] and
+    /// `gix_store::Error::NotSubtreeBound`'s "must be re-stored" posture
+    /// toward a tree that predates a format addition.
+    #[error(
+        "schema tree {0} has no version entry — it predates schema versioning and must be \
+         re-stored"
+    )]
+    Missing(ObjectId),
+    /// The `version` entry parses as a number, but not as a version any
+    /// writer emits.
+    ///
+    /// Numbering starts at 1, so a stored `0` is forged or corrupt rather
+    /// than a document to attempt reading. Refusing it keeps [`Missing`]'s
+    /// reasoning honest: that variant declines to assume a version for an
+    /// unversioned tree on the grounds that every number is a real version,
+    /// which would not hold if `0` were simultaneously accepted as one.
+    ///
+    /// [`Missing`]: SchemaVersionError::Missing
+    #[error("schema tree {tree} declares version {version}, which is not a valid schema version")]
+    Invalid {
+        /// The schema tree whose `version` entry is out of range.
+        tree: ObjectId,
+        /// The declared version.
+        version: u32,
+    },
+    /// The `version` entry exists but its content is not decimal `u32` text.
+    #[error("schema tree {tree} version entry does not parse as a version number: {text:?}")]
+    Parse {
+        /// The schema tree whose `version` entry was unparsable.
+        tree: ObjectId,
+        /// The entry's decoded (newline-stripped) text.
+        text: String,
+    },
+    /// The underlying tree/blob read failed exactly as an ordinary typed
+    /// deserialize would: a missing backing object, a non-tree/non-blob
+    /// object where one was expected, or a leaf blob missing its mandatory
+    /// trailing newline.
+    #[error(transparent)]
+    Deserialize(#[from] DeserializeError),
+}
+
 /// An error produced by schema-driven deserialization
 /// (`deserialize_value_with_schema` and `validate_with_schema`, available with
 /// the `value` feature).

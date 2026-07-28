@@ -172,3 +172,91 @@ fn unknown_kind_reports_no_schema() {
     assert!(!ok);
     assert!(err.contains("no schema published"), "stderr: {err}");
 }
+
+/// A hand-authored schema JSON document with no top-level `version` key —
+/// exactly the shape every file under `crates/git-store/schemas/*.json`
+/// has — is accepted and published stamped with the current version, so
+/// those pre-existing files keep working unmodified.
+#[test]
+fn schema_put_json_without_version_key_is_accepted_and_stamped() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let book_schema = r#"{
+        "root": { "Ref": "Book" },
+        "defs": {
+            "Book": {
+                "Struct": [
+                    { "name": "title", "schema": "String" },
+                    { "name": "year", "schema": "U16" }
+                ]
+            }
+        }
+    }"#;
+    let (_, err, ok) = run(path, Some(book_schema), &["schema", "put", "book"]);
+    assert!(ok, "schema put failed: {err}");
+
+    let (out, err, ok) = run(path, None, &["schema", "get", "book"]);
+    assert!(ok, "schema get failed: {err}");
+    assert!(
+        out.contains("\"version\": 1"),
+        "a version-less document must be stamped with the current version: {out}"
+    );
+
+    // And it accepts a conforming value, exactly as a schema published from
+    // a `#[derive(Facet)]` type would.
+    let value = r#"{"title":"Dune","year":1965}"#;
+    let (_, err, ok) = run(path, Some(value), &["put", "book", "dune"]);
+    assert!(ok, "put against version-less schema failed: {err}");
+}
+
+/// A hand-authored schema JSON document that *does* declare a `version` —
+/// one above what this binary writes — is rejected outright, not silently
+/// downgraded to the current version.
+#[test]
+fn schema_put_json_declaring_a_future_version_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let future_schema = r#"{
+        "version": 999999,
+        "root": { "Ref": "Book" },
+        "defs": {
+            "Book": { "Struct": [ { "name": "title", "schema": "String" } ] }
+        }
+    }"#;
+    let (_, err, ok) = run(path, Some(future_schema), &["schema", "put", "book"]);
+    assert!(!ok, "schema put should have been rejected");
+    assert!(
+        err.contains("999999") && err.contains("version"),
+        "stderr should name the unsupported version: {err}"
+    );
+
+    let (_, _, ok) = run(path, None, &["schema", "get", "book"]);
+    assert!(
+        !ok,
+        "a rejected schema put must not have published anything"
+    );
+}
+
+/// The actual hand-authored files under `crates/git-store/schemas/*.json` —
+/// written before `version` existed — load through `-F` unmodified.
+#[test]
+fn preexisting_schema_json_files_load_via_file_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for kind in ["book", "recipe", "task"] {
+        let file = manifest_dir.join("schemas").join(format!("{kind}.json"));
+        let (_, err, ok) = run(
+            path,
+            None,
+            &["schema", "put", kind, "-F", file.to_str().unwrap()],
+        );
+        assert!(ok, "schema put {kind} from file failed: {err}");
+    }
+}

@@ -31,6 +31,7 @@ pub fn value_for_kind(store: &Store, kind: &str) -> Result<Value> {
 pub fn build_schema() -> Result<SchemaDoc> {
     let root = build_schema_node(prompter().as_mut(), "root type")?;
     Ok(SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root,
         defs: Default::default(),
     })

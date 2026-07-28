@@ -201,6 +201,7 @@ fn raw_tree_reference_matches_typed() {
 #[test]
 fn dynamic_node_matches_plain_serialize() {
     let doc = SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Dynamic,
         defs: Default::default(),
     };
@@ -265,6 +266,7 @@ fn float_into_integer_field_is_rejected() {
 fn integer_too_large_for_f64_is_refused() {
     // 2^53 + 1 has no exact f64 representation.
     let doc = SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::F64,
         defs: Default::default(),
     };
@@ -343,6 +345,7 @@ fn multi_member_enum_object_is_rejected() {
 #[test]
 fn unknown_ref_is_rejected() {
     let doc = SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Ref("missing".into()),
         defs: Default::default(),
     };
@@ -381,6 +384,7 @@ fn priority_field_change_is_a_visible_blob_diff() {
         },
     ];
     let doc = SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Struct(vec![FieldSchema {
             name: "priority".into(),
             schema: Schema::Enum(priority_variants),
@@ -428,6 +432,7 @@ fn priority_field_change_is_a_visible_blob_diff() {
 #[test]
 fn empty_tags_list_is_visible_as_a_marker_entry() {
     let doc = SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Struct(vec![FieldSchema {
             name: "tags".into(),
             schema: Schema::List(Box::new(Schema::String)),
@@ -458,6 +463,7 @@ fn ref_cycle_hits_the_depth_bound() {
     let mut defs = std::collections::BTreeMap::new();
     defs.insert("loop".to_string(), Schema::Ref("loop".into()));
     let doc = SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Ref("loop".into()),
         defs,
     };
@@ -485,6 +491,7 @@ fn ref_cycle_hits_the_depth_bound() {
 #[test]
 fn an_empty_tuple_is_not_markered_and_reads_back() {
     let doc = SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Struct(vec![FieldSchema {
             name: "nothing".into(),
             schema: Schema::Tuple(vec![]),
@@ -527,6 +534,7 @@ fn zero_field_tuple_struct_matches_typed() {
 #[test]
 fn a_schema_field_named_as_the_presence_marker_is_rejected() {
     let doc = SchemaDoc {
+        version: SchemaDoc::CURRENT_VERSION,
         root: Schema::Struct(vec![FieldSchema {
             name: "_".into(),
             schema: Schema::String,
