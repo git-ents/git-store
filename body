@@ -11,12 +11,12 @@ absent, so a value missing most of its fields conforms.
 
 **Why it matters**
 Reproduced against the shipped `task` schema, whose four fields are all
-non-optional:
+non-optional. Piping the single-field object `{"summary": "x"}` at it:
 
 ```
-$ echo (dq){(dq)summary(dq):(dq)x(dq)}(dq) | git store put task t3
+$ git store put task t3 -F partial.json
 64e7087ecbc08add3d7744121b69cf66d3f52624
-$ git store put task t3 ; git store get task t3
+$ git store get task t3
 {
   "summary": "x"
 }
