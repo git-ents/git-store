@@ -1111,6 +1111,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-refstore"
+version = "0.1.0"
+dependencies = [
+ "gix",
+ "gix-hash",
+ "tempfile",
+ "test-support",
+ "thiserror",
+]
+
+[[package]]
 name = "gix-revision"
 version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
