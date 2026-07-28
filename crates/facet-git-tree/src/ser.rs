@@ -171,12 +171,18 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
         return Ok((oid, EntryKind::Tree));
     }
 
-    // Vec / Array / slice → tree with ordinal keys
+    // Vec / Array / slice → tree with ordinal keys. An empty sequence writes
+    // the presence marker instead of a literal empty tree, so it stays
+    // visible to `git ls-tree -r`/`diff` per `crate::marker`.
     if matches!(shape.def, Def::List(_) | Def::Array(_) | Def::Slice(_)) {
         let entries = serialize_sequence(peek, store)?;
-        let oid = store
-            .write(&gix_object::Tree { entries })
-            .map_err(SerializeError::Backend)?;
+        let oid = if entries.is_empty() {
+            crate::marker::write_marker_tree(store)?
+        } else {
+            store
+                .write(&gix_object::Tree { entries })
+                .map_err(SerializeError::Backend)?
+        };
         return Ok((oid, EntryKind::Tree));
     }
 
@@ -243,9 +249,16 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
             }
         }
         entries.sort();
-        let oid = store
-            .write(&gix_object::Tree { entries })
-            .map_err(SerializeError::Backend)?;
+        // An empty map (either layout falls through to the same `entries`
+        // here) writes the presence marker instead of a literal empty tree,
+        // per `crate::marker`.
+        let oid = if entries.is_empty() {
+            crate::marker::write_marker_tree(store)?
+        } else {
+            store
+                .write(&gix_object::Tree { entries })
+                .map_err(SerializeError::Backend)?
+        };
         return Ok((oid, EntryKind::Tree));
     }
 
@@ -265,32 +278,37 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
                 .map_err(SerializeError::Backend)?;
             return Ok((oid, EntryKind::Tree));
         } else {
-            // None: empty tree
-            let oid = store
-                .write(&gix_object::Tree { entries: vec![] })
-                .map_err(SerializeError::Backend)?;
+            // None: the presence marker, not a literal empty tree — see
+            // `crate::marker`.
+            let oid = crate::marker::write_marker_tree(store)?;
             return Ok((oid, EntryKind::Tree));
         }
     }
 
-    // Enum → single-entry tree: variant name → variant contents
+    // Enum → externally tagged: a unit variant collapses to a bare blob
+    // holding the variant name (its entire information content), so it
+    // appears as ordinary content to `git diff`/`ls-tree -r` instead of
+    // vanishing as a tree-entry rename with no blob underneath. Every other
+    // variant keeps the single-entry tree (variant name → payload) form.
     if let facet::Type::User(facet::UserType::Enum(_)) = shape.ty {
         let pe = peek.into_enum().map_err(reflect)?;
         let variant = pe.active_variant().map_err(reflect)?;
         let variant_name = pe.variant_name_active().map_err(reflect)?;
 
-        // Encode the variant's payload (unit → empty tree, newtype → the field's
-        // own encoding directly, tuple → ordinal-keyed tree, struct → name-keyed
-        // tree). A tuple variant is `StructKind::TupleStruct`; a struct variant is
+        if variant.data.fields.is_empty() {
+            let oid = store
+                .write_buf(Kind::Blob, variant_name.as_bytes())
+                .map_err(SerializeError::Backend)?;
+            return Ok((oid, EntryKind::Blob));
+        }
+
+        // Encode the variant's payload (newtype → the field's own encoding
+        // directly, tuple → ordinal-keyed tree, struct → name-keyed tree). A
+        // tuple variant is `StructKind::TupleStruct`; a struct variant is
         // `StructKind::Struct`.
         let positional = matches!(variant.data.kind, facet::StructKind::TupleStruct);
         let newtype = positional && variant.data.fields.len() == 1;
-        let (inner_oid, inner_kind) = if variant.data.fields.is_empty() {
-            let oid = store
-                .write(&gix_object::Tree { entries: vec![] })
-                .map_err(SerializeError::Backend)?;
-            (oid, EntryKind::Tree)
-        } else if newtype {
+        let (inner_oid, inner_kind) = if newtype {
             // Newtype variant: resolves directly to the encoding of its one field.
             let child = pe
                 .field(0)
@@ -347,8 +365,12 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
 /// the dynamic value can be rendered at all*: strings are their UTF-8 bytes,
 /// bytes a raw blob, booleans and numbers their textual form, arrays
 /// ordinal-keyed trees, and objects name-keyed trees (each key validated by
-/// [`check_key`]). Null is the empty tree — an empty blob would collide with
-/// `""` and empty bytes, which are far more common than null.
+/// [`check_key`]). Null is the [`crate::marker`] presence-marker tree — an
+/// empty blob would collide with `""` and empty bytes, which are far more
+/// common than null, and a literal empty tree would be invisible to
+/// `ls-tree -r`/`diff`, exactly the problem the marker exists to avoid. An
+/// empty `Array` or `Object` writes the same marker tree, for the same
+/// reason.
 ///
 /// The generic vtable cannot render every kind exactly: integers beyond 64
 /// bits, QNames, and UUIDs need the `value`-feature downcast to
@@ -378,8 +400,21 @@ fn serialize_dynamic<W: Write + ?Sized>(
         Ok((oid, EntryKind::Tree))
     };
 
+    // An empty tree, for `Null`, `Array`, and `Object`, writes the presence
+    // marker instead — see `crate::marker` — so it stays visible to
+    // `ls-tree -r`/`diff` rather than vanishing.
+    let tree_or_marker =
+        |entries: Vec<TreeEntry>| -> Result<(ObjectId, EntryKind), SerializeError> {
+            if entries.is_empty() {
+                let oid = crate::marker::write_marker_tree(store)?;
+                Ok((oid, EntryKind::Tree))
+            } else {
+                tree(entries)
+            }
+        };
+
     match dv.kind() {
-        DynValueKind::Null => tree(vec![]),
+        DynValueKind::Null => tree_or_marker(vec![]),
         DynValueKind::Bool => {
             let b = dv
                 .as_bool()
@@ -479,7 +514,7 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 });
             }
             entries.sort();
-            tree(entries)
+            tree_or_marker(entries)
         }
         DynValueKind::Object => {
             let iter = dv
@@ -496,7 +531,7 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 });
             }
             entries.sort();
-            tree(entries)
+            tree_or_marker(entries)
         }
         DynValueKind::DateTime => {
             let parts = dv

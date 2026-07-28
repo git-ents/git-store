@@ -26,7 +26,11 @@ pub enum Error {
         /// Why it was rejected.
         reason: &'static str,
     },
-    /// A data commit has no `Schema:` trailer, so its tree cannot be read back.
+    /// A data commit has no `Schema:` trailer, so its provenance — which
+    /// schema commit it was validated against at write time — cannot be
+    /// recovered. Not a read failure: the trailer is provenance only, and
+    /// [`Store::retrieve_at`](crate::Store::retrieve_at) reads the schema from
+    /// the commit's own `schema/` subtree without consulting it.
     #[error("commit {commit} is missing its Schema: trailer")]
     MissingTrailer {
         /// The commit that lacked the trailer.
@@ -39,6 +43,44 @@ pub enum Error {
         commit: ObjectId,
         /// The trailer text that failed to parse.
         text: String,
+    },
+    /// A data commit's tree is not the `{schema/, value/}` split that
+    /// [`Store::store`](crate::Store::store) writes to keep the schema
+    /// reachable from the data commit itself.
+    ///
+    /// Overwhelmingly this means the commit predates subtree schema binding,
+    /// when the commit's tree *was* the value and the schema was named only by
+    /// a `Schema:` trailer. Such a commit must be re-stored to be readable.
+    /// It also covers a commit written by something other than this crate.
+    #[error(
+        "commit {commit} is not subtree-bound: its tree has [{found}], expected `schema` and \
+         `value` — it predates subtree schema binding and must be re-stored"
+    )]
+    NotSubtreeBound {
+        /// The data commit whose tree was not the expected split.
+        commit: ObjectId,
+        /// The entry names actually found, comma-separated, for diagnosis.
+        found: String,
+    },
+    /// A data commit's `value/` or `schema/` entry names an object that is not
+    /// present in this repository.
+    ///
+    /// The entry is there, so the commit *is* subtree-bound; the object it
+    /// points at is absent. That means an incomplete transfer — a filtered or
+    /// partial clone with no live promisor, a hand-built bundle, or a damaged
+    /// object store. Surfaced instead of letting the lookup collapse through
+    /// [`Error::Git`], which would name only a bare oid.
+    ///
+    /// Only the subtree root is checked. Corruption deeper inside an otherwise
+    /// present subtree still surfaces as [`Error::Git`].
+    #[error("commit {commit} names a {subtree} subtree {oid} that is not present")]
+    SchemaObjectMissing {
+        /// Which half of the split: `"value"` or `"schema"`.
+        subtree: &'static str,
+        /// The absent object.
+        oid: ObjectId,
+        /// The data commit naming it.
+        commit: ObjectId,
     },
     /// A write lost its compare-and-swap race too many times in a row.
     #[error("gave up updating {refname} after {attempts} contended attempts")]

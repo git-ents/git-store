@@ -9,10 +9,15 @@ use gix_hash::ObjectId;
 /// A user-supplied key cannot be used as a Git tree entry name.
 ///
 /// Tree entry names double as path segments, so a key may not contain the
-/// path separator `/`. Returned by [`check_key`](crate::check_key) and carried
-/// by [`SerializeError::Key`] when serialization rejects a dynamic (map) key.
+/// path separator `/`; nor may it equal the reserved presence-marker name
+/// (`crate::marker::MARKER_KEY`, `"_"`) written in place of a literal empty
+/// tree for `None`, `Null`, and an empty collection — a real entry named
+/// exactly that would otherwise be indistinguishable, on read, from the
+/// marker. Returned by [`check_key`](crate::check_key) and carried by
+/// [`SerializeError::Key`] when serialization rejects a dynamic (map or
+/// dynamic-object) key.
 #[derive(Debug, thiserror::Error)]
-#[error("invalid key {key:?}: must not contain '/'")]
+#[error("invalid key {key:?}: must not contain '/' and must not equal the reserved marker \"_\"")]
 pub struct KeyError {
     /// The offending key.
     pub key: String,
@@ -150,11 +155,13 @@ pub enum DeserializeError {
         /// are not `'static`-friendly).
         reason: String,
     },
-    /// An `Option` tree holds more than the single `some` entry.
+    /// An `Option` tree does not hold exactly the shape one of its two valid
+    /// forms requires.
     ///
-    /// `Some` is written as exactly one entry named `some` and `None` as an
-    /// empty tree, so any other arity is a malformed (necessarily foreign)
-    /// tree.
+    /// `Some` is written as exactly one entry named `some`, and `None` as the
+    /// marker tree (`crate::marker`) — never a literal empty tree — so any
+    /// other arity (including a literal empty tree, with `found: 0`) is a
+    /// malformed (necessarily foreign) tree.
     #[error("malformed Option tree: expected a single \"some\" entry, found {found} entries")]
     MalformedOption {
         /// How many entries the tree actually holds.
@@ -166,11 +173,31 @@ pub enum DeserializeError {
         /// The entry name actually found.
         name: String,
     },
-    /// An enum tree does not hold exactly one (variant-named) entry.
+    /// A non-unit enum variant's tag object is a tree but does not hold
+    /// exactly one (variant-named) entry.
     #[error("malformed enum tree: expected exactly one entry, found {found}")]
     MalformedEnum {
         /// How many entries the tree actually holds.
         found: usize,
+    },
+    /// A unit enum variant's tag object was a tree instead of the blob its
+    /// payload-free encoding requires.
+    ///
+    /// A unit variant tags with a bare blob holding the variant name (so it
+    /// appears as ordinary content to git's blob-oriented diff and ls-tree
+    /// tooling); a tree there can only come from a foreign encoder or a stale
+    /// pre-blob-collapse object.
+    #[error("enum variant {variant:?} is unit but its tag object is a tree, not a blob")]
+    UnitVariantIsTree {
+        /// The variant name.
+        variant: String,
+    },
+    /// A non-unit enum variant's tag object was a blob instead of the tree
+    /// its payload requires.
+    #[error("enum variant {variant:?} has a payload and must be a tree, found a blob")]
+    VariantPayloadIsBlob {
+        /// The variant name.
+        variant: String,
     },
     /// A composite-key map pair sub-tree is missing its `k` or `v` entry.
     #[error("map pair sub-tree missing {entry:?} entry")]

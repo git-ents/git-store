@@ -11,6 +11,7 @@
 
 mod de;
 mod error;
+mod marker;
 mod raw_tree;
 pub mod schema;
 mod ser;

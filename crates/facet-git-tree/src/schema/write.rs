@@ -233,22 +233,23 @@ fn write_node<W: Write + ?Sized>(
             if arr.len() != elems.len() {
                 return Err(length_mismatch(path, elems.len(), arr.len()));
             }
-            write_seq(arr, |i| &elems[i], doc, store, path, depth)
+            write_seq(arr, |i| &elems[i], doc, store, path, depth, false)
         }
         Schema::List(elem) => {
             let arr = as_array(value, path)?;
-            write_seq(arr, |_| elem, doc, store, path, depth)
+            write_seq(arr, |_| elem, doc, store, path, depth, true)
         }
         Schema::Array { elem, len } => {
             let arr = as_array(value, path)?;
             if arr.len() != *len {
                 return Err(length_mismatch(path, *len, arr.len()));
             }
-            write_seq(arr, |_| elem, doc, store, path, depth)
+            write_seq(arr, |_| elem, doc, store, path, depth, true)
         }
         // The key schema decides the layout, exactly as it does on read: a
         // scalar key is a name-keyed object; a composite key is an array of
-        // `{ k, v }` pairs.
+        // `{ k, v }` pairs. An empty map (either layout) writes the presence
+        // marker instead of a literal empty tree, per `crate::marker`.
         Schema::Map { key, value: val } => {
             if is_scalar_schema(key) {
                 let obj = as_object(value, path)?;
@@ -264,13 +265,18 @@ fn write_node<W: Write + ?Sized>(
                     });
                 }
                 entries.sort();
+                if entries.is_empty() {
+                    return marker_tree(store);
+                }
                 return tree(store, entries);
             }
             write_composite_map(value, key, val, doc, store, path, depth)
         }
         Schema::Optional(inner) => {
             if value.is_null() {
-                return tree(store, vec![]);
+                // None: the presence marker, not a literal empty tree — see
+                // `crate::marker`.
+                return marker_tree(store);
             }
             let (oid, kind) = write_node(value, inner, doc, store, &path.field("some"), depth + 1)?;
             tree(
@@ -338,6 +344,12 @@ fn write_named_tree<W: Write + ?Sized>(
     }
     let mut entries = Vec::with_capacity(fields.len());
     for field in fields {
+        // A `SchemaDoc` is data — `git store schema put` ingests one from
+        // hand-authored JSON — so a field name is untrusted input here, unlike
+        // a `#[derive(Facet)]` name which is always a Rust identifier. Without
+        // this, a field named exactly `crate::marker::MARKER_KEY` would encode
+        // to the very tree that means "empty", and read back as empty.
+        check_key(&field.name).map_err(SerializeError::from)?;
         if let Some(fv) = obj.get(&field.name) {
             let (oid, kind) = write_node(
                 fv,
@@ -360,6 +372,16 @@ fn write_named_tree<W: Write + ?Sized>(
 
 /// Encode an array as an ordinal-named tree, one entry per element, drawing
 /// each element's schema from `schema_for`.
+///
+/// `marker_empty` says whether an empty result takes the presence marker
+/// instead of a literal empty tree, per `crate::marker`. It is true for the
+/// variable-length sequences — [`Schema::List`], [`Schema::Array`] — whose
+/// emptiness is a property of the *value* and so is worth seeing in a diff.
+/// It is false for [`Schema::Tuple`], whose length is fixed by the schema:
+/// a zero-element tuple encodes identically for every value, so there is
+/// nothing to diff, and marking it would both diverge from the typed encoder
+/// (which writes the empty tree for a zero-field tuple struct) and produce a
+/// tree [`read_tuple`](super::read) refuses to read back.
 fn write_seq<'s, W: Write + ?Sized>(
     arr: &VArray,
     schema_for: impl Fn(usize) -> &'s Schema,
@@ -367,6 +389,7 @@ fn write_seq<'s, W: Write + ?Sized>(
     store: &W,
     path: &Path,
     depth: usize,
+    marker_empty: bool,
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
     let mut entries = Vec::with_capacity(arr.len());
     for (i, item) in arr.as_slice().iter().enumerate() {
@@ -378,6 +401,9 @@ fn write_seq<'s, W: Write + ?Sized>(
         });
     }
     entries.sort();
+    if marker_empty && entries.is_empty() {
+        return marker_tree(store);
+    }
     tree(store, entries)
 }
 
@@ -437,11 +463,17 @@ fn write_composite_map<W: Write + ?Sized>(
         });
     }
     entries.sort();
+    if entries.is_empty() {
+        return marker_tree(store);
+    }
     tree(store, entries)
 }
 
-/// Encode an enum: a single-member object tagged by the live variant's name,
-/// whose payload follows the variant's [`VariantKind`] layout.
+/// Encode an enum: externally tagged by the live variant's name. A unit
+/// variant collapses to a bare blob holding that name (its entire
+/// information content); every other variant is a single-member object whose
+/// value follows the variant's [`VariantKind`] layout, wrapped in a
+/// single-entry tree keyed by the name.
 fn write_enum<W: Write + ?Sized>(
     value: &Value,
     variants: &[crate::schema::VariantSchema],
@@ -467,20 +499,23 @@ fn write_enum<W: Write + ?Sized>(
         }
     })?;
     let vpath = path.field(name);
-    let (inner_oid, inner_kind) = match &variant.kind {
-        VariantKind::Unit => {
-            if !payload.is_null() {
-                return Err(expected(&vpath, "null", payload));
-            }
-            tree(store, vec![])?
+
+    if let VariantKind::Unit = &variant.kind {
+        if !payload.is_null() {
+            return Err(expected(&vpath, "null", payload));
         }
+        return blob(store, name.as_bytes());
+    }
+
+    let (inner_oid, inner_kind) = match &variant.kind {
+        VariantKind::Unit => unreachable!("handled above"),
         VariantKind::Newtype(inner) => write_node(payload, inner, doc, store, &vpath, depth + 1)?,
         VariantKind::Tuple(elems) => {
             let arr = as_array(payload, &vpath)?;
             if arr.len() != elems.len() {
                 return Err(length_mismatch(&vpath, elems.len(), arr.len()));
             }
-            write_seq(arr, |i| &elems[i], doc, store, &vpath, depth + 1)?
+            write_seq(arr, |i| &elems[i], doc, store, &vpath, depth + 1, false)?
         }
         VariantKind::Struct(fields) => {
             write_named_tree(payload, fields, doc, store, &vpath, depth + 1)?
@@ -606,6 +641,13 @@ fn tree<W: Write + ?Sized>(
     let oid = store
         .write(&gix_object::Tree { entries })
         .map_err(SerializeError::Backend)?;
+    Ok((oid, EntryKind::Tree))
+}
+
+/// Write the presence-marker tree (`crate::marker`) in place of a literal
+/// empty tree, for `None` and an empty `List`/`Array`/`Tuple`/`Map`.
+fn marker_tree<W: Write + ?Sized>(store: &W) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+    let oid = crate::marker::write_marker_tree(store)?;
     Ok((oid, EntryKind::Tree))
 }
 

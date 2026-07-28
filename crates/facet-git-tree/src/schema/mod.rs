@@ -109,10 +109,12 @@ pub enum Schema {
         /// The value schema.
         value: Box<Schema>,
     },
-    /// An `Option<T>`: an empty tree for `None`, a single `some` entry for
-    /// `Some`.
+    /// An `Option<T>`: the presence-marker tree (`crate::marker`) for `None`,
+    /// a single `some` entry for `Some`.
     Optional(Box<Schema>),
-    /// An enum: a single-entry tree naming the live variant.
+    /// An enum: externally tagged by the live variant's name — a bare blob
+    /// holding that name for a unit variant ([`VariantKind::Unit`]), a
+    /// single-entry tree naming it for every other variant.
     Enum(Vec<VariantSchema>),
     /// A [`RawTree`]: a verbatim tree reference.
     RawTree,
@@ -134,7 +136,8 @@ pub struct FieldSchema {
 /// One variant of a [`Schema::Enum`] node.
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct VariantSchema {
-    /// The variant name, which is the single tree entry's name.
+    /// The variant name: the blob content for a [`VariantKind::Unit`]
+    /// variant, or the single tree entry's name for every other variant.
     pub name: String,
     /// The variant's payload shape.
     pub kind: VariantKind,
@@ -145,7 +148,11 @@ pub struct VariantSchema {
 #[derive(Debug, Clone, PartialEq, Facet)]
 #[repr(u8)]
 pub enum VariantKind {
-    /// No payload: an empty tree.
+    /// No payload: the variant's entire encoding is a bare blob holding its
+    /// name (see `serialization.design.trees.variants`), not a tree — so it
+    /// appears as ordinary content to git's blob-oriented diff and ls-tree
+    /// tooling instead of vanishing as a tree-entry rename with no blob
+    /// content on either side.
     Unit,
     /// A single-field tuple variant: the field's own encoding directly.
     Newtype(Box<Schema>),

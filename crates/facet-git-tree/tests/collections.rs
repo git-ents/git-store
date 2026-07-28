@@ -56,16 +56,30 @@ fn vec_field_is_tree() {
     );
 }
 
-/// An empty Vec serializes to an empty tree.
+/// An empty Vec serializes to the presence-marker tree, not a literal empty
+/// tree: a literal empty tree contributes nothing to `git ls-tree -r` (it
+/// recurses to zero blob lines), so an empty collection would otherwise be
+/// indistinguishable, to git's tooling, from a field that never existed.
 #[test]
-fn empty_vec_is_empty_tree() {
+fn empty_vec_is_marker_tree() {
     let (root_id, store) = serialize(&WithVec { items: vec![] }).expect("serialize should succeed");
 
     let (mode, items_id) = get_tree_entry_mode(&store, &root_id, "items");
     assert_eq!(mode, EntryKind::Tree, "empty Vec field must be a tree");
-    assert!(
-        tree_entries(&store, &items_id).is_empty(),
-        "empty Vec must have no entries"
+    let entries = tree_entries(&store, &items_id);
+    assert_eq!(
+        entries.len(),
+        1,
+        "empty Vec must hold exactly the presence marker"
+    );
+    assert_eq!(
+        entries[0].filename, "_",
+        "the marker entry must be named \"_\""
+    );
+    assert_eq!(
+        entries[0].mode.kind(),
+        EntryKind::Blob,
+        "the marker entry must be a blob"
     );
 }
 
@@ -108,9 +122,10 @@ fn map_field_is_tree() {
     );
 }
 
-/// An empty map serializes to an empty tree.
+/// An empty map serializes to the presence-marker tree, not a literal empty
+/// tree — the same reasoning as `empty_vec_is_marker_tree`.
 #[test]
-fn empty_map_is_empty_tree() {
+fn empty_map_is_marker_tree() {
     let (root_id, store) = serialize(&WithMap {
         table: HashMap::new(),
     })
@@ -118,9 +133,15 @@ fn empty_map_is_empty_tree() {
 
     let (mode, map_id) = get_tree_entry_mode(&store, &root_id, "table");
     assert_eq!(mode, EntryKind::Tree, "empty Map field must be a tree");
-    assert!(
-        tree_entries(&store, &map_id).is_empty(),
-        "empty Map must have no entries"
+    let entries = tree_entries(&store, &map_id);
+    assert_eq!(
+        entries.len(),
+        1,
+        "empty Map must hold exactly the presence marker"
+    );
+    assert_eq!(
+        entries[0].filename, "_",
+        "the marker entry must be named \"_\""
     );
 }
 

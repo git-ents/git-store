@@ -19,16 +19,23 @@ $ git store get recipe carbonara | jq .serves
 ```
 
 What landed is a real Git tree, not an opaque payload — `git ls-tree` and
-`git cat-file` are the query language:
+`git cat-file` are the query language. An entity commit's tree is a two-entry
+root, `value/` and `schema/` — the schema an entity was validated against
+travels inside the commit itself, so the entity stays readable wherever the
+commit goes, with no dependence on also having `refs/schema/*`:
 
 ```console
 $ git ls-tree refs/store/recipe/carbonara^{tree}
+040000 tree …    schema
+040000 tree …    value
+
+$ git ls-tree refs/store/recipe/carbonara^{tree}:value
 040000 tree …    ingredients
 100644 blob …    serves
 040000 tree …    steps
 100644 blob …    title
 
-$ git cat-file blob $(git rev-parse refs/store/recipe/carbonara^{tree}:serves)
+$ git cat-file blob $(git rev-parse refs/store/recipe/carbonara^{tree}:value/serves)
 4
 
 $ git log --oneline refs/store/recipe/carbonara     # history for free
@@ -70,8 +77,13 @@ every field is its own object, addressed by content:
   is stored is the structural tree [`facet-git-tree`](../facet-git-tree)
   produces.
 - **The schema isn't a config file on someone's laptop.** It is versioned data
-  at `refs/schema/<kind>`, and every entity commit names the exact schema commit
-  it was validated against, so old versions stay readable after a kind evolves.
+  at `refs/schema/<kind>`, and every entity commit carries the tree of the
+  exact schema it was validated against inside its own `schema/` subtree —
+  reachable, gc-safe, and fetch-complete by ordinary Git tree reachability —
+  so old versions stay readable after a kind evolves, and after a `git fetch`,
+  `git push`, or mirror that moves only the entity ref. (A `Schema:`
+  commit-message trailer names the same schema commit too, for `git log` —
+  human-readable provenance, not a second read path.)
 
 ## Commands
 

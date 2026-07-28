@@ -10,6 +10,9 @@
 //!   DeserializeError::DuplicateOrdinal — two sequence entries name the same numeric index
 //!   DeserializeError::MaxDepth         — a pathologically deep tree is rejected, not overflowed
 //!   DeserializeError::MislabeledOption — an Option tree's single entry is not named "some"
+//!   DeserializeError::MalformedOption  — a literal empty tree is no longer a valid `None`
+//!   DeserializeError::UnitVariantIsTree    — a unit variant tagged with a tree, not a blob
+//!   DeserializeError::VariantPayloadIsBlob — a non-unit variant tagged with a blob, not a tree
 
 use facet::Facet;
 use facet_git_tree::{
@@ -20,6 +23,13 @@ use gix_object::{Kind, Tree, Write};
 
 mod common;
 use common::Point;
+
+#[derive(Debug, Facet, PartialEq)]
+#[repr(u8)]
+enum Shape {
+    Unit,
+    Circle { radius: f64 },
+}
 
 /// Write a tree of `(name, kind, oid)` entries and return its id.
 fn write_tree(store: &ObjectStore, entries: &[(&str, EntryKind, ObjectId)]) -> ObjectId {
@@ -139,6 +149,54 @@ fn mislabeled_option_entry_is_rejected() {
     assert!(
         matches!(&result, Err(DeserializeError::MislabeledOption { name }) if name == "nope"),
         "mislabeled Option entry must be rejected, got {result:?}"
+    );
+}
+
+/// Per issue 8d109650, `None` is now written as the presence-marker tree, not
+/// a literal empty tree; a literal empty tree is therefore foreign input and
+/// rejected as `MalformedOption { found: 0 }` rather than accepted as `None`.
+#[test]
+fn literal_empty_tree_is_no_longer_a_valid_option() {
+    let store = ObjectStore::default();
+    let tree_id = write_tree(&store, &[]);
+
+    let result: Result<Option<i32>, _> = deserialize(&tree_id, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::MalformedOption { found: 0 })),
+        "a literal empty tree must no longer decode as None, got {result:?}"
+    );
+}
+
+/// A foreign tree tagging a *unit* variant (`Shape::Unit`) with a tree
+/// instead of the required bare name-blob is rejected as `UnitVariantIsTree`.
+#[test]
+fn unit_variant_tagged_with_tree_is_rejected() {
+    let store = ObjectStore::default();
+    let payload = write_tree(&store, &[]);
+    let tree_id = write_tree(&store, &[("Unit", EntryKind::Tree, payload)]);
+
+    let result: Result<Shape, _> = deserialize(&tree_id, &store);
+    assert!(
+        matches!(&result, Err(DeserializeError::UnitVariantIsTree { variant }) if variant == "Unit"),
+        "a unit variant tagged with a tree must be rejected, got {result:?}"
+    );
+}
+
+/// A foreign object naming a *non-unit* variant (`Shape::Circle`) that is
+/// itself a bare blob, rather than the required payload tree, is rejected as
+/// `VariantPayloadIsBlob`.
+#[test]
+fn non_unit_variant_tagged_with_blob_is_rejected() {
+    let store = ObjectStore::default();
+    let blob_id = store.write_buf(Kind::Blob, b"Circle").expect("write blob");
+
+    let result: Result<Shape, _> = deserialize(&blob_id, &store);
+    assert!(
+        matches!(
+            &result,
+            Err(DeserializeError::VariantPayloadIsBlob { variant }) if variant == "Circle"
+        ),
+        "a non-unit variant tagged with a blob must be rejected, got {result:?}"
     );
 }
 

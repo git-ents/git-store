@@ -7,6 +7,7 @@ use facet_git_tree::{
     serialize_value_with_schema,
 };
 use facet_value::Value;
+use gix::objs::Write as _;
 
 use crate::Error;
 use crate::refname::{check_component, check_prefix};
@@ -31,9 +32,17 @@ const MAX_CAS_ATTEMPTS: u32 = 8;
 /// Every kind is defined by a [`SchemaDoc`] published to
 /// `<schema_prefix>/<kind>` (`refs/schema/<kind>` by default); every entity is
 /// a commit chain at `<data_prefix>/<kind>/<name>` (`refs/store/<kind>/<name>`
-/// by default) whose tree is the schema-directed encoding of a [`Value`] and
-/// whose tip names, in a `Schema:` trailer, the exact schema commit it was
-/// validated against. Every write is a commit; history is the audit trail.
+/// by default). Each commit's tree is a two-entry root, `{value/, schema/}`:
+/// the schema-directed encoding of a [`Value`] under `value/`, and the tree of
+/// the schema it was validated against — the same object `refs/schema/<kind>`
+/// points its commit at — copied in under `schema/`. Binding the schema by
+/// subtree rather than by parent or by trailer means ordinary tree
+/// reachability keeps it reachable, gc-safe, and fetch-complete: a `git fetch`
+/// of just the data ref brings the schema along for free, with no dependence
+/// on `refs/schema/*` also having been fetched. The tip additionally names,
+/// in a `Schema:` trailer, the schema commit it was validated against — kept
+/// for human-readable provenance (`git log`, `git show`), but not load-bearing
+/// for reads. Every write is a commit; history is the audit trail.
 ///
 /// Refs are this system's public API surface, so the namespace is
 /// configurable: see [`Store::open_with_prefixes`] for a consumer that wants
@@ -113,13 +122,15 @@ impl<'r> Store<'r> {
     // ── entities ─────────────────────────────────────────────────────────
 
     /// Schema-directed serialize of `value`, committed forward at
-    /// `<data_prefix>/<kind>/<name>` with a `Schema:` trailer naming the
-    /// schema commit it was validated against.
+    /// `<data_prefix>/<kind>/<name>` with the schema bound into the commit's
+    /// own tree (see the type docs) and named, for provenance, in a
+    /// `Schema:` trailer.
     ///
     /// `message` sets the commit summary; when `None`, a default `store
     /// <kind>/<name>` summary is used. The `Schema:` trailer is always
-    /// appended regardless, and reads only trust the last such trailer, so a
-    /// caller-supplied message cannot spoof it.
+    /// appended regardless; a caller-supplied message cannot spoof it, though
+    /// nothing reads it back to resolve the schema — that is what the
+    /// `schema/` subtree is for.
     ///
     /// Fails if no schema is published for `kind`, or if `value` does not
     /// conform (with the offending path). Retries internally on a lost
@@ -138,7 +149,9 @@ impl<'r> Store<'r> {
             kind: kind.to_owned(),
         })?;
 
-        let tree = serialize_value_with_schema(value, &doc, &self.repo.objects)?;
+        let value_tree = serialize_value_with_schema(value, &doc, &self.repo.objects)?;
+        let schema_tree = self.commit_tree(schema_commit)?;
+        let tree = self.bind_schema(value_tree, schema_tree)?;
         let default_summary = format!("store {kind}/{name}");
         let summary = message.unwrap_or(&default_summary);
         let msg = format!("{summary}\n\nSchema: {schema_commit}\n");
@@ -157,7 +170,9 @@ impl<'r> Store<'r> {
             kind: kind.to_owned(),
         })?;
 
-        let tree = serialize_value_with_schema(value, &doc, &self.repo.objects)?;
+        let value_tree = serialize_value_with_schema(value, &doc, &self.repo.objects)?;
+        let schema_tree = self.commit_tree(schema_commit)?;
+        let tree = self.bind_schema(value_tree, schema_tree)?;
         let default_summary = format!("store {kind}/<auto>");
         let summary = message.unwrap_or(&default_summary);
         let msg = format!("{summary}\n\nSchema: {schema_commit}\n");
@@ -194,20 +209,48 @@ impl<'r> Store<'r> {
     }
 
     /// The value as of a specific data commit (from [`history`](Self::history)):
-    /// resolve the commit's `Schema:` trailer to the schema commit, read that
-    /// schema, and do a schema-directed read of the data commit's tree.
-    /// Self-contained — no `kind` needed — so a version written under an old
-    /// schema stays readable.
+    /// read the schema straight out of the commit's own `schema/` subtree and
+    /// do a schema-directed read of its `value/` subtree. Self-contained — no
+    /// `kind` needed, and no other ref needs to be present — so a version
+    /// written under an old schema stays readable even when only this one
+    /// commit was fetched.
     pub fn retrieve_at(&self, commit: ObjectId) -> Result<Value, Error> {
-        let commit = self.repo.find_commit(commit).map_err(Error::git)?;
-        let tree = commit.tree_id().map_err(Error::git)?.detach();
-        let schema_commit = schema_trailer(&commit)?;
-        let doc = self.read_schema(self.commit_tree(schema_commit)?)?;
+        let root = self
+            .repo
+            .find_commit(commit)
+            .map_err(Error::git)?
+            .tree_id()
+            .map_err(Error::git)?
+            .detach();
+        let (value_tree, schema_tree) = self.split(root, commit)?;
+        let doc = self.read_schema(schema_tree)?;
         Ok(deserialize_value_with_schema(
-            &tree,
+            &value_tree,
             &doc,
             &self.repo.objects,
         )?)
+    }
+
+    /// The schema commit named by a data commit's `Schema:` trailer:
+    /// provenance only — which schema commit `value` was validated against at
+    /// write time — never a read path. [`retrieve_at`](Self::retrieve_at)
+    /// does not call this; it reads the schema straight out of the commit's
+    /// own `schema/` subtree, which stays reachable even where this trailer,
+    /// being plain commit-message text, would not help resolve anything.
+    ///
+    /// The returned commit is **not** reachable from `commit` and may not
+    /// exist in this repository at all — that unreachability is the whole
+    /// reason the `schema/` subtree exists. In a repository that fetched only
+    /// the data ref, resolving this oid fails exactly as reads did before
+    /// subtree binding. Treat it as a label to display, not an object to
+    /// follow; anything that needs the schema itself must read `schema/`.
+    ///
+    /// Fails if `commit` was not written by [`store`](Self::store) or
+    /// [`store_anonymous`](Self::store_anonymous) — or any other commit
+    /// lacking a well-formed `Schema:` trailer.
+    pub fn schema_provenance(&self, commit: ObjectId) -> Result<ObjectId, Error> {
+        let commit = self.repo.find_commit(commit).map_err(Error::git)?;
+        schema_trailer(&commit)
     }
 
     /// The entity names published under `kind`, sorted.
@@ -270,6 +313,119 @@ impl<'r> Store<'r> {
     /// Deserialize the tree `oid` as a stored [`SchemaDoc`].
     fn read_schema(&self, oid: ObjectId) -> Result<SchemaDoc, Error> {
         Ok(deserialize(&oid, &self.repo.objects)?)
+    }
+
+    /// Splice an already-written value tree and schema tree into the
+    /// two-entry root a data commit's own tree becomes: `value/` and
+    /// `schema/`. From here, ordinary tree reachability is what keeps the
+    /// schema alongside the value on every fetch, clone, and gc — unlike a
+    /// `Schema:` trailer (not part of the object graph) or a second commit
+    /// parent (would contaminate the data commit's ancestry with schema
+    /// lineage; rejected, see the type docs).
+    fn bind_schema(&self, value: ObjectId, schema: ObjectId) -> Result<ObjectId, Error> {
+        let mut entries = vec![
+            gix::objs::tree::Entry {
+                mode: self.entry_mode(value)?,
+                filename: "value".into(),
+                oid: value,
+            },
+            gix::objs::tree::Entry {
+                mode: self.entry_mode(schema)?,
+                filename: "schema".into(),
+                oid: schema,
+            },
+        ];
+        entries.sort();
+        self.repo
+            .objects
+            .write(&gix::objs::Tree { entries })
+            .map_err(Error::git)
+    }
+
+    /// The tree-entry mode for an already-written object: `Tree` when it
+    /// decodes as one, `Blob` otherwise. `serialize_value_with_schema` and a
+    /// schema's own tree only ever produce a blob or a tree — never an
+    /// executable, symlink, or submodule entry — so this fully determines the
+    /// mode a wrapping entry in [`bind_schema`](Self::bind_schema) needs.
+    fn entry_mode(&self, oid: ObjectId) -> Result<gix::objs::tree::EntryMode, Error> {
+        let kind = self.repo.find_header(oid).map_err(Error::git)?.kind();
+        Ok(gix::objs::tree::EntryMode::from(
+            if kind == gix::objs::Kind::Tree {
+                gix::objs::tree::EntryKind::Tree
+            } else {
+                gix::objs::tree::EntryKind::Blob
+            },
+        ))
+    }
+
+    /// Split a data commit's root tree into `(value, schema)` — the two-way
+    /// split [`bind_schema`](Self::bind_schema) writes, which makes a data
+    /// commit's own tree self-sufficient to read. `commit` names the data
+    /// commit, for the errors.
+    ///
+    /// The root must hold *exactly* `schema` and `value`, with `schema` a
+    /// tree. Requiring the whole shape, rather than looking up each name in
+    /// isolation, is what makes a pre-binding commit — whose tree *was* the
+    /// value — fail as the single diagnosable [`Error::NotSubtreeBound`]
+    /// naming re-storing as the remedy, instead of being half-matched and
+    /// misreported.
+    ///
+    /// One pre-binding shape stays out of reach: a value with exactly two
+    /// top-level fields named `value` and `schema` where `schema` is itself a
+    /// tree is indistinguishable here from a real binding, and surfaces
+    /// further in as a schema that will not deserialize. It still fails, just
+    /// less pointedly, and no commit written from here on can take that shape.
+    ///
+    /// Both objects are then confirmed present, so an incomplete transfer
+    /// names the absent subtree instead of collapsing to a bare `gix`
+    /// object-not-found — the failure this whole binding exists to prevent.
+    fn split(&self, root: ObjectId, commit: ObjectId) -> Result<(ObjectId, ObjectId), Error> {
+        let tree = self.repo.find_tree(root).map_err(Error::git)?;
+        let found: Vec<_> = tree
+            .iter()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.filename().to_string())
+            .collect();
+        let not_bound = || Error::NotSubtreeBound {
+            commit,
+            found: found.join(", "),
+        };
+        if found.len() != 2 {
+            return Err(not_bound());
+        }
+        let value = tree.find_entry("value").ok_or_else(not_bound)?.object_id();
+        let schema_entry = tree.find_entry("schema").ok_or_else(not_bound)?;
+        // A bound `schema/` is always a tree — it is a schema commit's tree.
+        // A pre-binding value could carry top-level fields named exactly
+        // `value` and `schema` and so match on names alone; requiring a tree
+        // here rejects every such value whose `schema` field is a scalar.
+        if !schema_entry.mode().is_tree() {
+            return Err(not_bound());
+        }
+        let schema = schema_entry.object_id();
+        self.require_present(value, "value", commit)?;
+        self.require_present(schema, "schema", commit)?;
+        Ok((value, schema))
+    }
+
+    /// Confirm a subtree object is actually in this repository, so an
+    /// incomplete transfer reports [`Error::SchemaObjectMissing`] naming the
+    /// commit and which half is absent. Only the subtree root is checked;
+    /// corruption deeper inside still surfaces as [`Error::Git`].
+    fn require_present(
+        &self,
+        oid: ObjectId,
+        subtree: &'static str,
+        commit: ObjectId,
+    ) -> Result<(), Error> {
+        match self.repo.find_header(oid) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(Error::SchemaObjectMissing {
+                subtree,
+                oid,
+                commit,
+            }),
+        }
     }
 
     /// The current schema for `kind` as `(schema-commit-oid, doc)`, or `None`

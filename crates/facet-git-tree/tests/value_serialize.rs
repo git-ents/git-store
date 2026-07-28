@@ -5,9 +5,9 @@
 //!     — a dynamic value serializes as its runtime kind's typed encoding:
 //!       strings and bytes as raw blobs, booleans and numbers as their textual
 //!       form, arrays as ordinal-keyed trees, objects as sorted name-keyed
-//!       trees with validated keys, and null as the empty tree.
+//!       trees with validated keys, and null as the presence-marker tree.
 
-use facet_git_tree::{SerializeError, serialize};
+use facet_git_tree::{EntryKind, SerializeError, serialize};
 use facet_value::{VDateTime, VObject, Value, value};
 
 mod common;
@@ -53,12 +53,27 @@ fn numbers_are_decimal_blobs() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Null is the empty tree; an empty blob would collide with `""` and empty
-/// bytes, which are far more common than null.
+/// Null is the presence-marker tree (`crate::marker`): a single blob entry
+/// named `"_"`, not a literal empty tree. An empty blob would collide with
+/// `""` and empty bytes (far more common than null), and a literal empty
+/// tree would be invisible to `git ls-tree -r`/`diff` — exactly the
+/// invisibility the marker exists to avoid.
 #[test]
-fn null_is_empty_tree() -> anyhow::Result<()> {
+fn null_is_marker_tree() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::NULL)?;
-    assert!(tree_entries(&store, &root).is_empty());
+    let entries = tree_entries(&store, &root);
+    assert_eq!(
+        entries.len(),
+        1,
+        "Null must be the single-entry marker tree"
+    );
+    assert_eq!(entries[0].filename, "_");
+    assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
+    assert_eq!(
+        store.get_blob(&entries[0].oid).expect("marker blob"),
+        b"",
+        "the marker blob must be empty"
+    );
     Ok(())
 }
 
@@ -96,13 +111,15 @@ fn object_is_sorted_name_keyed_tree() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An empty object is the empty tree (indistinguishable from null on disk —
-/// a documented heuristic collision).
+/// An empty object is the same marker tree as null (indistinguishable on
+/// disk — a documented heuristic collision, unaffected by the marker).
 #[test]
-fn empty_object_is_empty_tree() -> anyhow::Result<()> {
+fn empty_object_is_marker_tree() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::from(VObject::new()))?;
-    assert!(tree_entries(&store, &root).is_empty());
-    // The empty tree is one object: null and the empty object share an OID.
+    let entries = tree_entries(&store, &root);
+    assert_eq!(entries.len(), 1, "empty Object must be the marker tree");
+    assert_eq!(entries[0].filename, "_");
+    // The marker tree is one object: null and the empty object share an OID.
     let (null_root, _) = serialize(&Value::NULL)?;
     assert_eq!(root, null_root);
     Ok(())

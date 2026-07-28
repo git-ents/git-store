@@ -1,92 +1,96 @@
-# `facet-git-tree`
+# git-store
 
-*[facet.rs](https://facet.rs) format crates for Git tree objects.*
+Store *anything* in Git — not as a blob of JSON smuggled into a file, but as a real tree the stock plumbing can read.
+Define a kind by publishing its schema, pipe JSON at it, and every field becomes a tree entry, every write a commit.
 
-## Cargo Features
+The binary is named `git-store`, so git's external-subcommand dispatch makes `git store …` work with nothing more than `PATH`.
 
-| Feature | Default | Description |
-| ------- | ------- | ----------- |
-| `value` | no      | Enables the [`facet-value`](https://crates.io/crates/facet-value) integration: exact 128-bit number text for dynamic writes, and the schema-driven reader (`deserialize_value_with_schema`, `validate_with_schema`). Dynamic serialization and the heuristic dynamic read work without it. |
-
-## Dynamic Values
-
-Any tree written by this crate can be loaded without its compile-time type by deserializing into `facet_value::Value`:
-
-```rust
-use facet::Facet;
-use facet_git_tree::{deserialize, serialize};
-use facet_value::Value;
-
-#[derive(Facet)]
-struct Person {
-    name: String,
-    age: u32,
-}
-
-fn main() -> anyhow::Result<()> {
-    let ada = Person { name: "Ada".into(), age: 36 };
-    let (oid, store) = serialize(&ada)?;
-
-    // Load the same tree with no compile-time type.
-    let value = deserialize::<Value>(&oid, &store)?;
-    println!("{value:?}");
-    Ok(())
-}
+```console
+cargo install --path crates/git-store
 ```
 
-> **Warning:** the encoding is schemaless, so a bare dynamic read is a documented
-> *lossy* heuristic (spec: `deserialization.dynamic.heuristic`). Blobs come back
-> as `String` (or `Bytes` when not UTF-8), so numbers, bools, chars, and
-> datetimes read back as strings; `null` and empty arrays read back as empty
-> objects; objects whose keys are all decimal ordinals read back as arrays. Use
-> a typed read or a schema-driven read to recover full fidelity.
+## Demo
 
-## Schemas
+```console
+$ git store schema put recipe -F crates/git-store/schemas/recipe.json
+984ccde
 
-Schemas are self-hosted: `SchemaDoc` is itself a `Facet` type, stored through this crate's own tree encoding.
-Generate one with `schema_of`, store it like any other value, and use it to read data back with full type fidelity — numbers as numbers, enums as tagged objects.
-The schema-driven reader requires the `value` feature.
+$ echo '{"title":"Carbonara","serves":4,"ingredients":["egg","pancetta"],
+        "steps":["boil pasta","fry pancetta","combine"]}' \
+    | git store put recipe carbonara
+47b3037
 
-```rust
-use facet::Facet;
-use facet_git_tree::{deserialize, deserialize_value_with_schema, schema_of, serialize, serialize_into};
-use facet_git_tree::SchemaDoc;
-
-#[derive(Facet)]
-struct Person {
-    name: String,
-    age: u32,
-}
-
-fn main() -> anyhow::Result<()> {
-    // Serialize a value.
-    let ada = Person { name: "Ada".into(), age: 36 };
-    let (person_oid, store) = serialize(&ada)?;
-
-    // Generate the schema and store it in the same object store.
-    let doc = schema_of::<Person>()?;
-    let schema_oid = serialize_into(&doc, &store)?;
-
-    // Later, or elsewhere: load the schema back from its oid, then use it to
-    // read the value faithfully — `age` is a number, not a string.
-    let doc = deserialize::<SchemaDoc>(&schema_oid, &store)?;
-    let value = deserialize_value_with_schema(&person_oid, &doc, &store)?;
-    println!("{value:?}");
-    Ok(())
-}
+$ git store get recipe carbonara | jq .serves
+4
 ```
 
-### Publishing Schemas Under Refs
+What landed is a real Git tree, not an opaque payload — `git ls-tree` and `git cat-file` are the query language:
 
-`facet-git-tree` is oid-in/oid-out and performs no ref operations.
-The `refs/schema/<name>` convention — e.g. `refs/schema/issue` — is owned by higher layers such as `git-store`: a schema is published by serializing its `SchemaDoc` and pointing the ref at the resulting tree oid, or at a commit wrapping that tree for history and signing.
-That choice belongs to the higher layer.
+```console
+$ git ls-tree refs/store/recipe/carbonara^{tree}
+040000 tree …    schema
+040000 tree …    value
 
-## Code of Conduct
+$ git ls-tree refs/store/recipe/carbonara^{tree}:value
+040000 tree …    ingredients
+100644 blob …    serves
+040000 tree …    steps
+100644 blob …    title
 
-Please refer to the in-source [code of conduct](/CONDUCT.md) for all behavioral expectations.
+$ git cat-file blob $(git rev-parse refs/store/recipe/carbonara^{tree}:value/serves)
+4
+```
 
-## Contribution Guide
+The commit carries the schema it was written against beside the value, so it is readable on its own terms.
+Fetch just this one ref into an empty repository and the read still works — nothing has to know where the schema lives, because it came along.
 
-Contributions are welcome.
-Please refer to the in-source [contribution guide](/CONTRIBUTING.md).
+Every write is a commit, so history and time travel come for free:
+
+```console
+$ git store get recipe carbonara | jq '.serves = 6' | git store put recipe carbonara
+39da00d
+
+$ git log --oneline refs/store/recipe/carbonara
+39da00d store recipe/carbonara
+47b3037 store recipe/carbonara
+
+$ git store get recipe 'carbonara~1' | jq .serves   # time-travel by revision
+4
+```
+
+## Why trees, not a JSON blob
+
+A blob of JSON in a file is opaque to Git: `git log` shows "the file changed," diffs are line noise, and nothing but your application can read a field.
+Here, every field is its own object, addressed by content:
+
+- **`git` is the query language.**
+  `git ls-tree`, `git cat-file`, `git log`, `git diff` all work — no application required to inspect stored data.
+- **History and blame are per field.**
+  Changing `serves` writes a new `serves` blob; the unchanged `title` blob keeps its object id across versions.
+- **No format the reader must know.**
+  The structure *is* the Git tree.
+  JSON exists only at this CLI's boundary.
+- **The schema isn't a config file on someone's laptop.**
+  It is versioned data at `refs/schema/<kind>`, stored through the same tree encoding, and every entity names the exact schema it was validated against — so old versions stay readable after a kind evolves.
+
+See [`crates/git-store`](crates/git-store) for the full demo, including the schema's own history.
+
+## The three crates
+
+This repository builds `git-store` in three layers, each usable on its own — read the one that matches what you're trying to do:
+
+- [`facet-git-tree`](crates/facet-git-tree) — the serialization core.
+  Encodes any [`facet`](https://facet.rs) type, or a dynamic `facet_value::Value`, into a Git tree and back.
+  Oid-in/oid-out, with no concept of a repository or a ref.
+  Start here if you want the tree encoding on its own, with no opinions about how it's stored.
+- [`gix-store`](crates/gix-store) — the library.
+  Layers self-hosted schemas and ref conventions (`refs/store/<kind>/<name>`, `refs/schema/<kind>`) on top of `facet-git-tree`, using `gix` to talk to a repository.
+  Start here if you're embedding storage in a Rust program.
+- [`git-store`](crates/git-store) — the CLI shown above, built on `gix-store`.
+  Start here if you just want `git store put`/`get` at a terminal.
+
+## Documentation
+
+- [`docs/specification.adoc`](docs/specification.adoc) — the tree serialization and deserialization specification.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute.
+- [`CONDUCT.md`](CONDUCT.md) — code of conduct.

@@ -32,11 +32,13 @@ pub(crate) const MAX_DEPTH: usize = 32;
 /// Validate a user-supplied key for use as a Git tree entry name.
 ///
 /// Keys become tree entry names, which double as path segments, so a key may not
-/// contain the path separator `/` ([`KeyError`]). Serialization is required to
-/// apply this to every dynamic key (such as map keys) before emitting its entry,
-/// so a `/`-bearing name can never be written as data.
+/// contain the path separator `/`, nor equal the reserved presence-marker name
+/// (`crate::marker::MARKER_KEY`) written in place of a literal empty tree for
+/// `None`, `Null`, and an empty collection — see [`KeyError`]. Serialization is
+/// required to apply this to every dynamic key (such as map keys) before
+/// emitting its entry, so neither name can ever be written as data.
 pub fn check_key(key: &str) -> Result<(), KeyError> {
-    if key.contains('/') {
+    if key.contains('/') || key == crate::marker::MARKER_KEY {
         return Err(KeyError {
             key: key.to_owned(),
         });
@@ -243,16 +245,19 @@ pub(crate) fn map_pair_entries(
 }
 
 /// Validate an `Option` tree's entries, returning the `some` entry's object
-/// id, or `None` for an empty (`None`-valued) tree.
+/// id, or `None` for the marker (`crate::marker`) tree written for a
+/// `None`-valued `Option`.
 ///
 /// Shared by this module's and [`crate::schema::read`]'s `Def::Option`/
 /// `Schema::Optional` branches: `Some` is written as exactly one entry named
-/// `some` and `None` as an empty tree, so any other arity or naming is a
-/// malformed (necessarily foreign) tree rather than a value to guess at.
+/// `some` and `None` as the marker tree — never a literal empty tree, which
+/// would be invisible to `git ls-tree -r`/`diff` — so any other arity or
+/// naming (including a literal empty tree, `found: 0`) is a malformed
+/// (necessarily foreign) tree rather than a value to guess at.
 pub(crate) fn validate_option_entries(
     entries: &[(String, ObjectId, EntryKind)],
 ) -> Result<Option<ObjectId>, DeserializeError> {
-    if entries.is_empty() {
+    if crate::marker::is_marker(entries) {
         return Ok(None);
     }
     let [(name, inner_oid, _)] = entries else {
@@ -266,24 +271,42 @@ pub(crate) fn validate_option_entries(
     Ok(Some(*inner_oid))
 }
 
-/// Extract an enum tree's single (variant-name, payload object id) entry.
+/// Extract an enum value's (variant-name, payload object id) pair from the
+/// object at `oid`.
 ///
-/// Shared by this module's and [`crate::schema::read`]'s enum branches: a
-/// variant tree holds exactly one externally-tagged entry, and any other
-/// arity is a malformed (necessarily foreign) tree.
-pub(crate) fn extract_enum_entry(
-    entries: Vec<(String, ObjectId, EntryKind)>,
-) -> Result<(String, ObjectId), DeserializeError> {
+/// Shared by this module's and [`crate::schema::read`]'s enum branches. A
+/// unit variant's tag is a bare blob holding the variant name text — its
+/// entire information content, so it appears as ordinary content to git's
+/// blob-oriented diff and ls-tree tooling — and this returns `None` for its
+/// payload. Every other variant's tag is a single-entry tree, externally
+/// tagged the same way a struct field is (entry name = variant name, entry
+/// value = payload), and this returns `Some` of that entry's object id; any
+/// other arity is a malformed (necessarily foreign) tree. The caller is
+/// responsible for checking the returned form against what the named
+/// variant's own kind requires — this function does not have access to the
+/// variant table.
+pub(crate) fn extract_enum_entry<F: Find + ?Sized>(
+    oid: &ObjectId,
+    store: &F,
+) -> Result<(String, Option<ObjectId>), DeserializeError> {
+    let mut buf = Vec::new();
+    let data = find_object(oid, &mut buf, store)?;
+    if data.kind == Kind::Blob {
+        let name =
+            std::str::from_utf8(data.data).map_err(|_| DeserializeError::NonUtf8Blob(*oid))?;
+        return Ok((name.to_owned(), None));
+    }
+    let entries = tree_entries_from_data(&data, oid)?;
     if entries.len() != 1 {
         return Err(DeserializeError::MalformedEnum {
             found: entries.len(),
         });
     }
-    let (name, oid, _) = entries
+    let (name, inner_oid, _) = entries
         .into_iter()
         .next()
         .expect("length checked to be 1 above");
-    Ok((name, oid))
+    Ok((name, Some(inner_oid)))
 }
 
 /// Build a scalar-keyed map's key value from its entry name's textual form.
@@ -406,6 +429,9 @@ fn deser_into<'facet, F: Find + ?Sized>(
                 }
             } else {
                 let mut entries = find_tree_entries(oid, store)?;
+                if crate::marker::is_marker(&entries) {
+                    entries.clear();
+                }
                 sort_by_ordinal(&mut entries)?;
                 for (_, child_oid, _) in entries {
                     partial = partial.begin_list_item().map_err(reflect)?;
@@ -463,9 +489,14 @@ fn deser_into<'facet, F: Find + ?Sized>(
         return Ok(partial);
     }
 
-    // List (Vec): read tree with ordinal keys, sort numerically, push items
+    // List (Vec): read tree with ordinal keys, sort numerically, push items.
+    // The marker tree (`crate::marker`), written for an empty list instead of
+    // a literal empty tree, is stripped before ordinal parsing.
     if matches!(shape.def, Def::List(_)) {
         let mut entries = find_tree_entries(oid, store)?;
+        if crate::marker::is_marker(&entries) {
+            entries.clear();
+        }
         sort_by_ordinal(&mut entries)?;
         let mut partial = partial.init_list().map_err(reflect)?;
         for (_, child_oid, _) in entries {
@@ -479,6 +510,9 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // Array: same as List but init_array
     if matches!(shape.def, Def::Array(_)) {
         let mut entries = find_tree_entries(oid, store)?;
+        if crate::marker::is_marker(&entries) {
+            entries.clear();
+        }
         sort_by_ordinal(&mut entries)?;
         let mut partial = partial.init_array().map_err(reflect)?;
         for (name, child_oid, _) in entries {
@@ -501,7 +535,10 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // (`Arc<str>`, a `#[facet(transparent)]` wrapper, ...) is written
     // name-keyed exactly as its collapsed scalar shape would be.
     if let Def::Map(md) = shape.def {
-        let entries = find_tree_entries(oid, store)?;
+        let mut entries = find_tree_entries(oid, store)?;
+        if crate::marker::is_marker(&entries) {
+            entries.clear();
+        }
         let scalar_keys = matches!(collapse_shape(md.k).def, Def::Scalar);
         let mut partial = partial.init_map().map_err(reflect)?;
         if scalar_keys {
@@ -540,10 +577,13 @@ fn deser_into<'facet, F: Find + ?Sized>(
         return partial.end().map_err(reflect);
     }
 
-    // Enum: single-entry tree → variant name → variant contents
+    // Enum: externally tagged. A unit variant's tag is a bare blob holding
+    // the variant name; every other variant's tag is a single-entry tree
+    // (variant name → payload). `extract_enum_entry` fetches `oid` itself and
+    // reports which form it found; `select_variant_named` (below) is the
+    // authority on whether `variant_name` even exists.
     if let facet::Type::User(facet::UserType::Enum(et)) = shape.ty {
-        let entries = find_tree_entries(oid, store)?;
-        let (variant_name, inner_oid) = extract_enum_entry(entries)?;
+        let (variant_name, inner_oid) = extract_enum_entry(oid, store)?;
 
         // The variant's field layout comes from the type, not the tree: a tuple
         // variant (`TupleStruct`) keys by ordinal, a struct variant by name, and a
@@ -552,10 +592,29 @@ fn deser_into<'facet, F: Find + ?Sized>(
         let positional =
             variant.is_some_and(|v| matches!(v.data.kind, facet::StructKind::TupleStruct));
         let newtype = positional && variant.is_some_and(|v| v.data.fields.len() == 1);
+        let is_unit = variant.is_some_and(|v| v.data.fields.is_empty());
 
         let mut partial = partial.select_variant_named(&variant_name).map_err(|e| {
             DeserializeError::Reflect(format!("select variant {variant_name}: {e}"))
         })?;
+
+        let inner_oid = match (is_unit, inner_oid) {
+            // Unit variant, tagged with a blob: nothing further to read — the
+            // variant name (already consumed by `select_variant_named`) is
+            // the payload's entire content.
+            (true, None) => return Ok(partial),
+            (true, Some(_)) => {
+                return Err(DeserializeError::UnitVariantIsTree {
+                    variant: variant_name,
+                });
+            }
+            (false, Some(inner_oid)) => inner_oid,
+            (false, None) => {
+                return Err(DeserializeError::VariantPayloadIsBlob {
+                    variant: variant_name,
+                });
+            }
+        };
 
         if newtype {
             partial = partial.begin_nth_field(0).map_err(reflect)?;
@@ -589,11 +648,14 @@ fn deser_into<'facet, F: Find + ?Sized>(
 ///
 /// - a blob is a String when its bytes are valid UTF-8, otherwise Bytes;
 /// - a non-empty tree whose entry names are all decimal ordinals is an Array;
-/// - any other tree — including the empty tree — is an Object.
+/// - any other tree — including the presence-marker tree (`crate::marker`)
+///   written for `Null` and an empty `Array`/`Object` — is an Object.
 ///
 /// Scalar encodings that are not self-evident from the object alone (bool,
 /// numbers, char, datetime, ...) therefore come back as Strings of their
-/// textual form, and null (written as the empty tree) as an empty Object.
+/// textual form, and null (written as the marker tree) as an empty Object —
+/// the marker is stripped before the ordinal classification below, so it
+/// never surfaces as a phantom `"_"` member.
 ///
 /// The caller ([`deser_into`]) has already applied the [`MAX_DEPTH`] guard for
 /// this level; children recurse through `deser_into` at `depth + 1`, so the
@@ -621,6 +683,9 @@ fn deser_dynamic<'facet, F: Find + ?Sized>(
     }
 
     let mut entries = tree_entries_from_data(&data, oid)?;
+    if crate::marker::is_marker(&entries) {
+        entries.clear();
+    }
 
     // Non-empty + all-ordinal names → Array. The empty tree reads as an
     // Object: it is what both null and the empty Object serialize to, and an

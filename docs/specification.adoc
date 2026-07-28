@@ -95,25 +95,48 @@ A struct's fields are named by their field name; a tuple's fields are named by t
 [role="requirement", id="serialization.design.trees.variants"]
 .Variant Encoding
 --
-An enum value MUST be encoded as a Git tree holding exactly one entry, externally tagged: the entry name is the active variant's name, and the entry's value encodes the variant's payload as follows.
+An enum value MUST be encoded as follows, externally tagged by the active variant's name.
 
-. A unit variant resolves to an empty tree.
-. A newtype variant (one field) resolves directly to the encoding of that field.
-. A struct variant resolves to a tree whose entries are named by field name.
-. A tuple variant resolves to a tree whose entries are named by zero-based positional index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name].
+. A unit variant (no payload) MUST be encoded as a single Git blob holding the variant name's bytes verbatim, with no wrapping tree. The variant name is the *entire* information content of a unit variant, and a blob is what makes it visible to blob-oriented tooling: a tree entry whose target is a tree with no blob underneath it does not appear at all in `git ls-tree -r`'s recursive blob listing and contributes nothing to `git diff`, so a unit variant written as an (empty) tree is indistinguishable, to that tooling, from the field never having existed. Encoding it as a blob instead means a field changing between two unit variants (or between a unit variant and any other payload shape) shows as an ordinary content change.
+. Every other variant MUST be encoded as a Git tree holding exactly one entry, named after the active variant, whose value encodes the variant's payload as follows.
+.. A newtype variant (one field) resolves directly to the encoding of that field.
+.. A struct variant resolves to a tree whose entries are named by field name.
+.. A tuple variant resolves to a tree whose entries are named by zero-based positional index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name].
 
 The variant name is a value, not schema: it records which variant is live, information not present in the type's `SHAPE`.
+
+[NOTE]
+====
+A unit variant and every other variant therefore have *different* tree shapes at the same field position — a blob for the former, a tree for the latter. This diverges from a uniform externally-tagged-tree scheme (every variant, unit included, as a single-entry tree); a reader MUST branch on the fetched object's kind (blob vs. tree) to tell them apart, rather than assuming one shape ahead of fetching. See link:#serialization.design.trees.empty-marker[the empty-tree marker] for the parallel treatment of `None`, dynamic `Null`, and an empty collection, which keep their tree shape and instead gain a marker entry — a deliberately different choice from the unit-variant blob collapse, justified there.
+====
+--
+
+[role="requirement", id="serialization.design.trees.empty-marker"]
+.Presence Marker for an Otherwise-Empty Tree
+--
+`None`, a dynamic `Null`, and an empty collection (`Array`, `Vec`, slice, or `Map`, per link:#serialization.design.trees.collections[collection encoding]; likewise an empty dynamic `Array` or `Object`, per link:#serialization.design.dynamic[dynamic value encoding]) MUST be encoded as a Git tree holding exactly one entry, rather than a literal empty tree: a blob entry named `_` (the *presence marker*) whose content is the empty byte sequence.
+
+A literal empty tree — the encoding these cases used before this marker was introduced — contributes nothing to `git ls-tree -r` (which lists only reachable blobs, recursively, and an empty tree recurses to zero lines) and nothing to `git diff` (which compares blob content by path). A field that becomes empty, or that was always empty, is therefore indistinguishable, to that tooling, from a field that never existed. Writing the single marker entry instead keeps the path visible — `git ls-tree -r` shows (for example) `tags/_` — and keeps it participating in blob-level diffs when a collection transitions to or from empty.
+
+A single shared marker (one reserved name, one empty-content blob) covers every one of these cases; no case gets a distinct marker. The marker's only role is presence-signaling for git tooling, not disambiguation: every reader decodes a possibly-marked tree against a known target (a `Facet` type or a link:#schema.representation[schema] node) that already determines, independent of the tree's content, whether `None`/`Null`/an empty `List`/an empty `Map`/etc. is expected at that path. The one reader without such a target — link:#deserialization.dynamic.heuristic[the dynamic value read heuristic] — already documented `Null` and an empty `Array`/`Object` as collapsing to the same lossy empty-`Object` reading before this marker existed; a shared marker preserves that reading exactly, rather than introducing a new distinction the heuristic has no way to use.
+
+The marker name `_` is reserved: link:#serialization.design.trees.collections[a dynamic (map or dynamic-object) key] MUST NOT equal it, and MUST be rejected if it does, for the same reason a key MUST NOT contain `/` — a real entry named exactly `_` would otherwise be indistinguishable, on read, from the marker. A schema-declared struct field name MUST be rejected on the same terms: a link:#schema.representation[schema document] is data, and one authored by hand rather than derived from a Rust type can name a field anything at all. An link:#serialization.design.trees.ordering[ordinal name], being always decimal digits, can never collide and needs no such check.
+
+[NOTE]
+====
+A unit enum variant (link:#serialization.design.trees.variants[variant encoding]) is deliberately handled differently: it collapses its *entire* entry to a bare blob rather than keeping a tree with a marker. The two cases differ in what information the "empty" state carries: `None`/`Null`/an empty collection genuinely carry no further information beyond their own presence, so a content-free marker is enough; a unit variant's *name* (`Low` vs. `High`) is itself the payload, so it is written as the blob content directly rather than as a tree-entry name a marker would leave just as invisible as before.
+====
 --
 
 [role="requirement", id="serialization.design.trees.collections"]
 .Collection Encoding
 --
-The following standard Rust collections MUST be supported, each encoded as a Git tree.
+The following standard Rust collections MUST be supported, each encoded as a Git tree — an empty one per link:#serialization.design.trees.empty-marker[the presence-marker requirement] rather than as a literal empty tree.
 
 . `Array`, `Vec`, and slices — sequence elements are recorded as entries named by their zero-based index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name]. A sequence whose element type is `u8` is the sole exception: it is stored as a single blob rather than a tree, per link:#serialization.design.bytes[byte-sequence encoding].
-. `Map` — the entry layout is selected by the shape of the key type *after* the same transparency collapse defined by link:#serialization.design.pointers[smart-pointer encoding] and transparent-newtype encoding is applied (a smart pointer collapses to its pointee, repeatedly, and a transparent newtype to its inner shape), with no on-disk marker, since that collapsed shape is known to both writer and reader:
+. `Map` — the entry layout is selected by the shape of the key type *after* the same transparency collapse defined by link:#serialization.design.pointers[smart-pointer encoding] and transparent-newtype encoding is applied (a smart pointer collapses to its pointee, repeatedly, and a transparent newtype to its inner shape), with no on-disk marker for which layout was chosen, since that collapsed shape is known to both writer and reader:
 +
-.. *Scalar keys* (those whose collapsed `Def` is `Scalar` — integers, floats, `bool`, `char`, `String`, and other types stored as a single leaf, including a smart pointer or transparent newtype wrapping one of these, such as `Arc<str>`): each entry is named by the textual form of its key and resolves to the encoded value, exactly as a leaf would be encoded. This is the readable, JSON-like form.
+.. *Scalar keys* (those whose collapsed `Def` is `Scalar` — integers, floats, `bool`, `char`, `String`, and other types stored as a single leaf, including a smart pointer or transparent newtype wrapping one of these, such as `Arc<str>`): each entry is named by the textual form of its key and resolves to the encoded value, exactly as a leaf would be encoded. This is the readable, JSON-like form. A key MUST NOT equal the reserved presence-marker name (`_`, link:#serialization.design.trees.empty-marker[presence marker]).
 .. *Composite keys* (structs, tuples, enums, sequences, and any other key whose collapsed shape does not encode to a single leaf): the textual-name form cannot faithfully represent them, so each pair is recorded as a two-entry sub-tree with children named `k` and `v` holding the independently-encoded key and value. The map's entries point at these pair sub-trees and are named by a link:#serialization.design.trees.ordering[zero-padded ordinal name]; the ordinals are assigned in ascending order of each pair sub-tree's object id so that the map remains content-addressed independent of iteration order.
 
 No type marker is recorded; element and key types are recovered from the target `Facet` type on read.
@@ -184,7 +207,7 @@ The following leaf representations MUST be normalized on-write.
 --
 A dynamic value — one whose shape is dynamic (`Def::DynamicValue`, e.g. `facet_value::Value`), carrying its kind at runtime rather than in a static shape — MUST be encoded according to the kind held at write time, as follows.
 
-. `Null` MUST be encoded as an empty tree.
+. `Null` MUST be encoded as the presence-marker tree, per link:#serialization.design.trees.empty-marker[the presence-marker requirement], rather than a literal empty tree.
 . `Bool` MUST be encoded as a `true` or `false` blob, per link:#serialization.design.booleans[boolean serialization].
 . `Number` MUST be encoded as a blob holding its textual form, normalized identically to scalar leaves per link:#serialization.design.normalization.leaves[leaf normalization]: `nan` for _not a number_, and negative zero normalized to positive zero. An integer outside the `i64`/`u64` range MUST be rendered exactly, or the write MUST fail; it MUST NOT be rendered lossily through a floating-point conversion. A value that is itself floating-point-backed MUST be rendered per the same float normalization rules regardless of magnitude — including a magnitude beyond what a 64-bit or 128-bit integer could hold — since it is not an integer being approximated. An implementation whose runtime interface cannot distinguish an out-of-range whole value's exact representation (integer vs. floating-point) MUST fail rather than guess.
 . `Char` MUST be encoded as a blob holding the character's UTF-8 encoding.
@@ -228,7 +251,7 @@ When the deserialization target is a dynamic value, no schema is available on di
 
 . A blob whose content is valid UTF-8 MUST be read as a `String`; any other blob MUST be read as `Bytes`.
 . A non-empty tree in which every entry name parses as a decimal ordinal MUST be read as an `Array`, with elements ordered by numeric index per link:#serialization.design.trees.ordering[entry name ordering].
-. Any other tree — including the empty tree — MUST be read as an `Object`, with one member per entry.
+. Any other tree — including the presence-marker tree (link:#serialization.design.trees.empty-marker[presence marker]), which MUST be stripped before this classification so it is not misread as a one-member `Object` — MUST be read as an `Object`, with one member per entry.
 
 This mapping is best-effort and lossy: it recovers structure, not the writer's dynamic kind.
 The following writes do not survive a dynamic round-trip.
@@ -296,7 +319,7 @@ Given a link:#schema.representation[schema document], the schema-driven reader (
 | an `Array` of two-member `Object` values (`{"k": …, "v": …}`), one per pair sub-tree.
 
 | `Optional`
-| `Null` for an empty tree; otherwise the inner value, read from the `some` entry.
+| `Null` for the presence-marker tree; otherwise the inner value, read from the `some` entry.
 
 | `Enum`
 | a single-member `Object` whose key is the live variant's name and whose value encodes the payload per link:#serialization.design.trees.variants[variant encoding]; a variant name not present in the schema MUST be an error.
@@ -379,7 +402,14 @@ A shape and its transparent wrappers therefore always produce the same schema, j
 This is the same collapse link:#serialization.design.trees.collections[map-key layout selection] applies, so both agree on what a given shape actually encodes to.
 
 The scalar table MUST refuse `()` (the unit type) exactly as the encoder's scalar leaf encoding does: `()` has no textual (`Display`/`FromStr`) rendering, so it cannot reach a leaf blob and cannot be described by a schema either.
-This does not remove `Schema::Unit` from the format — a unit struct and a unit enum variant both still resolve to it, describing the empty tree their *composite* encoding actually writes; only the scalar table's direct mapping from `()` is refused.
+This does not remove `Schema::Unit` from the format — a unit struct still resolves to it, describing the (always, statically) empty tree its *composite* encoding writes; only the scalar table's direct mapping from `()` is refused.
+
+[IMPORTANT]
+====
+A unit *enum variant* does NOT resolve to `Schema::Unit`, despite the name similarity: it is described by `VariantKind::Unit` (link:#schema.representation[schema representation]), whose payload write is the bare name-blob collapse defined by link:#serialization.design.trees.variants[variant encoding], not an empty tree. A unit struct *field*'s emptiness is static (that type's encoding is *always* the empty tree, regardless of value, so at a fixed path there is never anything to diff); a unit enum variant's emptiness is one of several live possibilities for that field (the value legitimately varies between `Low`, `Medium`, `High`, …), which is exactly why it needs a shape that shows up in a diff and the unit struct field does not.
+
+That reasoning is about a *fixed path*, and does not extend to a unit struct reached through a varying one. A `Vec` of unit structs encodes every element as an empty tree, so its length — a genuine, varying property of the value — contributes no blob to `git ls-tree -r` and no line to `git diff`; likewise `Option<UnitStruct>` renders `Some` as an empty tree, visible only as the disappearance of the `None` marker. These remain unmarked, and so remain invisible to blob-oriented tooling, which is the same defect this marker exists to remove — narrowed, not eliminated.
+====
 
 Named user types — structs and enums — MUST be deduplicated into the document's `defs` table and referenced by `Schema::Ref(name)`.
 Names MUST be assigned deterministically: the key is the type's `type_identifier`, and when distinct types share an identifier, later occurrences in pre-order traversal of the shape are disambiguated with `_2`, `_3`, … suffixes.
@@ -433,7 +463,7 @@ The accepted set MUST be exactly the image of link:#deserialization.schema-drive
 | an `Array` of two-member `{"k": …, "v": …}` objects, encoded as ordinal-named `{ k, v }` pair sub-trees, the pairs ordered by object id exactly as the typed encoder orders them.
 
 | `Optional`
-| `Null`, encoded as an empty tree; otherwise the inner value, encoded and wrapped in a single `some` entry.
+| `Null`, encoded as the presence-marker tree; otherwise the inner value, encoded and wrapped in a single `some` entry.
 
 | `Enum`
 | a single-member `Object` whose key names the variant and whose value encodes the payload per link:#serialization.design.trees.variants[variant encoding]; a name not present in the schema, or an object that is not a single member, MUST be an error.

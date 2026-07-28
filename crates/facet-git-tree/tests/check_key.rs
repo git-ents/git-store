@@ -39,6 +39,18 @@ fn rejects_keys_with_slash(#[case] key: &str) {
     );
 }
 
+/// The reserved presence-marker name (`"_"`, written for an empty collection
+/// or `None`/`Null`) is rejected for the same reason `/` is: a real dynamic
+/// entry named exactly that would otherwise be indistinguishable, on read,
+/// from the marker.
+#[test]
+fn rejects_the_reserved_marker_key() {
+    assert!(
+        matches!(check_key("_"), Err(KeyError { key }) if key == "_"),
+        "\"_\" must be rejected as the reserved presence-marker key"
+    );
+}
+
 // --- integration: serialize must apply `check_key` to dynamic (map) keys ---
 
 /// `serialize` rejects a map key containing the path separator, surfacing it as
@@ -53,5 +65,21 @@ fn serialize_rejects_map_key_with_slash() {
             Err(SerializeError::Key(KeyError { key })) if key == "a/b"
         ),
         "a map key with '/' must be rejected by serialize"
+    );
+}
+
+/// `serialize` also rejects a map key equal to the reserved marker name: were
+/// it allowed, a map with the single entry `{"_": v}` would be
+/// indistinguishable on read from an empty map.
+#[test]
+fn serialize_rejects_map_key_equal_to_marker() {
+    let mut table = HashMap::new();
+    table.insert("_".to_string(), "v".to_string());
+    assert!(
+        matches!(
+            serialize(&WithMap { table }),
+            Err(SerializeError::Key(KeyError { key })) if key == "_"
+        ),
+        "a map key equal to the reserved marker must be rejected by serialize"
     );
 }

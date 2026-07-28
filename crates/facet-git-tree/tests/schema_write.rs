@@ -14,13 +14,16 @@ use std::fmt::Debug;
 
 use facet::Facet;
 use facet_git_tree::{
-    ObjectStore, RawTree, Schema, SchemaDoc, SchemaWriteError, deserialize_value_with_schema,
-    schema_of, serialize, serialize_into, serialize_value_with_schema,
+    EntryKind, FieldSchema, ObjectStore, RawTree, Schema, SchemaDoc, SchemaWriteError, VariantKind,
+    VariantSchema, deserialize_value_with_schema, schema_of, serialize, serialize_into,
+    serialize_value_with_schema,
 };
 use facet_value::{VObject, Value, value};
 
 mod common;
-use common::{Event, Person, Point, TreeNode, WithArray, WithMap, WithOptional, WithVec};
+use common::{
+    Event, Person, Point, TreeNode, WithArray, WithMap, WithOptional, WithVec, find_entry,
+};
 
 /// The typed encoding's root oid: the ground truth every schema-directed write
 /// must reproduce.
@@ -351,6 +354,100 @@ fn unknown_ref_is_rejected() {
     );
 }
 
+// --- regression: unit-variant / empty-collection visibility (issue 8d109650) ---
+
+/// The `git-store` `task.json` repro: a struct with a `priority: Priority`
+/// field, `Priority` a plain enum of unit variants (`Low`, `Medium`, `High`).
+/// Storing a task and then flipping `priority` from `Low` to `High` must
+/// change the `priority` entry's own *blob content* — the property that
+/// makes `git diff`/`git log --stat` non-empty and `priority` appear in
+/// `git ls-tree -r`, none of which held before this fix (the variant name
+/// lived only in a tree-entry name, and both `Low` and `High` resolved to the
+/// same empty-tree payload).
+#[test]
+fn priority_field_change_is_a_visible_blob_diff() {
+    let priority_variants = vec![
+        VariantSchema {
+            name: "Low".into(),
+            kind: VariantKind::Unit,
+        },
+        VariantSchema {
+            name: "Medium".into(),
+            kind: VariantKind::Unit,
+        },
+        VariantSchema {
+            name: "High".into(),
+            kind: VariantKind::Unit,
+        },
+    ];
+    let doc = SchemaDoc {
+        root: Schema::Struct(vec![FieldSchema {
+            name: "priority".into(),
+            schema: Schema::Enum(priority_variants),
+        }]),
+        defs: Default::default(),
+    };
+
+    let low_store = ObjectStore::default();
+    let low_root =
+        serialize_value_with_schema(&value!({ "priority": { "Low": null } }), &doc, &low_store)
+            .expect("serialize Low");
+    let high_store = ObjectStore::default();
+    let high_root =
+        serialize_value_with_schema(&value!({ "priority": { "High": null } }), &doc, &high_store)
+            .expect("serialize High");
+
+    assert_ne!(
+        low_root, high_root,
+        "changing priority must change the task's root id"
+    );
+
+    let low_entry = find_entry(&low_store, &low_root, "priority");
+    let high_entry = find_entry(&high_store, &high_root, "priority");
+    assert_eq!(
+        low_entry.mode.kind(),
+        EntryKind::Blob,
+        "a unit-variant field must be a blob entry, not a tree — this is what makes it \
+         visible to `git ls-tree -r`"
+    );
+    assert_eq!(high_entry.mode.kind(), EntryKind::Blob);
+    assert_ne!(
+        low_entry.oid, high_entry.oid,
+        "the `priority` entry's oid must differ — this is what makes `git diff` non-empty"
+    );
+    assert_eq!(low_store.get_blob(&low_entry.oid).expect("blob"), b"Low");
+    assert_eq!(high_store.get_blob(&high_entry.oid).expect("blob"), b"High");
+}
+
+/// An empty collection (here, an empty `tags: List<String>`) writes the
+/// presence-marker tree, so `tags` appears as a real (marker) entry in
+/// `git ls-tree -r` rather than vanishing as an empty, unlisted directory.
+#[test]
+fn empty_tags_list_is_visible_as_a_marker_entry() {
+    let doc = SchemaDoc {
+        root: Schema::Struct(vec![FieldSchema {
+            name: "tags".into(),
+            schema: Schema::List(Box::new(Schema::String)),
+        }]),
+        defs: Default::default(),
+    };
+    let store = ObjectStore::default();
+    let root = serialize_value_with_schema(&value!({ "tags": [] }), &doc, &store)
+        .expect("serialize empty tags");
+    let tags_entry = find_entry(&store, &root, "tags");
+    assert_eq!(tags_entry.mode.kind(), EntryKind::Tree);
+    let marker = find_entry(&store, &tags_entry.oid, "_");
+    assert_eq!(
+        marker.mode.kind(),
+        EntryKind::Blob,
+        "an empty List must hold a visible marker entry, not be a bare empty tree"
+    );
+
+    // And it still reads back as an empty list.
+    let v = deserialize_value_with_schema(&root, &doc, &store).expect("read");
+    assert_eq!(v, value!({ "tags": [] }));
+}
+
 #[test]
 fn ref_cycle_hits_the_depth_bound() {
     // A definition that refers only to itself: no value structure is ever
@@ -366,5 +463,77 @@ fn ref_cycle_hits_the_depth_bound() {
     assert!(
         matches!(err, SchemaWriteError::MaxDepth { .. }),
         "expected MaxDepth, got {err:?}"
+    );
+}
+
+// --- the presence marker does not swallow fixed-arity or forged shapes ---
+
+/// A zero-element `Schema::Tuple` MUST encode as the literal empty tree, not
+/// the presence marker.
+///
+/// A tuple's arity is fixed by the schema, so an empty one encodes identically
+/// for every value and there is nothing for a diff to show — the same reason a
+/// unit struct goes unmarked. Marking it broke both directions at once: the
+/// written tree no longer matched the typed encoder's oid (violating the
+/// byte-identity contract this module exists to enforce), and it could not be
+/// read back at all, because the tuple read length-checks the entries it finds
+/// before any marker could be stripped. That made `put` succeed and `get` fail
+/// permanently on the same data.
+#[test]
+fn an_empty_tuple_is_not_markered_and_reads_back() {
+    let doc = SchemaDoc {
+        root: Schema::Struct(vec![FieldSchema {
+            name: "nothing".into(),
+            schema: Schema::Tuple(vec![]),
+        }]),
+        defs: Default::default(),
+    };
+    let store = ObjectStore::default();
+    let v = value!({ "nothing": [] });
+
+    let root = serialize_value_with_schema(&v, &doc, &store).expect("write an empty tuple");
+    let back = deserialize_value_with_schema(&root, &doc, &store)
+        .expect("an empty tuple written by the schema writer must read back");
+    assert_eq!(back, v);
+}
+
+/// The same, against the typed encoder: a zero-field tuple struct must produce
+/// the identical object id through both paths.
+#[test]
+fn zero_field_tuple_struct_matches_typed() {
+    #[derive(Facet, PartialEq, Debug)]
+    struct Zero();
+
+    #[derive(Facet, PartialEq, Debug)]
+    struct HasZero {
+        z: Zero,
+    }
+
+    assert_reencodes(HasZero { z: Zero() });
+}
+
+/// A schema-declared field named exactly the reserved presence marker MUST be
+/// rejected at write time.
+///
+/// A `SchemaDoc` is data — `git store schema put` ingests one from hand-written
+/// JSON — so a field name is untrusted input, and the `#[derive(Facet)]`
+/// guarantee that a field cannot be named a bare `_` does not hold for it.
+/// Left unchecked, such a field encoded to a tree byte-identical to the one
+/// meaning "empty", and read back as an empty collection: a silent, lossy
+/// round-trip rather than a loud failure.
+#[test]
+fn a_schema_field_named_as_the_presence_marker_is_rejected() {
+    let doc = SchemaDoc {
+        root: Schema::Struct(vec![FieldSchema {
+            name: "_".into(),
+            schema: Schema::String,
+        }]),
+        defs: Default::default(),
+    };
+    let store = ObjectStore::default();
+    let err = serialize_value_with_schema(&value!({ "_": "" }), &doc, &store).unwrap_err();
+    assert!(
+        matches!(&err, SchemaWriteError::Serialize(_)),
+        "a field named as the reserved marker must be rejected, got {err:?}"
     );
 }

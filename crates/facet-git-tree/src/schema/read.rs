@@ -145,6 +145,9 @@ fn read_node<F: Find + ?Sized>(
         }
         Schema::List(elem) => {
             let mut entries = find_tree_entries(oid, store)?;
+            if crate::marker::is_marker(&entries) {
+                entries.clear();
+            }
             sort_by_ordinal(&mut entries)?;
             let mut array = VArray::new();
             for (_, child_oid, _) in entries {
@@ -154,6 +157,9 @@ fn read_node<F: Find + ?Sized>(
         }
         Schema::Array { elem, len } => {
             let mut entries = find_tree_entries(oid, store)?;
+            if crate::marker::is_marker(&entries) {
+                entries.clear();
+            }
             if entries.len() != *len {
                 return Err(SchemaReadError::ArrayLenMismatch {
                     expected: *len,
@@ -169,9 +175,13 @@ fn read_node<F: Find + ?Sized>(
         }
         // The key schema decides the layout, exactly as the static key shape
         // does on write: scalar keys name the entries directly; composite keys
-        // store ordinal-named `{ k, v }` pair sub-trees.
+        // store ordinal-named `{ k, v }` pair sub-trees. The marker tree
+        // written for an empty map (either layout) is stripped up front.
         Schema::Map { key, value } => {
-            let entries = find_tree_entries(oid, store)?;
+            let mut entries = find_tree_entries(oid, store)?;
+            if crate::marker::is_marker(&entries) {
+                entries.clear();
+            }
             if is_scalar_schema(key) {
                 let mut object = VObject::new();
                 for (name, child_oid, _) in entries {
@@ -199,27 +209,39 @@ fn read_node<F: Find + ?Sized>(
             read_node(&inner_oid, inner, doc, store, depth + 1)
         }
         Schema::Enum(variants) => {
-            let entries = find_tree_entries(oid, store)?;
-            let (variant_name, inner_oid) = extract_enum_entry(entries)?;
+            let (variant_name, inner_oid) = extract_enum_entry(oid, store)?;
             let Some(variant) = variants.iter().find(|v| v.name == variant_name) else {
                 return Err(SchemaReadError::UnknownVariant {
                     variant: variant_name,
                     expected: variants.iter().map(|v| v.name.clone()).collect(),
                 });
             };
-            let payload = match &variant.kind {
-                VariantKind::Unit => {
-                    expect_empty_tree(&inner_oid, store)?;
-                    Value::NULL
+            let payload = match (&variant.kind, inner_oid) {
+                // Unit variant, tagged with a blob (the normal case): the
+                // variant name is the payload's entire content.
+                (VariantKind::Unit, None) => Value::NULL,
+                (VariantKind::Unit, Some(_)) => {
+                    return Err(DeserializeError::UnitVariantIsTree {
+                        variant: variant_name,
+                    }
+                    .into());
                 }
-                VariantKind::Newtype(inner) => read_node(&inner_oid, inner, doc, store, depth + 1)?,
-                VariantKind::Tuple(elems) => {
+                (VariantKind::Newtype(inner), Some(inner_oid)) => {
+                    read_node(&inner_oid, inner, doc, store, depth + 1)?
+                }
+                (VariantKind::Tuple(elems), Some(inner_oid)) => {
                     let inner_entries = find_tree_entries(&inner_oid, store)?;
                     read_tuple(inner_entries, elems, doc, store, depth + 1)?.into()
                 }
-                VariantKind::Struct(fields) => {
+                (VariantKind::Struct(fields), Some(inner_oid)) => {
                     let inner_entries = find_tree_entries(&inner_oid, store)?;
                     read_struct(&inner_entries, fields, doc, store, depth + 1)?.into()
+                }
+                (_, None) => {
+                    return Err(DeserializeError::VariantPayloadIsBlob {
+                        variant: variant_name,
+                    }
+                    .into());
                 }
             };
             let mut object = VObject::new();

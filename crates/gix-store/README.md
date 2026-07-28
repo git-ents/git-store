@@ -31,10 +31,15 @@ let got = store.retrieve("recipe", "carbonara")?;   // Some(Value)
   [`facet_value::Value`] with `serialize_value_with_schema` — encoding *is*
   validation, so a nonconforming value fails with the offending path instead of
   writing a lossy tree. The result is byte-identical to the typed encoding.
-- **Reads never guess.** Every data commit records the exact schema commit it
-  was validated against in a `Schema:` trailer, so `retrieve`/`retrieve_at` recover
-  full fidelity — numbers as numbers, enums as tagged objects — and old
-  versions stay readable after a kind evolves.
+- **Reads never guess, and never depend on a second ref.** Every data commit's
+  tree is a two-entry root, `{value/, schema/}`: the value under `value/`, and
+  the tree of the exact schema it was validated against under `schema/`.
+  `retrieve`/`retrieve_at` read both straight out of the one commit, so they
+  recover full fidelity — numbers as numbers, enums as tagged objects — and
+  old versions stay readable after a kind evolves *and* after a `git fetch`,
+  `git push`, or mirror that moves only the data ref. (A `Schema:`
+  trailer is still written, naming the same schema commit for `git log`, but
+  it is provenance only — nothing reads it back to resolve the schema.)
 - **Writes are serialized, not lossy.** Each ref update takes a per-ref lock
   (under `<git-dir>/gix-store-locks/`, kept separate from git's own
   `<ref>.lock`) so concurrent writers — threads *or* processes — produce a
