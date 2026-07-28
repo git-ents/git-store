@@ -1,14 +1,14 @@
 **What**
 `facet-git-tree` is exemplary about backend abstraction - every entry point is
 generic over `gix` `Find`/`Write`, and even accepts `?Sized` so a `&dyn Write`
-works. `gix-store` throws that away one layer up: `Store<(lifetime)>` holds a
+works. `gix-store` throws that away one layer up: `Store` holds a
 `&gix::Repository` and every method reaches into `self.repo` directly. The
 seam is in the wrong place.
 
 **Where**
-`crates/gix-store/src/store.rs:42-46` (`struct Store { repo: &gix::Repository,
-data_prefix: String, schema_prefix: String }`), contrasted with
-`crates/facet-git-tree/src/ser.rs:32-39` and `src/de.rs:53-58`.
+`crates/gix-store/src/store.rs:42-46` (`struct Store { repo, data_prefix,
+schema_prefix }`), contrasted with `crates/facet-git-tree/src/ser.rs:32-39` and
+`src/de.rs:53-58`.
 
 **Why it matters**
 Three concrete consequences.
@@ -23,16 +23,11 @@ dependency on a working `gix::Repository`.
 *`open_with_prefixes` is half a feature.* The prefixes are stored but never
 exposed. `Store` has no `data_prefix()` accessor, so a consumer that opened
 with `refs/meta/rules` cannot construct a revision spec against its own
-namespace. The CLI proves the point by hardcoding the default:
-
-```rust
-// crates/git-store/src/main.rs:257-262
-let spec = if rev.starts_with([(tilde), (caret), (at)]) {
-    format!("refs/store/{kind}/{name}{rev}")
-```
-
-`refs/store` is a literal there. If `git-store` ever grew a `--namespace` flag
-it would silently resolve revisions against the wrong refs. The doc comment on
+namespace. The CLI proves the point: `resolve_at` at
+`crates/git-store/src/main.rs:257-262` builds the spec with a hardcoded literal,
+`format!("refs/store/{kind}/{name}{rev}")`, because there is no way to ask the
+store what its data prefix is. If `git-store` ever grew a `--namespace` flag it
+would silently resolve revisions against the wrong refs. The doc comment on
 `open_with_prefixes` says "Refs are this systems public API surface, so the
 namespace is configurable" - and then makes the configured value unreadable.
 
@@ -46,7 +41,7 @@ schema-after-fetch failure surfaces as an unattributable object-not-found.
 - Option A - minimal: add `data_prefix()` / `schema_prefix()` accessors and an
   `Error::ObjectMissing { oid }` variant. Fixes the two concrete leaks without
   restructuring anything.
-- Option B - parameterize `Store<R>` over a small `Backend` trait covering the
+- Option B - parameterize `Store` over a small `Backend` trait covering the
   four things it actually needs (find, write, read ref, compare-and-swap ref),
   with a `gix::Repository` impl and an in-memory impl. Mirrors what
   `facet-git-tree` already does one layer down, and makes the entity model
