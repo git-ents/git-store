@@ -1,0 +1,1 @@
+One loose object per scalar and a single flat tree per sequence give a punishing cost profile at modest sizes
