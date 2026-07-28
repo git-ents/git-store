@@ -9,15 +9,16 @@ graph acyclic?) nor any relationship to the schema it is replacing.
 **Why it matters**
 Both failure modes reproduce immediately.
 
-Unusable schema, published successfully:
+Unusable schema, published successfully. With `broken.json` holding
+`{"root":{"Ref":"Nope"},"defs":{}}`:
 
 ```
-$ echo (single-quote){"root":{"Ref":"Nope"},"defs":{}}(single-quote) | git store schema put broken
+$ git store schema put broken -F broken.json
 2e3eade5811521c33acb221bcc350149c9351018
 $ git store schema show broken
 broken
   Nope                       <- rendered as if it were a type
-$ echo (single-quote){}(single-quote) | git store put broken b1
+$ git store put broken b1 -F empty-object.json
 Error: at $: schema ref "Nope" has no definition in the document
 ```
 
@@ -54,8 +55,8 @@ version of a schema may do.
   change. Should happen regardless of what else is decided.
 - Option B - classify the diff against the previous schema (compatible /
   additive / breaking) and require `--allow-breaking` past a certain class.
-  Gives the author a real slide: "schema evolution is a first-class,
-  history-aware operation". Trade-off: needs a defined compatibility relation,
+  Gives the author a real slide: schema evolution as a first-class,
+  history-aware operation. Trade-off: needs a defined compatibility relation,
   which is genuine design work.
 - Option C - treat an incompatible change as a *new kind* rather than a new
   version, so a kind is immutable by construction. Trade-off: pushes naming
