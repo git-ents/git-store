@@ -1,0 +1,69 @@
+**What**
+`docs/specification.adoc` is a careful normative document with 25-odd
+requirement IDs, and every one of them is about `facet-git-tree`. The layer
+that defines what a repository written by this project actually looks like -
+ref namespaces, the kind concept, the `Schema:` trailer, commit-forward
+semantics, locking - has no specification at all, only doc comments and a
+README.
+
+**Where**
+`docs/specification.adoc` (sections Compatibility, Serialization,
+Deserialization, Schemas, Structural Comparison - all scoped to
+`facet-git-tree`), versus `crates/gix-store/src/store.rs:14-27` where
+`refs/store`, `refs/schema`, the lock directory, the lock timeout, and the CAS
+retry count are all defined as private constants.
+
+**Why it matters**
+The spec explicitly hands this off twice and never picks it up. From
+`facet-git-tree`s README and again as a trailing NOTE in the spec:
+
+> Publishing a schema under a ref - e.g. `refs/schema/issue` - is a convention
+> owned by higher layers such as `git-store`; `facet-git-tree` itself remains
+> oid-in/oid-out and performs no ref operations.
+
+That deferral is architecturally correct. The problem is that the higher layer
+never writes it down, so the things a second implementation would need to agree
+on are undocumented:
+
+- the ref layout `<prefix>/<kind>/<name>` and `<prefix>/<kind>`
+- that a data commits schema binding is the *last* `Schema:` trailer line, and
+  that it names a schema **commit** rather than a schema **tree**
+  (`store.rs:275-287` explains why in a doc comment; nothing normative says so)
+- that entity history is a first-parent walk
+- what a reader should do when the trailer is absent or its object is missing
+- whether a schema may be replaced incompatibly, and what that means for
+  existing entities
+
+That list is the real interoperability surface. The tree encoding is the part
+another tool can reimplement from the spec today; the part it cannot
+reimplement is the part that decides whether two `git-ents` tools can read each
+others repositories - which matters concretely because `git-anchor`,
+`git-query`, and `git-forge` are being presented alongside this one and
+presumably share, or should share, the ref conventions.
+
+Two smaller observations in the same area. `docs/` contains
+`acdc-requirement.adoc`, a specification for an unrelated AsciiDoc authoring
+extension, sitting beside the projects own spec with no index distinguishing
+them - a reader arriving at `docs/` cannot tell which one is about `git-store`.
+And the spec has no requirement covering schema evolution, which is the
+question the design most invites.
+
+**Options**
+- Option A - add a `=== Storage` section to `docs/specification.adoc` with
+  requirement IDs for the ref layout, the schema binding, history semantics,
+  and the missing-schema behaviour. Same style as the existing sections; the
+  content already exists as doc comments and mostly needs promoting.
+- Option B - a separate `docs/storage.adoc`, keeping `specification.adoc` as
+  the format spec. Cleaner separation, matching the crate boundary. Trade-off:
+  two documents to keep in sync, and readers have to find the second one.
+- Option C - if the ref conventions are meant to be shared across the
+  `git-ents` family, specify them once in a place all four projects can cite,
+  rather than in any one of them.
+
+**Recommendation**
+Option A now for the ref layout and schema binding at minimum - they are the
+load-bearing conventions and they are currently private constants. Option C is
+worth considering given the family framing; "these four tools share one ref
+convention, here it is" is a stronger story than four tools that happen to look
+similar. High confidence that the gap matters; medium confidence on where the
+text should live.
