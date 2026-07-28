@@ -1,0 +1,61 @@
+**What**
+`serialize_value_with_schema` threads a borrowed `Path` through the whole walk
+and reports `at $.done: expected bool, found string`.
+`deserialize_value_with_schema` threads nothing and reports `cannot parse "yes"
+as schema scalar Bool` - no field, no index, no ancestry.
+
+**Where**
+`crates/facet-git-tree/src/schema/write.rs:79-134` (`Path`/`Seg`, stack-linked,
+allocation-free until an error is built) versus
+`crates/facet-git-tree/src/schema/read.rs:75-81` (`read_node` takes only
+`depth`), and the error variants at
+`crates/facet-git-tree/src/error.rs:225-267` - `InvalidScalar`,
+`ArrayLenMismatch`, `MalformedUnit`, `UnknownVariant`, `UnknownRef` all lack a
+path field.
+
+**Why it matters**
+The write path error quality is genuinely excellent - these are the messages
+users actually see, and they are better than most tools ship:
+
+```
+$ git store put task t2 -F bad.json
+Error: at $.done: expected bool, found string
+Error: at $: unknown field "bogus"
+Error: at $.priority: unknown variant "Urgent"; schema defines ["Low", "Medium", "High"]
+```
+
+The read path is where the *hard* failures live, and it is where the
+information is missing. Read failures happen when data and schema have drifted
+apart - a tree written under one schema being validated against another, a tree
+fetched from a stranger, a hand-edited tree. Those are precisely the cases
+where "which field" is the entire question, and the user gets a bare `cannot
+parse "two-ish" as schema scalar U32` on a struct with forty fields.
+
+`validate_with_schema` (`read.rs:59-65`) is the function whose *whole purpose*
+is to report nonconformance, and it is implemented as
+`deserialize_value_with_schema(...).map(|_| ())` - so the most diagnostic-
+oriented entry point in the API is the one with the least diagnostic output.
+
+`Store::retrieve` surfaces these through `Error::SchemaRead`
+(`crates/gix-store/src/error.rs:61-63`), and its doc comment claims the
+`facet-git-tree` boundary errors are kept distinct so "a value that parses but
+does not conform reports the schema path". That is true of `SchemaWrite` and
+not of `SchemaRead`.
+
+**Options**
+- Option A - reuse the exact `Path` type from `write.rs` in `read.rs`. The
+  machinery already exists and is already allocation-free; this is mostly
+  threading one extra argument through `read_node`, `read_struct`, and
+  `read_tuple`, and adding a `path: String` to five error variants. Low risk,
+  mechanical.
+- Option B - go further and make `validate_with_schema` collect *all*
+  mismatches rather than failing on the first, so a drifted schema reports
+  every offending field in one pass. Trade-off: needs an error-accumulating
+  walk, which is a bigger change than reusing `Path`.
+
+**Recommendation**
+Option A, high confidence - it is the same code, moved. Option B is worth
+considering because `validate_with_schema` is the natural home for a `git store
+validate <kind>` command that would answer "which of my entities still conform
+after this schema change", which is the question issue about unchecked schema
+evolution leaves open.
