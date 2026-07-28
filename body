@@ -1,0 +1,61 @@
+**What**
+Schemas are self-hosted: `SchemaDoc` is a `Facet` type stored through the
+crates own encoding, and read back with `deserialize::<SchemaDoc>`. Nothing on
+disk records *which version* of `SchemaDoc` wrote it. The reader assumes the
+stored tree matches the `SchemaDoc` compiled into the running binary.
+
+**Where**
+`crates/facet-git-tree/src/schema/mod.rs:34-41` (`SchemaDoc` - two fields, no
+version), `crates/gix-store/src/store.rs:271-273` (`read_schema` does a bare
+typed deserialize), `docs/specification.adoc` `schema.representation` ("Their
+on-disk form is a public contract ... MUST be released as a semver-major
+version").
+
+**Why it matters**
+The self-hosting is genuinely elegant and it will demo beautifully - `git
+ls-tree refs/schema/recipe` showing the schema as an ordinary tree is a great
+moment. The cost shows up on the second version.
+
+Suppose `Schema` gains a variant - say `DateTime`, which the encoder already
+supports for dynamic values (`ser.rs:501-506`) but which the schema table
+cannot express at all today (`schema/mod.rs:434-459`). That is a plausible,
+almost certain, near-term change. A tree written by the new version, read by an
+old binary, hits `select_variant_named("DateTime")` and fails with
+`DeserializeError::Reflect("select variant DateTime: ...")` - a reflection
+error, not "this schema is from a newer format version". A tree written by the
+old version and read by a new binary works only by luck of variant naming.
+
+The spec answers this with "bump semver", which governs the *crate* but not the
+*repository*. Object stores outlive binaries: a schema committed in 2026 will
+be read by a 2028 binary, and there is no in-band way for that binary to know
+what it is looking at. Every other self-describing format that has survived
+this - protobuf FileDescriptorSet, Avro, JSON Schema `$schema` - carries a
+version or dialect identifier for exactly this reason.
+
+There is a related bootstrap question worth having an answer for on stage: the
+schema of `SchemaDoc` itself is not stored anywhere. `schema_of::<SchemaDoc>()`
+works, but nothing publishes it, so the one type in the system that *cannot* be
+read without out-of-band knowledge is the type whose whole job is to remove
+out-of-band knowledge. That is the elegant self-hosting turning back on itself,
+and it is the sharpest question a design-conscious audience can ask.
+
+**Options**
+- Option A - add a `version: u32` (or a `format: String`) field to `SchemaDoc`.
+  One field, read before anything else, refuse a version above what the binary
+  knows. Trade-off: costs one blob per schema and is itself a semver-major
+  change, so it should land before 1.0 rather than after.
+- Option B - publish `schema_of::<SchemaDoc>()` to a well-known ref
+  (`refs/schema/.schema`) on first `put_schema`. The bootstrap is then closed:
+  a reader with no compiled knowledge can read the meta-schema, then use it to
+  read any schema, then use that to read any data. Trade-off: a genuinely
+  recursive story that is either the best slide in the talk or the most
+  confusing one.
+- Option C - do neither and state plainly that the on-disk schema form is
+  frozen for 1.0. Trade-off: freezing before `DateTime`, `required`, and list
+  keys have been considered is freezing the wrong thing.
+
+**Recommendation**
+Option A before 1.0, high confidence - it is one field and it buys the format a
+future. Option B is optional but it is the answer to "how does a stranger read
+your repository", and having it working turns the likely hostile question into
+the best demo in the deck. Medium confidence on B being worth the complexity.
