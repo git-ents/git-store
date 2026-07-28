@@ -1,0 +1,70 @@
+**What**
+`Store::put_schema` serializes and commits whatever `SchemaDoc` it is handed.
+It checks neither internal consistency (do all `Ref`s resolve? is the `Ref`
+graph acyclic?) nor any relationship to the schema it is replacing.
+
+**Where**
+`crates/gix-store/src/store.rs:94-98`.
+
+**Why it matters**
+Both failure modes reproduce immediately.
+
+Unusable schema, published successfully:
+
+```
+$ echo (single-quote){"root":{"Ref":"Nope"},"defs":{}}(single-quote) | git store schema put broken
+2e3eade5811521c33acb221bcc350149c9351018
+$ git store schema show broken
+broken
+  Nope                       <- rendered as if it were a type
+$ echo (single-quote){}(single-quote) | git store put broken b1
+Error: at $: schema ref "Nope" has no definition in the document
+```
+
+A `Ref` cycle (`{"root":{"Ref":"A"},"defs":{"A":{"Ref":"A"}}}`) also publishes
+fine and only fails at first use, with a max-depth error. Because schema refs
+are deliberately undeletable (`store.rs:232-234`), the kind is now permanently
+carrying a broken version and the only escape is publishing a new one.
+
+Silent incompatibility, also published successfully: changing `serves` from
+`U32` to `String` succeeds with no warning. Afterwards two entities of the same
+kind have genuinely different shapes, and `schema show` describes neither
+accurately:
+
+```
+$ git store schema show recipe
+  serves: string
+$ git store get recipe carbonara | grep serves
+  "serves": 6                <- a number, written under the old schema
+$ git store get recipe cacio | grep serves
+  "serves": "two-ish"
+```
+
+Reads survive because each commit pins its own schema - that part of the design
+is genuinely good - but `kind` stops meaning "these values share a shape",
+which is the one guarantee a published schema is supposed to buy. There is no
+compatibility classification, no migration path, and nothing in
+`docs/specification.adoc` addresses evolution at all: the spec covers
+`schema.representation` and `schema.generation` but is silent on what a *second*
+version of a schema may do.
+
+**Options**
+- Option A - validate at publish: every `Ref` resolves, the `Ref` graph is
+  acyclic, depth is within `MAX_DEPTH`. Cheap, purely additive, no format
+  change. Should happen regardless of what else is decided.
+- Option B - classify the diff against the previous schema (compatible /
+  additive / breaking) and require `--allow-breaking` past a certain class.
+  Gives the author a real slide: "schema evolution is a first-class,
+  history-aware operation". Trade-off: needs a defined compatibility relation,
+  which is genuine design work.
+- Option C - treat an incompatible change as a *new kind* rather than a new
+  version, so a kind is immutable by construction. Trade-off: pushes naming
+  churn onto users (`recipe`, `recipe2`), which is why most systems do not.
+
+**Recommendation**
+Option A before the talk, unconditionally - it is small and removes an
+embarrassing live failure. Option B is the more interesting answer and the one
+a design-conscious audience will ask about; even a written-down compatibility
+rule in the spec, with the check deferred, would be a big improvement over
+silence. High confidence on A, high confidence that B needs at minimum a
+documented position.

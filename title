@@ -1,0 +1,1 @@
+put_schema accepts any document, so a kind can be published permanently broken or silently incompatible
