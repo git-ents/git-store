@@ -38,9 +38,11 @@ caller cannot distinguish "object not found" from "ref lock contention" from
 schema-after-fetch failure surfaces as an unattributable object-not-found.
 
 **Options**
-- Option A - minimal: add `data_prefix()` / `schema_prefix()` accessors and an
-  `Error::ObjectMissing { oid }` variant. Fixes the two concrete leaks without
-  restructuring anything.
+- Option A - minimal: add `data_prefix()` / `schema_prefix()` accessors. Fixes
+  the ref-prefix leak without restructuring anything. The object-not-found
+  taxonomy gap is better folded into `0b4a9b27`'s error pass, which already
+  adds `Error::SchemaObjectMissing` at the same boundary, rather than solved
+  twice with a second, overlapping variant here.
 - Option B - parameterize `Store` over a small `Backend` trait covering the
   four things it actually needs (find, write, read ref, compare-and-swap ref),
   with a `gix::Repository` impl and an in-memory impl. Mirrors what
@@ -54,8 +56,12 @@ schema-after-fetch failure surfaces as an unattributable object-not-found.
   layer.
 
 **Recommendation**
-Option A before the talk - it is small and it closes a real correctness hole in
-`open_with_prefixes`. Option B is the right long-term shape and is worth
-naming as future work on a slide, because "why is the bottom layer backend-
-agnostic and the middle layer not?" is a fair question from anyone reading the
-crate list. Medium confidence on B; the locking argument against it is real.
+Option A's accessors are worth taking if there is time - small, and they close
+a real correctness hole in `open_with_prefixes`. The error-variant half of
+Option A is not separate work any more: fold it into `0b4a9b27`'s error pass
+instead of adding a second ad-hoc variant here. Neither half is urgent on its
+own - this issue's demo impact is `invisible`, so it can slip past the talk
+entirely. Option B is the right long-term shape and is worth naming as future
+work on a slide, because "why is the bottom layer backend-agnostic and the
+middle layer not?" is a fair question from anyone reading the crate list.
+Medium confidence on B; the locking argument against it is real.
