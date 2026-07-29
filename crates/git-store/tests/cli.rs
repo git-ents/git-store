@@ -118,7 +118,7 @@ fn interactive_put_builds_value_from_prompts() {
     let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
     assert!(ok, "schema put failed: {err}");
 
-    // A schema's fields are prompted in name order (`Schema::Struct` is
+    // A schema's fields are prompted in name order (`Node::Struct` is
     // name-keyed, not declaration-ordered): serves, then the steps list
     // (add? / value until a `n` closes it), then title.
     let answers = "4\ny\nboil\ny\nfry\nn\nCarbonara\n";

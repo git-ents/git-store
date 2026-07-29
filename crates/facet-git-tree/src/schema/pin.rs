@@ -1,9 +1,9 @@
-//! The schema-schema pin: every stored [`SchemaDoc`] tree names, as a
+//! The schema-schema pin: every stored [`Schema`] tree names, as a
 //! [`SchemaSchema::ENTRY`] entry spliced onto its tree at write time, the
 //! generation of the schema-schema it was written against.
 //!
 //! The pin is a storage-layer splice, not a Rust field — a `schema:` field on
-//! `SchemaDoc` would make [`schema_of::<SchemaDoc>()`](crate::schema_of)
+//! `Schema` would make [`schema_of::<Schema>()`](crate::schema_of)
 //! describe the pin and recurse forever. It works the same way `gix-store`'s
 //! subtree schema binding splices `{value/, schema/}` onto a data commit's
 //! tree: the pinned tree sits beside the document it governs, reachable by
@@ -13,11 +13,11 @@ use gix_object::{Find, Write};
 
 use crate::de::find_tree_entries;
 use crate::error::{DeserializeError, SchemaPinError, SerializeError};
-use crate::schema::{SchemaDoc, schema_of};
+use crate::schema::{Schema, schema_of};
 use crate::ser::serialize_into;
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 
-/// One generation of the schema-schema: the tree that a `SchemaDoc` written
+/// One generation of the schema-schema: the tree that a `Schema` written
 /// by that generation pins, and the generation it pins in turn.
 ///
 /// Generations chain by reachability — generation N's own tree carries a
@@ -33,7 +33,7 @@ impl SchemaSchema {
     /// The tree entry name a document pins its schema-schema under.
     pub const ENTRY: &'static str = "schema";
 
-    /// Generation zero: `serialize(&schema_of::<SchemaDoc>()?)` with no pin
+    /// Generation zero: `serialize(&schema_of::<Schema>()?)` with no pin
     /// spliced in — the recursion bottoms out here.
     ///
     /// Changing this id is a semver-major break; see
@@ -69,7 +69,7 @@ impl SchemaSchema {
 
 /// Hex text for [`SchemaSchema::GENESIS`]'s tree id, kept as a named constant
 /// so it stays human-checkable against the golden-oid test.
-const GENESIS_HEX: &str = "ac6765ad5cb7f41804706777260a43751eb2db41";
+const GENESIS_HEX: &str = "09961be517a580c73b94d6b84b5a3e7dac2f0ac3";
 
 /// Decode a 40-character lowercase-hex SHA-1 literal at compile time, so a
 /// malformed constant is a compile error rather than a silent runtime bug.
@@ -101,10 +101,10 @@ pub(crate) const fn hex_nibble(b: u8) -> u8 {
 }
 
 /// The current generation's own schema-schema document —
-/// `schema_of::<SchemaDoc>()`, unconditionally describable since it is this
+/// `schema_of::<Schema>()`, unconditionally describable since it is this
 /// crate's own fixed shape.
-fn schema_schema_doc() -> SchemaDoc {
-    schema_of::<SchemaDoc>().expect("SchemaDoc's own shape is always describable")
+fn schema_schema_doc() -> Schema {
+    schema_of::<Schema>().expect("Schema's own shape is always describable")
 }
 
 /// Add the [`SchemaSchema::ENTRY`] entry naming `pin` to the already-written
@@ -149,7 +149,7 @@ fn materialize<S: Write + Find + ?Sized>(store: &S) -> Result<ObjectId, SchemaPi
     }
 }
 
-impl SchemaDoc {
+impl Schema {
     /// Write this document into `store` with the schema-schema pin spliced
     /// in, returning the stored tree's id.
     ///
@@ -193,14 +193,14 @@ impl SchemaDoc {
     /// Read a stored schema document, refusing one this build does not speak
     /// *before* deserializing it.
     ///
-    /// A document from a newer binary may contain a `Schema` variant this
+    /// A document from a newer binary may contain a `Node` variant this
     /// build has never heard of, and a typed deserialize attempted first
     /// would fail with an opaque reflection error before the pin was ever
     /// checked — so [`read_pin`](Self::read_pin) runs first, unconditionally.
     pub fn read_pinned<F: Find + ?Sized>(
         tree: &ObjectId,
         store: &F,
-    ) -> Result<SchemaDoc, SchemaPinError> {
+    ) -> Result<Schema, SchemaPinError> {
         Self::read_pin(tree, store)?;
         Ok(crate::de::deserialize(tree, store)?)
     }

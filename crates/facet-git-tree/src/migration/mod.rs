@@ -2,7 +2,7 @@
 //!
 //! A migration is DATA, never Rust code: it is an ordinary [`Facet`] value
 //! storable through this crate's own tree encoding, exactly as
-//! [`SchemaDoc`](crate::SchemaDoc) is self-hosted. The vocabulary is
+//! [`Schema`](crate::Schema) is self-hosted. The vocabulary is
 //! deliberately tiny — every operator here is semantics every consumer, in
 //! every language, must implement forever. Migration is read-time upcast,
 //! never rewrite: nothing here ever produces a new stored value tree from an
@@ -66,7 +66,7 @@ pub enum Change {
     Remove { field: String },
     /// The target's field schema is `Optional` of the source's.
     ///
-    /// This is the identity on a dynamic value: `Schema::Optional` reads as
+    /// This is the identity on a dynamic value: `Node::Optional` reads as
     /// `null` or the inner value directly (see `schema/read.rs`), so
     /// `Some(x)` and `x` are the same `Value`. The operator exists anyway
     /// because it records the *encoding* change — a `some/` tree entry

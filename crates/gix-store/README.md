@@ -38,7 +38,7 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   the encoding — refs, commits, schema binding — is shared, and the two
   encodings are byte-identical, so the two handles interoperate over the same
   refs.
-- **Schemas are self-hosted.** A [`SchemaDoc`] is an ordinary `Facet` value
+- **Schemas are self-hosted.** A [`Schema`] is an ordinary `Facet` value
   stored through the same tree encoding as everything else, committed to
   `refs/schema/<kind>`. Its history is the kind's evolution audit. Each stored
   schema pins the generation of the schema-schema it was written against, so a
@@ -73,5 +73,5 @@ with no filesystem behind it, which is what most of this crate's own tests use.
 one ref, committed forward. Signing, gate policy, event sinks, and multi-ref
 atomic transactions are out of scope by design.
 
-[`SchemaDoc`]: facet_git_tree::SchemaDoc
+[`Schema`]: facet_git_tree::Schema
 [`RefEdit`]: gix_refstore::RefEdit

@@ -1,6 +1,6 @@
 //! The struct authors the schema. Each demo kind is an ordinary
 //! `#[derive(Facet)]` struct; [`schema_of`](facet_git_tree::schema_of) turns
-//! its shape into the [`SchemaDoc`](facet_git_tree::SchemaDoc) that
+//! its shape into the [`Schema`](facet_git_tree::Schema) that
 //! `git store schema put` publishes.
 //!
 //! ```console
@@ -8,7 +8,7 @@
 //! ```
 
 use facet::Facet;
-use facet_git_tree::{SchemaDoc, SchemaError, schema_of};
+use facet_git_tree::{Schema, SchemaError, schema_of};
 
 /// A cooking recipe.
 #[derive(Facet)]
@@ -63,7 +63,7 @@ fn main() {
     );
 }
 
-fn schema_for(kind: &str) -> Result<SchemaDoc, SchemaError> {
+fn schema_for(kind: &str) -> Result<Schema, SchemaError> {
     match kind {
         "recipe" => schema_of::<Recipe>(),
         "book" => schema_of::<Book>(),

@@ -38,6 +38,6 @@ pub use schema::pin::SchemaSchema;
 pub use schema::read::{deserialize_value_with_schema, validate_with_schema};
 #[cfg(feature = "value")]
 pub use schema::write::serialize_value_with_schema;
-pub use schema::{Schema, SchemaDoc, VariantKind, schema_and_hints_of, schema_of};
+pub use schema::{Node, Schema, VariantKind, schema_and_hints_of, schema_of};
 pub use ser::{serialize, serialize_into, serialize_peek, serialize_peek_into};
 pub use store::ObjectStore;

@@ -40,14 +40,14 @@ fn main() -> anyhow::Result<()> {
 
 ## Schemas
 
-Schemas are self-hosted: `SchemaDoc` is itself a `Facet` type, stored through this crate's own tree encoding.
+Schemas are self-hosted: `Schema` is itself a `Facet` type, stored through this crate's own tree encoding.
 Generate one with `schema_of`, store it like any other value, and use it to read data back with full type fidelity — numbers as numbers, enums as tagged objects.
 The schema-driven reader requires the `value` feature.
 
 ```rust
 use facet::Facet;
 use facet_git_tree::{deserialize, deserialize_value_with_schema, schema_of, serialize, serialize_into};
-use facet_git_tree::SchemaDoc;
+use facet_git_tree::Schema;
 
 #[derive(Facet)]
 struct Person {
@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
 
     // Later, or elsewhere: load the schema back from its oid, then use it to
     // read the value faithfully — `age` is a number, not a string.
-    let doc = deserialize::<SchemaDoc>(&schema_oid, &store)?;
+    let doc = deserialize::<Schema>(&schema_oid, &store)?;
     let value = deserialize_value_with_schema(&person_oid, &doc, &store)?;
     println!("{value:?}");
     Ok(())
@@ -76,7 +76,7 @@ fn main() -> anyhow::Result<()> {
 ### Publishing Schemas Under Refs
 
 `facet-git-tree` is oid-in/oid-out and performs no ref operations.
-The `refs/schema/<name>` convention — e.g. `refs/schema/issue` — is owned by higher layers such as `git-store`: a schema is published by serializing its `SchemaDoc` and pointing the ref at the resulting tree oid, or at a commit wrapping that tree for history and signing.
+The `refs/schema/<name>` convention — e.g. `refs/schema/issue` — is owned by higher layers such as `git-store`: a schema is published by serializing its `Schema` and pointing the ref at the resulting tree oid, or at a commit wrapping that tree for history and signing.
 That choice belongs to the higher layer.
 
 ## Code of Conduct

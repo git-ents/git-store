@@ -227,7 +227,7 @@ pub enum DeserializeError {
 }
 
 /// An error produced by schema generation ([`schema_of`](crate::schema_of) and
-/// [`SchemaDoc::from_shape`](crate::SchemaDoc::from_shape)).
+/// [`Schema::from_shape`](crate::Schema::from_shape)).
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaError {
     /// The shape contains a scalar type this encoding does not support.
@@ -260,8 +260,8 @@ pub enum SchemaError {
 }
 
 /// An error produced by the schema-schema pin
-/// ([`SchemaDoc::write_pinned`](crate::SchemaDoc::write_pinned) and
-/// [`SchemaDoc::read_pinned`](crate::SchemaDoc::read_pinned)/[`read_pin`](crate::SchemaDoc::read_pin)).
+/// ([`Schema::write_pinned`](crate::Schema::write_pinned) and
+/// [`Schema::read_pinned`](crate::Schema::read_pinned)/[`read_pin`](crate::Schema::read_pin)).
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaPinError {
     /// The document pins a schema-schema this build does not speak.
@@ -301,7 +301,7 @@ pub enum SchemaPinError {
 /// [`Migration::read_pinned`](crate::Migration::read_pinned)/[`read_pin`](crate::Migration::read_pin)).
 ///
 /// The migration tower is separate from the schema-schema tower, so this is a
-/// separate error: a build may speak one generation of `SchemaDoc` and a
+/// separate error: a build may speak one generation of `Schema` and a
 /// different generation of `Migration`.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrationPinError {
@@ -345,7 +345,7 @@ pub enum SchemaReadError {
     /// other condition [`DeserializeError`] describes.
     #[error(transparent)]
     Deserialize(#[from] DeserializeError),
-    /// A `Schema::Ref` names a definition absent from the document's `defs`
+    /// A `Node::Ref` names a definition absent from the document's `defs`
     /// table.
     #[error("schema ref {0:?} has no definition in the document")]
     UnknownRef(String),
@@ -359,8 +359,8 @@ pub enum SchemaReadError {
     },
     /// A fixed-length sequence's entry count does not match the schema.
     ///
-    /// Produced for `Schema::Array` (whose `len` is part of the schema) and
-    /// `Schema::Tuple` (whose element count is).
+    /// Produced for `Node::Array` (whose `len` is part of the schema) and
+    /// `Node::Tuple` (whose element count is).
     #[error("sequence length mismatch: schema expects {expected} elements, tree holds {found}")]
     ArrayLenMismatch {
         /// The element count the schema requires.
@@ -525,7 +525,7 @@ pub enum SchemaWriteError {
 ///
 /// The migration-walk mirror of [`SchemaReadError`]/[`SchemaWriteError`]: it
 /// walks an already-read `facet_value::Value` guided by the source
-/// `SchemaDoc`, so every variant names the `path` at which the value
+/// `Schema`, so every variant names the `path` at which the value
 /// diverged from what that document describes.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrationError {
@@ -554,7 +554,7 @@ pub enum MigrationError {
         /// The element count the value holds.
         found: usize,
     },
-    /// A `Schema::Ref` names a definition absent from the source document.
+    /// A `Node::Ref` names a definition absent from the source document.
     #[error("at {path}: schema ref {name:?} has no definition in the source document")]
     UnknownRef {
         /// The location within the value.

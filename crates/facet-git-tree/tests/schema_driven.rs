@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use facet::Facet;
 use facet_git_tree::{
-    DeserializeError, EntryKind, EntryMode, ObjectId, ObjectStore, RawTree, Schema, SchemaDoc,
+    DeserializeError, EntryKind, EntryMode, Node, ObjectId, ObjectStore, RawTree, Schema,
     SchemaReadError, TreeEntry, deserialize, deserialize_value_with_schema, schema_of, serialize,
     serialize_into, validate_with_schema,
 };
@@ -118,8 +118,8 @@ fn enum_variants_read_as_tagged_objects() -> anyhow::Result<()> {
 fn unknown_variant_errors() -> anyhow::Result<()> {
     let (root, store) = serialize(&Event::Ping)?;
     // A schema for the same enum, but without the `Ping` variant.
-    let doc = SchemaDoc {
-        root: Schema::Enum(Default::default()),
+    let doc = Schema {
+        root: Node::Enum(Default::default()),
         defs: Default::default(),
     };
     let err = deserialize_value_with_schema(&root, &doc, &store).unwrap_err();
@@ -171,9 +171,9 @@ fn arc_str_key_map_schema_is_scalar_and_reads() -> anyhow::Result<()> {
     let doc = schema_of::<HashMap<Arc<str>, u32>>()?;
     assert_eq!(
         doc.root,
-        Schema::Map {
-            key: Box::new(Schema::String),
-            value: Box::new(Schema::U32),
+        Node::Map {
+            key: Box::new(Node::String),
+            value: Box::new(Node::U32),
         },
         "an Arc<str> key must be schema'd as its collapsed scalar (String), not composite"
     );
@@ -210,8 +210,8 @@ fn recursive_tree_reads_via_ref() -> anyhow::Result<()> {
 #[test]
 fn unknown_ref_errors() -> anyhow::Result<()> {
     let (root, store) = serialize(&42i32)?;
-    let doc = SchemaDoc {
-        root: Schema::Ref("nope".into()),
+    let doc = Schema {
+        root: Node::Ref("nope".into()),
         defs: Default::default(),
     };
     let err = deserialize_value_with_schema(&root, &doc, &store).unwrap_err();
@@ -270,9 +270,9 @@ fn nest_some(store: &ObjectStore, oid: ObjectId, wraps: usize, leaf_is_blob: boo
     current
 }
 
-/// A `Schema::Dynamic` node hands off to the same recursion-depth budget the
+/// A `Node::Dynamic` node hands off to the same recursion-depth budget the
 /// surrounding schema-driven read is already spending from, rather than
-/// resetting it to `0`. Neither half of this tree — 20 `Schema::Optional`
+/// resetting it to `0`. Neither half of this tree — 20 `Node::Optional`
 /// levels, then 20 more levels the dynamic heuristic itself must walk —
 /// exceeds `MAX_DEPTH` (32) alone, but their sum (40) does. Before the
 /// hand-off carried the depth across, the inner heuristic read restarted at
@@ -286,15 +286,15 @@ fn dynamic_schema_node_shares_the_surrounding_depth_budget() -> anyhow::Result<(
     // (see `deserialization.dynamic.heuristic`), so continuing the same
     // `{ "some": … }` shape past the schema/dynamic boundary still costs one
     // recursion level per wrap on the dynamic side, exactly as it does on the
-    // `Schema::Optional` side.
+    // `Node::Optional` side.
     let dynamic_part = nest_some(&store, leaf, 20, true);
     let root = nest_some(&store, dynamic_part, 20, false);
 
-    let mut schema = Schema::Dynamic;
+    let mut schema = Node::Dynamic;
     for _ in 0..20 {
-        schema = Schema::Optional(Box::new(schema));
+        schema = Node::Optional(Box::new(schema));
     }
-    let doc = SchemaDoc {
+    let doc = Schema {
         root: schema,
         defs: Default::default(),
     };
@@ -320,8 +320,8 @@ fn dynamic_delegates_to_heuristic() -> anyhow::Result<()> {
         active: true,
     };
     let (root, store) = serialize(&person)?;
-    let doc = SchemaDoc {
-        root: Schema::Dynamic,
+    let doc = Schema {
+        root: Node::Dynamic,
         defs: Default::default(),
     };
     let via_schema = deserialize_value_with_schema(&root, &doc, &store)?;
@@ -349,8 +349,8 @@ fn validate_ok_and_err() -> anyhow::Result<()> {
     validate_with_schema(&root, &schema_of::<Person>()?, &store)?;
 
     // A Person tree is not an empty tree, so a Unit schema must reject it.
-    let unit = SchemaDoc {
-        root: Schema::Unit,
+    let unit = Schema {
+        root: Node::Unit,
         defs: Default::default(),
     };
     let err = validate_with_schema(&root, &unit, &store).unwrap_err();
@@ -367,10 +367,10 @@ fn validate_ok_and_err() -> anyhow::Result<()> {
 fn struct_read_requires_every_schema_field() -> anyhow::Result<()> {
     let (root, store) = serialize(&Point { x: 1.0, y: 2.0 })?;
     let mut doc = schema_of::<Point>()?;
-    let Some(Schema::Struct(fields)) = doc.defs.get_mut("Point") else {
+    let Some(Node::Struct(fields)) = doc.defs.get_mut("Point") else {
         panic!("Point is a struct definition");
     };
-    fields.insert("z".into(), Schema::F64);
+    fields.insert("z".into(), Node::F64);
 
     let err = validate_with_schema(&root, &doc, &store).unwrap_err();
     assert!(
@@ -386,7 +386,7 @@ fn struct_read_requires_every_schema_field() -> anyhow::Result<()> {
 fn struct_read_rejects_entries_absent_from_the_schema() -> anyhow::Result<()> {
     let (root, store) = serialize(&Point { x: 1.0, y: 2.0 })?;
     let mut doc = schema_of::<Point>()?;
-    let Some(Schema::Struct(fields)) = doc.defs.get_mut("Point") else {
+    let Some(Node::Struct(fields)) = doc.defs.get_mut("Point") else {
         panic!("Point is a struct definition");
     };
     fields.remove("y");

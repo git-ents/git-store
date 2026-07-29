@@ -66,7 +66,7 @@ pub struct WithValue {
 }
 
 /// A self-referential type: a node owns child nodes of the same type. Used by
-/// the schema suites to exercise `Schema::Ref` recursion.
+/// the schema suites to exercise `Node::Ref` recursion.
 #[derive(Debug, Facet, PartialEq)]
 pub struct TreeNode {
     pub value: i64,

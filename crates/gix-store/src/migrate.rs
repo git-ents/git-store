@@ -8,7 +8,7 @@
 //! needed to upcast it. A separate migration ref would reintroduce exactly the
 //! "data does not travel" failure the `{schema/, value/}` split exists to fix.
 
-use facet_git_tree::{Edge, Migration, ObjectId, SchemaDoc, apply_chain};
+use facet_git_tree::{Edge, Migration, ObjectId, Schema, apply_chain};
 use facet_value::Value;
 use gix::objs::{Find, Write};
 use gix_refstore::{Committer, RefStore};
@@ -47,7 +47,7 @@ where
 /// One step of a chain: the document values on this side conform to, and the
 /// migration off it.
 struct Step {
-    from: SchemaDoc,
+    from: Schema,
     migration: Migration,
 }
 
@@ -102,7 +102,7 @@ where
             let (newer, older) = (pair[0], pair[1]);
             let older_tree = self.store.commit_tree(older)?;
             steps.push(Step {
-                from: SchemaDoc::read_pinned(&older_tree, self.store.objects())?,
+                from: Schema::read_pinned(&older_tree, self.store.objects())?,
                 migration: self.migration_at(newer)?.ok_or(Error::MigrationMissing {
                     kind: self.kind.clone(),
                     commit: newer,

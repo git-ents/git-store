@@ -16,7 +16,7 @@
 //! every one of these cases rather than a distinct marker per case, because
 //! the marker's only job is presence-signaling for git tooling — every
 //! consumer that decodes a possibly-marked tree already knows, from its
-//! target `Facet` type or its [`crate::schema::Schema`] node, exactly which
+//! target `Facet` type or its [`crate::schema::Node`] node, exactly which
 //! of `None`/`Null`/empty-`Vec`/empty-`Map`/… is expected at that path, so
 //! the marker itself never needs to disambiguate one from another. The one
 //! reader that cannot make that distinction — the schemaless
@@ -31,7 +31,7 @@
 //! on read, from the marker. Ordinal (sequence) names can never collide with
 //! it, being always decimal digits. Field names of a `#[derive(Facet)]` type
 //! cannot either, a bare `_` not being a valid Rust field identifier — but a
-//! [`SchemaDoc`](crate::SchemaDoc) is *data*, and one authored by hand can
+//! [`Schema`](crate::Schema) is *data*, and one authored by hand can
 //! name a field anything at all, so the schema-directed writer checks field
 //! names too rather than trusting the derive's guarantee.
 

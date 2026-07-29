@@ -686,12 +686,12 @@ fn schema_with_no_pin_entry_is_refused() {
 
 /// The critical case the whole schema-schema pin exists for: a schema tree
 /// that both pins a schema-schema this binary does not recognize, *and*
-/// contains a `Schema` variant this binary has never heard of (simulated as a
+/// contains a `Node` variant this binary has never heard of (simulated as a
 /// `root` tagged `DateTime`, the same repro the old version-marker issue
 /// named) — something a full typed deserialize cannot get through.
 /// [`gix_store::KindSchema::get`] must report the pin error here, not the
 /// reflection error the corrupt content would otherwise produce, which is
-/// only possible because [`facet_git_tree::SchemaDoc::read_pinned`] checks
+/// only possible because [`facet_git_tree::Schema::read_pinned`] checks
 /// the pin out of band *before* attempting to deserialize the rest of the
 /// document.
 #[test]

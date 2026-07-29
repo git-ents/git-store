@@ -1,5 +1,5 @@
 //! Schema-directed serialization: encoding a full-fidelity
-//! [`facet_value::Value`] as a Git tree guided by a [`SchemaDoc`].
+//! [`facet_value::Value`] as a Git tree guided by a [`Schema`].
 //!
 //! The write-side mirror of [`schema::read`](crate::schema::read). A dynamic
 //! value parsed from JSON does not, on its own, know which typed encoding a
@@ -31,7 +31,7 @@ use gix_object::Write;
 
 use crate::de::MAX_DEPTH;
 use crate::error::{SchemaWriteError, SerializeError};
-use crate::schema::{Schema, SchemaDoc, VariantKind};
+use crate::schema::{Node, Schema, VariantKind};
 use crate::ser::{float_text, serialize_node, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
 
@@ -65,7 +65,7 @@ use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
 /// ```
 pub fn serialize_value_with_schema<W: Write + ?Sized>(
     value: &Value,
-    doc: &SchemaDoc,
+    doc: &Schema,
     store: &W,
 ) -> Result<ObjectId, SchemaWriteError> {
     let (oid, _kind) = write_node(value, &doc.root, doc, store, &Path::ROOT, 0)?;
@@ -140,13 +140,13 @@ impl<'a> Path<'a> {
 /// caller embedding it in a parent tree can set the entry mode exactly as the
 /// typed encoder does.
 ///
-/// `depth` counts every hop — including [`Schema::Ref`] resolution — against
+/// `depth` counts every hop — including [`Node::Ref`] resolution — against
 /// the same [`MAX_DEPTH`] limit that bounds deserialization, so a `Ref`-to-`Ref`
 /// cycle in the schema fails rather than recursing unboundedly.
 fn write_node<W: Write + ?Sized>(
     value: &Value,
-    schema: &Schema,
-    doc: &SchemaDoc,
+    schema: &Node,
+    doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
@@ -158,19 +158,19 @@ fn write_node<W: Write + ?Sized>(
         });
     }
     match schema {
-        Schema::Unit => {
+        Node::Unit => {
             if value.is_null() {
                 tree(store, vec![])
             } else {
                 Err(expected(path, "null", value))
             }
         }
-        Schema::Bool => match value.as_bool() {
+        Node::Bool => match value.as_bool() {
             Some(true) => blob(store, b"true"),
             Some(false) => blob(store, b"false"),
             None => Err(expected(path, "bool", value)),
         },
-        Schema::Char => {
+        Node::Char => {
             let mut buf = [0u8; 4];
             if let Some(c) = value.as_char() {
                 blob(store, c.encode_utf8(&mut buf).as_bytes())
@@ -180,23 +180,23 @@ fn write_node<W: Write + ?Sized>(
                 Err(expected(path, "char or single-character string", value))
             }
         }
-        Schema::String => match value_str(value) {
+        Node::String => match value_str(value) {
             Some(s) => blob(store, s.as_bytes()),
             None => Err(expected(path, "string", value)),
         },
-        Schema::I8 => signed_blob::<i8, W>(value, "I8", path, store),
-        Schema::I16 => signed_blob::<i16, W>(value, "I16", path, store),
-        Schema::I32 => signed_blob::<i32, W>(value, "I32", path, store),
-        Schema::I64 => signed_blob::<i64, W>(value, "I64", path, store),
-        Schema::I128 => signed_blob::<i128, W>(value, "I128", path, store),
-        Schema::ISize => signed_blob::<isize, W>(value, "ISize", path, store),
-        Schema::U8 => unsigned_blob::<u8, W>(value, "U8", path, store),
-        Schema::U16 => unsigned_blob::<u16, W>(value, "U16", path, store),
-        Schema::U32 => unsigned_blob::<u32, W>(value, "U32", path, store),
-        Schema::U64 => unsigned_blob::<u64, W>(value, "U64", path, store),
-        Schema::U128 => unsigned_blob::<u128, W>(value, "U128", path, store),
-        Schema::USize => unsigned_blob::<usize, W>(value, "USize", path, store),
-        Schema::F64 => {
+        Node::I8 => signed_blob::<i8, W>(value, "I8", path, store),
+        Node::I16 => signed_blob::<i16, W>(value, "I16", path, store),
+        Node::I32 => signed_blob::<i32, W>(value, "I32", path, store),
+        Node::I64 => signed_blob::<i64, W>(value, "I64", path, store),
+        Node::I128 => signed_blob::<i128, W>(value, "I128", path, store),
+        Node::ISize => signed_blob::<isize, W>(value, "ISize", path, store),
+        Node::U8 => unsigned_blob::<u8, W>(value, "U8", path, store),
+        Node::U16 => unsigned_blob::<u16, W>(value, "U16", path, store),
+        Node::U32 => unsigned_blob::<u32, W>(value, "U32", path, store),
+        Node::U64 => unsigned_blob::<u64, W>(value, "U64", path, store),
+        Node::U128 => unsigned_blob::<u128, W>(value, "U128", path, store),
+        Node::USize => unsigned_blob::<usize, W>(value, "USize", path, store),
+        Node::F64 => {
             let n = as_number(value, path)?;
             // A float-backed number is rendered at any magnitude; an
             // integer-backed one must be exactly representable, else refused.
@@ -207,7 +207,7 @@ fn write_node<W: Write + ?Sized>(
             };
             blob(store, &float_text(f))
         }
-        Schema::F32 => {
+        Node::F32 => {
             let n = as_number(value, path)?;
             let f: f32 = if n.is_float() {
                 n.to_f64_lossy() as f32
@@ -219,7 +219,7 @@ fn write_node<W: Write + ?Sized>(
         // `Bytes` reads back as raw bytes; a JSON author who cannot express a
         // byte string writes an ordinary string, whose UTF-8 bytes become the
         // blob — the same blob a typed `Vec<u8>` of those bytes produces.
-        Schema::Bytes => {
+        Node::Bytes => {
             if let Some(b) = value.as_bytes() {
                 blob(store, b.as_slice())
             } else if let Some(s) = value_str(value) {
@@ -228,19 +228,19 @@ fn write_node<W: Write + ?Sized>(
                 Err(expected(path, "bytes or string", value))
             }
         }
-        Schema::Struct(fields) => write_named_tree(value, fields, doc, store, path, depth),
-        Schema::Tuple(elems) => {
+        Node::Struct(fields) => write_named_tree(value, fields, doc, store, path, depth),
+        Node::Tuple(elems) => {
             let arr = as_array(value, path)?;
             if arr.len() != elems.len() {
                 return Err(length_mismatch(path, elems.len(), arr.len()));
             }
             write_seq(arr, |i| &elems[i], doc, store, path, depth, false)
         }
-        Schema::List(elem) => {
+        Node::List(elem) => {
             let arr = as_array(value, path)?;
             write_seq(arr, |_| elem, doc, store, path, depth, true)
         }
-        Schema::Array { elem, len } => {
+        Node::Array { elem, len } => {
             let arr = as_array(value, path)?;
             if arr.len() != *len {
                 return Err(length_mismatch(path, *len, arr.len()));
@@ -251,7 +251,7 @@ fn write_node<W: Write + ?Sized>(
         // scalar key is a name-keyed object; a composite key is an array of
         // `{ k, v }` pairs. An empty map (either layout) writes the presence
         // marker instead of a literal empty tree, per `crate::marker`.
-        Schema::Map { key, value: val } => {
+        Node::Map { key, value: val } => {
             if is_scalar_schema(key) {
                 let obj = as_object(value, path)?;
                 let mut entries = Vec::with_capacity(obj.len());
@@ -273,7 +273,7 @@ fn write_node<W: Write + ?Sized>(
             }
             write_composite_map(value, key, val, doc, store, path, depth)
         }
-        Schema::Optional(inner) => {
+        Node::Optional(inner) => {
             if value.is_null() {
                 // None: the presence marker, not a literal empty tree — see
                 // `crate::marker`.
@@ -289,11 +289,11 @@ fn write_node<W: Write + ?Sized>(
                 }],
             )
         }
-        Schema::Enum(variants) => write_enum(value, variants, doc, store, path, depth),
+        Node::Enum(variants) => write_enum(value, variants, doc, store, path, depth),
         // A raw tree is opaque: the value is the referenced object id in hex,
         // handed straight back as a tree reference with no write — mirroring
         // the typed `RawTree` encoding, which likewise emits no object.
-        Schema::RawTree => {
+        Node::RawTree => {
             let s = value_str(value).ok_or_else(|| expected(path, "object-id string", value))?;
             let oid =
                 ObjectId::from_hex(s.as_bytes()).map_err(|_| SchemaWriteError::InvalidRawTree {
@@ -306,8 +306,8 @@ fn write_node<W: Write + ?Sized>(
         // same one `serialize` applies to a `Value` field — is exactly right.
         // Serialization is not depth-bounded (a `Value` is a finite tree), so
         // no budget need be threaded across the boundary as reads must.
-        Schema::Dynamic => Ok(serialize_node(Peek::new(value), store)?),
-        Schema::Ref(name) => {
+        Node::Dynamic => Ok(serialize_node(Peek::new(value), store)?),
+        Node::Ref(name) => {
             let target = doc
                 .defs
                 .get(name)
@@ -320,7 +320,7 @@ fn write_node<W: Write + ?Sized>(
     }
 }
 
-/// Encode an object as a name-keyed tree, shared by [`Schema::Struct`] and
+/// Encode an object as a name-keyed tree, shared by [`Node::Struct`] and
 /// struct enum variants.
 ///
 /// A field absent from the object is skipped, matching the read path's
@@ -328,8 +328,8 @@ fn write_node<W: Write + ?Sized>(
 /// define is rejected, since the read path never emits one.
 fn write_named_tree<W: Write + ?Sized>(
     value: &Value,
-    fields: &BTreeMap<String, Schema>,
-    doc: &SchemaDoc,
+    fields: &BTreeMap<String, Node>,
+    doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
@@ -345,7 +345,7 @@ fn write_named_tree<W: Write + ?Sized>(
     }
     let mut entries = Vec::with_capacity(fields.len());
     for (name, schema) in fields {
-        // A `SchemaDoc` is data — `git store schema put` ingests one from
+        // A `Schema` is data — `git store schema put` ingests one from
         // hand-authored JSON — so a field name is untrusted input here, unlike
         // a `#[derive(Facet)]` name which is always a Rust identifier. Without
         // this, a field named exactly `crate::marker::MARKER_KEY` would encode
@@ -369,17 +369,17 @@ fn write_named_tree<W: Write + ?Sized>(
 ///
 /// `marker_empty` says whether an empty result takes the presence marker
 /// instead of a literal empty tree, per `crate::marker`. It is true for the
-/// variable-length sequences — [`Schema::List`], [`Schema::Array`] — whose
+/// variable-length sequences — [`Node::List`], [`Node::Array`] — whose
 /// emptiness is a property of the *value* and so is worth seeing in a diff.
-/// It is false for [`Schema::Tuple`], whose length is fixed by the schema:
+/// It is false for [`Node::Tuple`], whose length is fixed by the schema:
 /// a zero-element tuple encodes identically for every value, so there is
 /// nothing to diff, and marking it would both diverge from the typed encoder
 /// (which writes the empty tree for a zero-field tuple struct) and produce a
 /// tree [`read_tuple`](super::read) refuses to read back.
 fn write_seq<'s, W: Write + ?Sized>(
     arr: &VArray,
-    schema_for: impl Fn(usize) -> &'s Schema,
-    doc: &SchemaDoc,
+    schema_for: impl Fn(usize) -> &'s Node,
+    doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
@@ -411,9 +411,9 @@ fn write_seq<'s, W: Write + ?Sized>(
 /// [`Array`]: facet_value::Value::as_array
 fn write_composite_map<W: Write + ?Sized>(
     value: &Value,
-    key: &Schema,
-    val: &Schema,
-    doc: &SchemaDoc,
+    key: &Node,
+    val: &Node,
+    doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
@@ -471,7 +471,7 @@ fn write_composite_map<W: Write + ?Sized>(
 fn write_enum<W: Write + ?Sized>(
     value: &Value,
     variants: &BTreeMap<String, VariantKind>,
-    doc: &SchemaDoc,
+    doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
@@ -716,25 +716,25 @@ fn value_kind(v: &Value) -> &'static str {
 
 /// Whether `schema` is a scalar node — the same classification that decides
 /// map layout on read.
-fn is_scalar_schema(schema: &Schema) -> bool {
+fn is_scalar_schema(schema: &Node) -> bool {
     matches!(
         schema,
-        Schema::Bool
-            | Schema::Char
-            | Schema::String
-            | Schema::I8
-            | Schema::I16
-            | Schema::I32
-            | Schema::I64
-            | Schema::I128
-            | Schema::ISize
-            | Schema::U8
-            | Schema::U16
-            | Schema::U32
-            | Schema::U64
-            | Schema::U128
-            | Schema::USize
-            | Schema::F32
-            | Schema::F64
+        Node::Bool
+            | Node::Char
+            | Node::String
+            | Node::I8
+            | Node::I16
+            | Node::I32
+            | Node::I64
+            | Node::I128
+            | Node::ISize
+            | Node::U8
+            | Node::U16
+            | Node::U32
+            | Node::U64
+            | Node::U128
+            | Node::USize
+            | Node::F32
+            | Node::F64
     )
 }

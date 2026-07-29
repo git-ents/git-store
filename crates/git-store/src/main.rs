@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use facet_git_tree::{Schema, SchemaDoc, VariantKind};
+use facet_git_tree::{Node, Schema, VariantKind};
 use facet_value::{Value, from_value};
 use gix_store::{Dynamic, GixRefStore, Kind, ObjectId, RefSegment, RepoStore};
 
@@ -315,8 +315,8 @@ fn read_stdin() -> Result<String> {
     Ok(buf)
 }
 
-/// Parse a hand-authored schema JSON document into a [`SchemaDoc`].
-fn schema_doc_from_json(json: &str) -> Result<SchemaDoc> {
+/// Parse a hand-authored schema JSON document into a [`Schema`].
+fn schema_doc_from_json(json: &str) -> Result<Schema> {
     let value: Value =
         facet_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))?;
     from_value(value).map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))
@@ -372,7 +372,7 @@ fn print_lines(items: Vec<RefSegment>) {
 
 /// A pretty-printed JSON skeleton for a kind's schema, or `{}` if it cannot be
 /// rendered.
-fn pretty_skeleton(doc: &SchemaDoc) -> String {
+fn pretty_skeleton(doc: &Schema) -> String {
     let compact = skeleton(&doc.root, doc);
     match facet_json::from_str::<Value>(&compact) {
         Ok(value) => to_json(&value).unwrap_or(compact),
@@ -381,38 +381,34 @@ fn pretty_skeleton(doc: &SchemaDoc) -> String {
 }
 
 /// A compact placeholder JSON snippet matching `schema`.
-fn skeleton(schema: &Schema, doc: &SchemaDoc) -> String {
+fn skeleton(schema: &Node, doc: &Schema) -> String {
     match resolve(schema, doc) {
-        Schema::Bool => "false".into(),
-        Schema::Char | Schema::String | Schema::Bytes => "\"\"".into(),
-        Schema::F32 | Schema::F64 => "0.0".into(),
-        Schema::I8 | Schema::I16 | Schema::I32 | Schema::I64 | Schema::I128 | Schema::ISize => {
-            "0".into()
-        }
-        Schema::U8 | Schema::U16 | Schema::U32 | Schema::U64 | Schema::U128 | Schema::USize => {
-            "0".into()
-        }
-        Schema::Struct(fields) => {
+        Node::Bool => "false".into(),
+        Node::Char | Node::String | Node::Bytes => "\"\"".into(),
+        Node::F32 | Node::F64 => "0.0".into(),
+        Node::I8 | Node::I16 | Node::I32 | Node::I64 | Node::I128 | Node::ISize => "0".into(),
+        Node::U8 | Node::U16 | Node::U32 | Node::U64 | Node::U128 | Node::USize => "0".into(),
+        Node::Struct(fields) => {
             let body: Vec<_> = fields
                 .iter()
                 .map(|(name, schema)| format!("{name:?}:{}", skeleton(schema, doc)))
                 .collect();
             format!("{{{}}}", body.join(","))
         }
-        Schema::Tuple(elems) => {
+        Node::Tuple(elems) => {
             let body: Vec<_> = elems.iter().map(|s| skeleton(s, doc)).collect();
             format!("[{}]", body.join(","))
         }
-        Schema::Array { elem, len } => {
+        Node::Array { elem, len } => {
             let body: Vec<_> = (0..*len).map(|_| skeleton(elem, doc)).collect();
             format!("[{}]", body.join(","))
         }
         // A scalar-keyed map reads back as a JSON object; a composite-keyed one
         // as an array of `{ k, v }` pairs — mirror that in the seed.
-        Schema::Map { key, .. } if is_scalar_schema(resolve(key, doc)) => "{}".into(),
-        Schema::List(_) | Schema::Map { .. } => "[]".into(),
-        Schema::Optional(_) | Schema::Unit | Schema::RawTree | Schema::Dynamic => "null".into(),
-        Schema::Enum(variants) => match variants.first_key_value() {
+        Node::Map { key, .. } if is_scalar_schema(resolve(key, doc)) => "{}".into(),
+        Node::List(_) | Node::Map { .. } => "[]".into(),
+        Node::Optional(_) | Node::Unit | Node::RawTree | Node::Dynamic => "null".into(),
+        Node::Enum(variants) => match variants.first_key_value() {
             Some((name, kind)) => {
                 let payload = match kind {
                     VariantKind::Unit => "null".to_owned(),
@@ -421,13 +417,13 @@ fn skeleton(schema: &Schema, doc: &SchemaDoc) -> String {
                         let body: Vec<_> = elems.iter().map(|s| skeleton(s, doc)).collect();
                         format!("[{}]", body.join(","))
                     }
-                    VariantKind::Struct(fields) => skeleton(&Schema::Struct(fields.clone()), doc),
+                    VariantKind::Struct(fields) => skeleton(&Node::Struct(fields.clone()), doc),
                 };
                 format!("{{{name:?}:{payload}}}")
             }
             None => "null".into(),
         },
-        Schema::Ref(_) => "null".into(),
+        Node::Ref(_) => "null".into(),
     }
 }
 
@@ -447,10 +443,10 @@ fn print_log(repo: &gix::Repository, commits: Vec<ObjectId>) -> Result<()> {
 }
 
 /// Print a kind's top-level field layout, resolving the root through `defs`.
-fn print_type(kind: &str, doc: &SchemaDoc) {
+fn print_type(kind: &str, doc: &Schema) {
     println!("{kind}");
     match resolve(&doc.root, doc) {
-        Schema::Struct(fields) => {
+        Node::Struct(fields) => {
             for (name, schema) in fields {
                 println!("  {name}: {}", label(schema));
             }
@@ -462,61 +458,57 @@ fn print_type(kind: &str, doc: &SchemaDoc) {
 /// Whether a schema node is a scalar — the same classification that decides
 /// map layout (name-keyed object vs. `{ k, v }` pair array) in
 /// `serialize_value_with_schema`.
-pub(crate) fn is_scalar_schema(schema: &Schema) -> bool {
+pub(crate) fn is_scalar_schema(schema: &Node) -> bool {
     matches!(
         schema,
-        Schema::Bool
-            | Schema::Char
-            | Schema::String
-            | Schema::I8
-            | Schema::I16
-            | Schema::I32
-            | Schema::I64
-            | Schema::I128
-            | Schema::ISize
-            | Schema::U8
-            | Schema::U16
-            | Schema::U32
-            | Schema::U64
-            | Schema::U128
-            | Schema::USize
-            | Schema::F32
-            | Schema::F64
+        Node::Bool
+            | Node::Char
+            | Node::String
+            | Node::I8
+            | Node::I16
+            | Node::I32
+            | Node::I64
+            | Node::I128
+            | Node::ISize
+            | Node::U8
+            | Node::U16
+            | Node::U32
+            | Node::U64
+            | Node::U128
+            | Node::USize
+            | Node::F32
+            | Node::F64
     )
 }
 
 /// Follow a `Ref` to the definition it names; any other node is returned as-is.
-pub(crate) fn resolve<'d>(schema: &'d Schema, doc: &'d SchemaDoc) -> &'d Schema {
+pub(crate) fn resolve<'d>(schema: &'d Node, doc: &'d Schema) -> &'d Node {
     match schema {
-        Schema::Ref(name) => doc.defs.get(name).map_or(schema, |s| resolve(s, doc)),
+        Node::Ref(name) => doc.defs.get(name).map_or(schema, |s| resolve(s, doc)),
         other => other,
     }
 }
 
 /// A short, one-line label for a schema node.
-fn label(schema: &Schema) -> String {
+fn label(schema: &Node) -> String {
     match schema {
-        Schema::Unit => "unit".into(),
-        Schema::Bool => "bool".into(),
-        Schema::Char => "char".into(),
-        Schema::String => "string".into(),
-        Schema::Bytes => "bytes".into(),
-        Schema::I8 | Schema::I16 | Schema::I32 | Schema::I64 | Schema::I128 | Schema::ISize => {
-            "int".into()
-        }
-        Schema::U8 | Schema::U16 | Schema::U32 | Schema::U64 | Schema::U128 | Schema::USize => {
-            "uint".into()
-        }
-        Schema::F32 | Schema::F64 => "float".into(),
-        Schema::List(elem) | Schema::Array { elem, .. } => format!("[{}]", label(elem)),
-        Schema::Tuple(elems) => {
+        Node::Unit => "unit".into(),
+        Node::Bool => "bool".into(),
+        Node::Char => "char".into(),
+        Node::String => "string".into(),
+        Node::Bytes => "bytes".into(),
+        Node::I8 | Node::I16 | Node::I32 | Node::I64 | Node::I128 | Node::ISize => "int".into(),
+        Node::U8 | Node::U16 | Node::U32 | Node::U64 | Node::U128 | Node::USize => "uint".into(),
+        Node::F32 | Node::F64 => "float".into(),
+        Node::List(elem) | Node::Array { elem, .. } => format!("[{}]", label(elem)),
+        Node::Tuple(elems) => {
             let inner: Vec<_> = elems.iter().map(label).collect();
             format!("({})", inner.join(", "))
         }
-        Schema::Map { key, value } => format!("{{{}: {}}}", label(key), label(value)),
-        Schema::Optional(inner) => format!("{}?", label(inner)),
-        Schema::Struct(_) => "struct".into(),
-        Schema::Enum(variants) => {
+        Node::Map { key, value } => format!("{{{}: {}}}", label(key), label(value)),
+        Node::Optional(inner) => format!("{}?", label(inner)),
+        Node::Struct(_) => "struct".into(),
+        Node::Enum(variants) => {
             let names: Vec<_> = variants
                 .iter()
                 .map(|(name, kind)| match kind {
@@ -526,8 +518,8 @@ fn label(schema: &Schema) -> String {
                 .collect();
             names.join(" | ")
         }
-        Schema::RawTree => "tree".into(),
-        Schema::Dynamic => "dynamic".into(),
-        Schema::Ref(name) => name.clone(),
+        Node::RawTree => "tree".into(),
+        Node::Dynamic => "dynamic".into(),
+        Node::Ref(name) => name.clone(),
     }
 }

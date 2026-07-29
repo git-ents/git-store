@@ -13,7 +13,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input, Select};
-use facet_git_tree::{Schema, SchemaDoc, VariantKind};
+use facet_git_tree::{Node, Schema, VariantKind};
 use facet_value::{VArray, VObject, Value};
 
 use crate::{DynKind, is_scalar_schema, resolve};
@@ -30,9 +30,9 @@ pub fn value_for_kind(kind: &DynKind<'_, '_>) -> Result<Value> {
 
 /// Build a schema document by prompting for the root type. `defs` stays empty:
 /// nested user types are inlined, a form the encoder accepts directly.
-pub fn build_schema() -> Result<SchemaDoc> {
+pub fn build_schema() -> Result<Schema> {
     let root = build_schema_node(prompter().as_mut(), "root type")?;
-    Ok(SchemaDoc {
+    Ok(Schema {
         root,
         defs: Default::default(),
     })
@@ -158,36 +158,36 @@ impl Ask for Scripted {
 }
 
 /// The value for one schema node, prompting under `label` for its position.
-fn build_value(schema: &Schema, doc: &SchemaDoc, label: &str, ask: &mut dyn Ask) -> Result<Value> {
+fn build_value(schema: &Node, doc: &Schema, label: &str, ask: &mut dyn Ask) -> Result<Value> {
     Ok(match resolve(schema, doc) {
-        Schema::Unit => Value::NULL,
-        Schema::Bool => Value::from(ask.confirm(label, false)?),
-        Schema::Char => return ask_scalar::<char>(ask, label, "char"),
-        Schema::String => Value::from(ask.text(&format!("{label} (string)"))?.as_str()),
-        Schema::Bytes => Value::from(ask.text(&format!("{label} (bytes, as text)"))?.as_str()),
-        Schema::I8 => return ask_scalar::<i8>(ask, label, "i8"),
-        Schema::I16 => return ask_scalar::<i16>(ask, label, "i16"),
-        Schema::I32 => return ask_scalar::<i32>(ask, label, "i32"),
-        Schema::I64 => return ask_scalar::<i64>(ask, label, "i64"),
-        Schema::I128 => return ask_scalar::<i128>(ask, label, "i128"),
-        Schema::ISize => return ask_scalar::<isize>(ask, label, "isize"),
-        Schema::U8 => return ask_scalar::<u8>(ask, label, "u8"),
-        Schema::U16 => return ask_scalar::<u16>(ask, label, "u16"),
-        Schema::U32 => return ask_scalar::<u32>(ask, label, "u32"),
-        Schema::U64 => return ask_scalar::<u64>(ask, label, "u64"),
-        Schema::U128 => return ask_scalar::<u128>(ask, label, "u128"),
-        Schema::USize => return ask_scalar::<usize>(ask, label, "usize"),
-        Schema::F32 => return ask_scalar::<f32>(ask, label, "f32"),
-        Schema::F64 => return ask_scalar::<f64>(ask, label, "f64"),
-        Schema::Struct(fields) => build_struct(fields, doc, label, ask)?,
-        Schema::Tuple(elems) => {
+        Node::Unit => Value::NULL,
+        Node::Bool => Value::from(ask.confirm(label, false)?),
+        Node::Char => return ask_scalar::<char>(ask, label, "char"),
+        Node::String => Value::from(ask.text(&format!("{label} (string)"))?.as_str()),
+        Node::Bytes => Value::from(ask.text(&format!("{label} (bytes, as text)"))?.as_str()),
+        Node::I8 => return ask_scalar::<i8>(ask, label, "i8"),
+        Node::I16 => return ask_scalar::<i16>(ask, label, "i16"),
+        Node::I32 => return ask_scalar::<i32>(ask, label, "i32"),
+        Node::I64 => return ask_scalar::<i64>(ask, label, "i64"),
+        Node::I128 => return ask_scalar::<i128>(ask, label, "i128"),
+        Node::ISize => return ask_scalar::<isize>(ask, label, "isize"),
+        Node::U8 => return ask_scalar::<u8>(ask, label, "u8"),
+        Node::U16 => return ask_scalar::<u16>(ask, label, "u16"),
+        Node::U32 => return ask_scalar::<u32>(ask, label, "u32"),
+        Node::U64 => return ask_scalar::<u64>(ask, label, "u64"),
+        Node::U128 => return ask_scalar::<u128>(ask, label, "u128"),
+        Node::USize => return ask_scalar::<usize>(ask, label, "usize"),
+        Node::F32 => return ask_scalar::<f32>(ask, label, "f32"),
+        Node::F64 => return ask_scalar::<f64>(ask, label, "f64"),
+        Node::Struct(fields) => build_struct(fields, doc, label, ask)?,
+        Node::Tuple(elems) => {
             let mut arr = VArray::new();
             for (i, elem) in elems.iter().enumerate() {
                 arr.push(build_value(elem, doc, &index(label, i), ask)?);
             }
             arr.into()
         }
-        Schema::List(elem) => {
+        Node::List(elem) => {
             let mut arr = VArray::new();
             while ask.confirm(&format!("add an item to {label}?"), false)? {
                 let i = arr.len();
@@ -195,31 +195,31 @@ fn build_value(schema: &Schema, doc: &SchemaDoc, label: &str, ask: &mut dyn Ask)
             }
             arr.into()
         }
-        Schema::Array { elem, len } => {
+        Node::Array { elem, len } => {
             let mut arr = VArray::new();
             for i in 0..*len {
                 arr.push(build_value(elem, doc, &index(label, i), ask)?);
             }
             arr.into()
         }
-        Schema::Map { key, value } => build_map(key, value, doc, label, ask)?,
-        Schema::Optional(inner) => {
+        Node::Map { key, value } => build_map(key, value, doc, label, ask)?,
+        Node::Optional(inner) => {
             if ask.confirm(&format!("set {label}?"), false)? {
                 build_value(inner, doc, label, ask)?
             } else {
                 Value::NULL
             }
         }
-        Schema::Enum(variants) => build_enum(variants, doc, label, ask)?,
-        Schema::RawTree => Value::from(ask.text(&format!("{label} (tree object-id)"))?.as_str()),
-        Schema::Dynamic => loop {
+        Node::Enum(variants) => build_enum(variants, doc, label, ask)?,
+        Node::RawTree => Value::from(ask.text(&format!("{label} (tree object-id)"))?.as_str()),
+        Node::Dynamic => loop {
             let raw = ask.text(&format!("{label} (JSON value)"))?;
             match facet_json::from_str::<Value>(&raw) {
                 Ok(v) => break v,
                 Err(e) => eprintln!("invalid JSON: {e}"),
             }
         },
-        Schema::Ref(_) => unreachable!("resolve strips Ref before the match"),
+        Node::Ref(_) => unreachable!("resolve strips Ref before the match"),
     })
 }
 
@@ -239,8 +239,8 @@ where
 }
 
 fn build_struct(
-    fields: &BTreeMap<String, Schema>,
-    doc: &SchemaDoc,
+    fields: &BTreeMap<String, Node>,
+    doc: &Schema,
     label: &str,
     ask: &mut dyn Ask,
 ) -> Result<Value> {
@@ -255,9 +255,9 @@ fn build_struct(
 /// A map's value: a name-keyed object for scalar keys, else an array of
 /// `{ k, v }` pairs — the two layouts the encoder distinguishes.
 fn build_map(
-    key: &Schema,
-    value: &Schema,
-    doc: &SchemaDoc,
+    key: &Node,
+    value: &Node,
+    doc: &Schema,
     label: &str,
     ask: &mut dyn Ask,
 ) -> Result<Value> {
@@ -285,7 +285,7 @@ fn build_map(
 
 fn build_enum(
     variants: &BTreeMap<String, VariantKind>,
-    doc: &SchemaDoc,
+    doc: &Schema,
     label: &str,
     ask: &mut dyn Ask,
 ) -> Result<Value> {
@@ -311,62 +311,62 @@ fn build_enum(
 }
 
 /// One schema node, chosen from the type menu under the prompt `what`.
-fn build_schema_node(ask: &mut dyn Ask, what: &str) -> Result<Schema> {
+fn build_schema_node(ask: &mut dyn Ask, what: &str) -> Result<Node> {
     const TYPES: &[&str] = &[
         "string", "bool", "int", "uint", "float", "char", "bytes", "struct", "enum", "list",
         "optional", "map", "dynamic",
     ];
     Ok(match TYPES[ask.select(what, TYPES, 0)?] {
-        "string" => Schema::String,
-        "bool" => Schema::Bool,
+        "string" => Node::String,
+        "bool" => Node::Bool,
         "int" => width(
             ask,
             &["i64", "i32", "i16", "i8", "i128", "isize"],
             &[
-                Schema::I64,
-                Schema::I32,
-                Schema::I16,
-                Schema::I8,
-                Schema::I128,
-                Schema::ISize,
+                Node::I64,
+                Node::I32,
+                Node::I16,
+                Node::I8,
+                Node::I128,
+                Node::ISize,
             ],
         )?,
         "uint" => width(
             ask,
             &["u64", "u32", "u16", "u8", "u128", "usize"],
             &[
-                Schema::U64,
-                Schema::U32,
-                Schema::U16,
-                Schema::U8,
-                Schema::U128,
-                Schema::USize,
+                Node::U64,
+                Node::U32,
+                Node::U16,
+                Node::U8,
+                Node::U128,
+                Node::USize,
             ],
         )?,
-        "float" => width(ask, &["f64", "f32"], &[Schema::F64, Schema::F32])?,
-        "char" => Schema::Char,
-        "bytes" => Schema::Bytes,
-        "struct" => Schema::Struct(collect_fields(ask)?),
+        "float" => width(ask, &["f64", "f32"], &[Node::F64, Node::F32])?,
+        "char" => Node::Char,
+        "bytes" => Node::Bytes,
+        "struct" => Node::Struct(collect_fields(ask)?),
         "enum" => enum_schema(ask)?,
-        "list" => Schema::List(Box::new(build_schema_node(ask, "element type")?)),
-        "optional" => Schema::Optional(Box::new(build_schema_node(ask, "inner type")?)),
-        "map" => Schema::Map {
+        "list" => Node::List(Box::new(build_schema_node(ask, "element type")?)),
+        "optional" => Node::Optional(Box::new(build_schema_node(ask, "inner type")?)),
+        "map" => Node::Map {
             key: Box::new(build_schema_node(ask, "key type")?),
             value: Box::new(build_schema_node(ask, "value type")?),
         },
-        "dynamic" => Schema::Dynamic,
+        "dynamic" => Node::Dynamic,
         other => unreachable!("unlisted type {other}"),
     })
 }
 
 /// Pick one width, defaulting to the first (widest common) option.
-fn width(ask: &mut dyn Ask, names: &[&str], schemas: &[Schema]) -> Result<Schema> {
+fn width(ask: &mut dyn Ask, names: &[&str], schemas: &[Node]) -> Result<Node> {
     Ok(schemas[ask.select("width", names, 0)?].clone())
 }
 
 /// Named fields for a struct or struct enum variant, gathered until the user
 /// declines to add another (an empty set is a valid unit-like struct).
-fn collect_fields(ask: &mut dyn Ask) -> Result<BTreeMap<String, Schema>> {
+fn collect_fields(ask: &mut dyn Ask) -> Result<BTreeMap<String, Node>> {
     let mut fields = BTreeMap::new();
     while ask.confirm("add a field?", fields.is_empty())? {
         let name = nonempty(ask, "field name")?;
@@ -376,7 +376,7 @@ fn collect_fields(ask: &mut dyn Ask) -> Result<BTreeMap<String, Schema>> {
     Ok(fields)
 }
 
-fn enum_schema(ask: &mut dyn Ask) -> Result<Schema> {
+fn enum_schema(ask: &mut dyn Ask) -> Result<Node> {
     let mut variants = BTreeMap::new();
     loop {
         let first = variants.is_empty();
@@ -389,7 +389,7 @@ fn enum_schema(ask: &mut dyn Ask) -> Result<Schema> {
             if first {
                 bail!("an enum needs at least one variant");
             }
-            return Ok(Schema::Enum(variants));
+            return Ok(Node::Enum(variants));
         }
         let name = nonempty(ask, "variant name")?;
         let kind = variant_kind(ask)?;

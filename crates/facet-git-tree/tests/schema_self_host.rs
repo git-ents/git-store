@@ -1,4 +1,4 @@
-//! Integration tests for schema self-hosting: `SchemaDoc` is an ordinary
+//! Integration tests for schema self-hosting: `Schema` is an ordinary
 //! `Facet` value stored through this crate's own encoding.
 //!
 //! Covers spec requirements:
@@ -16,8 +16,8 @@
 use std::collections::BTreeMap;
 
 use facet_git_tree::{
-    DeserializeError, EntryKind, ObjectId, ObjectStore, Schema, SchemaDoc, SchemaPinError,
-    SchemaSchema, deserialize, schema_of, serialize, serialize_into,
+    DeserializeError, EntryKind, Node, ObjectId, ObjectStore, Schema, SchemaPinError, SchemaSchema,
+    deserialize, schema_of, serialize, serialize_into,
 };
 use gix_object::Write as _;
 
@@ -29,7 +29,7 @@ use common::{Event, Nested, Person, TreeNode, find_entry};
 fn schema_doc_roundtrips() -> anyhow::Result<()> {
     let doc = schema_of::<Nested>()?;
     let (root, store) = serialize(&doc)?;
-    let back: SchemaDoc = deserialize(&root, &store)?;
+    let back: Schema = deserialize(&root, &store)?;
     assert_eq!(back, doc);
     Ok(())
 }
@@ -39,7 +39,7 @@ fn schema_doc_roundtrips() -> anyhow::Result<()> {
 fn enum_schema_doc_roundtrips() -> anyhow::Result<()> {
     let doc = schema_of::<Event>()?;
     let (root, store) = serialize(&doc)?;
-    let back: SchemaDoc = deserialize(&root, &store)?;
+    let back: Schema = deserialize(&root, &store)?;
     assert_eq!(back, doc);
     Ok(())
 }
@@ -49,7 +49,7 @@ fn enum_schema_doc_roundtrips() -> anyhow::Result<()> {
 fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
     let doc = schema_of::<TreeNode>()?;
     let (root, store) = serialize(&doc)?;
-    let back: SchemaDoc = deserialize(&root, &store)?;
+    let back: Schema = deserialize(&root, &store)?;
     assert_eq!(back, doc);
     Ok(())
 }
@@ -62,7 +62,7 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 /// not update the literal without releasing accordingly.
 ///
 /// Updated for the unit-enum-variant blob collapse (issue 8d109650): a
-/// `Schema` unit variant such as `String`/`U32`/`Bool` now tags with a bare
+/// `Node` unit variant such as `String`/`U32`/`Bool` now tags with a bare
 /// blob holding its name instead of a tree wrapping an empty tree, so
 /// `Person`'s schema — three unit-variant scalar fields — reproduces to a
 /// different, but still deterministic, root id.
@@ -72,8 +72,8 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 /// trailing `\n`, which changes every blob (and therefore every containing
 /// tree) in the document.
 ///
-/// Updated again for name-keyed struct/enum schema nodes: `Schema::Struct`
-/// and `Schema::Enum` are now `BTreeMap`s keyed by field/variant name rather
+/// Updated again for name-keyed struct/enum schema nodes: `Node::Struct`
+/// and `Node::Enum` are now `BTreeMap`s keyed by field/variant name rather
 /// than ordinal-indexed lists of `FieldSchema`/`VariantSchema` pairs, so a
 /// struct's fields serialize directly under their own names (`Struct/name`)
 /// instead of behind an ordinal directory holding separate `name`/`schema`
@@ -81,10 +81,10 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 /// recorded — it was never load-bearing for the codec — so `Person`'s schema
 /// reproduces to a different, but still deterministic, root id.
 ///
-/// Updated again for the schema-schema pin: `SchemaDoc::version` is gone —
+/// Updated again for the schema-schema pin: `Schema::version` is gone —
 /// `schema_of::<Person>()` itself is unpinned, so this golden id covers only
 /// the bare document (`root`/`defs`, no `version` entry). The pin is a
-/// storage-layer splice [`SchemaDoc::write_pinned`] adds on top, covered
+/// storage-layer splice [`Schema::write_pinned`] adds on top, covered
 /// separately by `genesis_constant_is_real`.
 #[test]
 fn person_schema_golden_oid() -> anyhow::Result<()> {
@@ -100,26 +100,26 @@ fn person_schema_golden_oid() -> anyhow::Result<()> {
 /// empty tree's entry name — otherwise `git diff` on the schema ref sees
 /// nothing, exactly the bug this issue reports.
 ///
-/// `Schema::U32` and `Schema::String` are themselves unit variants of the
-/// `Schema` enum, so this exercises the same blob-collapse fix as the
+/// `Node::U32` and `Node::String` are themselves unit variants of the
+/// `Node` enum, so this exercises the same blob-collapse fix as the
 /// `priority: Low → High` value-level repro, just one level up (in the
 /// schema's own self-hosted encoding).
 #[test]
 fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
-    fn recipe_doc(servings_schema: Schema) -> SchemaDoc {
+    fn recipe_doc(servings_schema: Node) -> Schema {
         let mut defs = BTreeMap::new();
         defs.insert(
             "Recipe".to_string(),
-            Schema::Struct(BTreeMap::from([("servings".to_string(), servings_schema)])),
+            Node::Struct(BTreeMap::from([("servings".to_string(), servings_schema)])),
         );
-        SchemaDoc {
-            root: Schema::Ref("Recipe".into()),
+        Schema {
+            root: Node::Ref("Recipe".into()),
             defs,
         }
     }
 
-    let (before_root, before_store) = serialize(&recipe_doc(Schema::U32))?;
-    let (after_root, after_store) = serialize(&recipe_doc(Schema::String))?;
+    let (before_root, before_store) = serialize(&recipe_doc(Node::U32))?;
+    let (after_root, after_store) = serialize(&recipe_doc(Node::String))?;
     assert_ne!(
         before_root, after_root,
         "changing the field's schema must change the document's root id"
@@ -139,7 +139,7 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
     assert_eq!(
         before_schema.mode.kind(),
         EntryKind::Blob,
-        "a unit-variant Schema node's own tag must be a blob"
+        "a unit-variant Node node's own tag must be a blob"
     );
     assert_eq!(after_schema.mode.kind(), EntryKind::Blob);
     assert_ne!(
@@ -160,25 +160,25 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
 // --- schema-schema pin ---
 
 /// Golden object id of [`SchemaSchema::GENESIS`]: `serialize(&schema_of::<
-/// SchemaDoc>()?)`'s root, with no pin spliced in — the value the compiled-in
+/// Schema>()?)`'s root, with no pin spliced in — the value the compiled-in
 /// hex constant in `pin.rs` must match.
 ///
 /// This is the golden-oid guard for the whole format, one level above
-/// [`person_schema_golden_oid`]: if this id changes, either `SchemaDoc`'s own
+/// [`person_schema_golden_oid`]: if this id changes, either `Schema`'s own
 /// shape changed or the encoding did, and every schema tree in every
 /// downstream repository pins a generation that no longer exists. Do not
 /// update the compiled-in constant without releasing accordingly.
 #[test]
 fn genesis_constant_is_real() -> anyhow::Result<()> {
-    let doc = schema_of::<SchemaDoc>()?;
+    let doc = schema_of::<Schema>()?;
     let (root, _store) = serialize(&doc)?;
     assert_eq!(&root, SchemaSchema::GENESIS.tree());
     Ok(())
 }
 
-/// A document written by [`SchemaDoc::write_pinned`] carries a top-level
+/// A document written by [`Schema::write_pinned`] carries a top-level
 /// `schema` tree entry naming [`SchemaSchema::CURRENT`], that pinned object
-/// is actually present in the store, and [`SchemaDoc::read_pin`] resolves it
+/// is actually present in the store, and [`Schema::read_pin`] resolves it
 /// back to [`SchemaSchema::CURRENT`].
 #[test]
 fn write_pinned_document_has_a_resolvable_pin() -> anyhow::Result<()> {
@@ -197,20 +197,20 @@ fn write_pinned_document_has_a_resolvable_pin() -> anyhow::Result<()> {
         "the pinned schema-schema tree must actually be present in the store"
     );
 
-    let recognized = SchemaDoc::read_pin(&root, &store)?;
+    let recognized = Schema::read_pin(&root, &store)?;
     assert_eq!(recognized.tree(), SchemaSchema::CURRENT.tree());
     Ok(())
 }
 
 /// No pin entry, but the tree's own id is a known root generation
 /// ([`SchemaSchema::GENESIS`], written unpinned via plain [`serialize`]):
-/// legitimate, and [`SchemaDoc::read_pin`] reads it as genesis.
+/// legitimate, and [`Schema::read_pin`] reads it as genesis.
 #[test]
 fn absent_pin_on_a_known_root_reads_as_genesis() -> anyhow::Result<()> {
-    let doc = schema_of::<SchemaDoc>()?;
+    let doc = schema_of::<Schema>()?;
     let (root, store) = serialize(&doc)?;
 
-    let recognized = SchemaDoc::read_pin(&root, &store)?;
+    let recognized = Schema::read_pin(&root, &store)?;
     assert_eq!(recognized.tree(), SchemaSchema::GENESIS.tree());
     assert!(recognized.parent().is_none());
     Ok(())
@@ -233,7 +233,7 @@ fn absent_pin_on_an_unknown_tree_is_rejected() -> anyhow::Result<()> {
         .collect();
     let stripped = store.write(&gix_object::Tree { entries }).unwrap();
 
-    let err = SchemaDoc::read_pin(&stripped, &store).unwrap_err();
+    let err = Schema::read_pin(&stripped, &store).unwrap_err();
     assert!(
         matches!(err, SchemaPinError::Unpinned(oid) if oid == stripped),
         "{err:?}"
@@ -247,7 +247,7 @@ fn absent_pin_on_an_unknown_tree_is_rejected() -> anyhow::Result<()> {
 /// through. Simulated here exactly as the old version-marker tests did: the
 /// pin is repointed at some other, non-schema-schema tree (the genesis
 /// document's own `defs` subtree), and `root` is separately corrupted into a
-/// bogus blob tagged with a hypothetical `DateTime` variant `Schema` does not
+/// bogus blob tagged with a hypothetical `DateTime` variant `Node` does not
 /// define.
 #[test]
 fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyhow::Result<()> {
@@ -255,7 +255,7 @@ fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyh
     let store = ObjectStore::default();
     let root = doc.write_pinned(&store)?;
 
-    let genesis_doc = schema_of::<SchemaDoc>()?;
+    let genesis_doc = schema_of::<Schema>()?;
     let genesis_root = serialize_into(&genesis_doc, &store)?;
     let bogus_pin = find_entry(&store, &genesis_root, "defs").oid;
 
@@ -274,7 +274,7 @@ fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyh
     }
     let corrupt = store.write(&gix_object::Tree { entries }).unwrap();
 
-    let err = SchemaDoc::read_pin(&corrupt, &store).unwrap_err();
+    let err = Schema::read_pin(&corrupt, &store).unwrap_err();
     assert!(
         matches!(
             &err,
@@ -287,7 +287,7 @@ fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyh
     // A full typed deserialize, in contrast, cannot get past the unknown
     // variant — a reflection error, not a pin error — confirming the check
     // really did land before a deserialize that could not have completed.
-    let err = deserialize::<SchemaDoc>(&corrupt, &store).unwrap_err();
+    let err = deserialize::<Schema>(&corrupt, &store).unwrap_err();
     assert!(
         matches!(&err, DeserializeError::Reflect(msg) if msg.contains("DateTime")),
         "{err:?}"

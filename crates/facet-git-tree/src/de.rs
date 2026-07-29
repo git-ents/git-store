@@ -63,8 +63,8 @@ pub fn deserialize<T: for<'a> facet::Facet<'a>>(
 /// `0`.
 ///
 /// For a caller that is itself already some number of levels deep in a larger
-/// deserialization — schema-driven reads route a [`Schema::Dynamic`]
-/// (`crate::schema::Schema`) node back through this crate's own typed
+/// deserialization — schema-driven reads route a [`Node::Dynamic`]
+/// (`crate::schema::Node`) node back through this crate's own typed
 /// [`deserialize`], and must hand off the depth already spent so the combined
 /// recursion still respects [`MAX_DEPTH`] rather than resetting the budget.
 /// [`deserialize`] is this with `depth` fixed at `0`.
@@ -253,7 +253,7 @@ pub(crate) fn collapse_shape(mut shape: &'static facet::Shape) -> &'static facet
 /// The `k`/`v` object ids of a composite-key map pair sub-tree.
 ///
 /// Shared by this module's and [`crate::schema::read`]'s `Def::Map`/
-/// `Schema::Map` branches, which decode the same `{ k, v }` layout that
+/// `Node::Map` branches, which decode the same `{ k, v }` layout that
 /// [`crate::ser`] writes for composite (non-scalar) map keys.
 pub(crate) fn map_pair_entries(
     pair: &[(String, ObjectId, EntryKind)],
@@ -272,7 +272,7 @@ pub(crate) fn map_pair_entries(
 /// `None`-valued `Option`.
 ///
 /// Shared by this module's and [`crate::schema::read`]'s `Def::Option`/
-/// `Schema::Optional` branches: `Some` is written as exactly one entry named
+/// `Node::Optional` branches: `Some` is written as exactly one entry named
 /// `some` and `None` as the marker tree — never a literal empty tree, which
 /// would be invisible to `git ls-tree -r`/`diff` — so any other arity or
 /// naming (including a literal empty tree, `found: 0`) is a malformed

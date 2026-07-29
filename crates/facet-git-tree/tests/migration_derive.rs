@@ -26,13 +26,13 @@ use std::collections::BTreeMap;
 use facet::Facet;
 use facet_git_tree::migration::derive::{derive, derive_to};
 use facet_git_tree::{
-    Change, Constant, Derivation, Divergence, Hints, Migration, Op, Schema, SchemaDoc, Side,
-    Target, VariantKind, schema_of, serialize,
+    Change, Constant, Derivation, Divergence, Hints, Migration, Node, Op, Schema, Side, Target,
+    VariantKind, schema_of, serialize,
 };
 
 // --- helpers (mirroring tests/schema_gen.rs) ---
 
-fn fields(pairs: Vec<(&str, Schema)>) -> BTreeMap<String, Schema> {
+fn fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, Node> {
     pairs.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
@@ -40,18 +40,18 @@ fn variants(pairs: Vec<(&str, VariantKind)>) -> BTreeMap<String, VariantKind> {
     pairs.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
-fn re(name: &str) -> Schema {
-    Schema::Ref(name.into())
+fn re(name: &str) -> Node {
+    Node::Ref(name.into())
 }
 
-fn doc(root: Schema, defs: Vec<(&str, Schema)>) -> SchemaDoc {
-    SchemaDoc {
+fn doc(root: Node, defs: Vec<(&str, Node)>) -> Schema {
+    Schema {
         root,
         defs: defs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
     }
 }
 
-fn def(name: &str, body: Schema) -> SchemaDoc {
+fn def(name: &str, body: Node) -> Schema {
     doc(re(name), vec![(name, body)])
 }
 
@@ -82,8 +82,8 @@ fn op(at: Target, change: Change) -> Op {
 /// A field added with an author-supplied default classifies as one `Add`.
 #[test]
 fn field_added_with_default_is_complete() {
-    let from = def("T", Schema::Struct(fields(vec![])));
-    let to = def("T", Schema::Struct(fields(vec![("x", Schema::I32)])));
+    let from = def("T", Node::Struct(fields(vec![])));
+    let to = def("T", Node::Struct(fields(vec![("x", Node::I32)])));
     let hints = Hints::new().defaulted(Target::Def("T".into()), "x", Constant::Integer(7));
 
     let m = complete(derive(&from, &to, &hints));
@@ -104,10 +104,10 @@ fn field_added_with_default_is_complete() {
 /// `Constant::Null`.
 #[test]
 fn field_added_optional_needs_no_default() {
-    let from = def("T", Schema::Struct(fields(vec![])));
+    let from = def("T", Node::Struct(fields(vec![])));
     let to = def(
         "T",
-        Schema::Struct(fields(vec![("x", Schema::Optional(Box::new(Schema::I32)))])),
+        Node::Struct(fields(vec![("x", Node::Optional(Box::new(Node::I32)))])),
     );
 
     let m = complete(derive(&from, &to, &Hints::new()));
@@ -127,8 +127,8 @@ fn field_added_optional_needs_no_default() {
 /// the edge — `Undefaulted`, not a guess.
 #[test]
 fn field_added_non_optional_no_hint_is_undefaulted() {
-    let from = def("T", Schema::Struct(fields(vec![])));
-    let to = def("T", Schema::Struct(fields(vec![("x", Schema::I32)])));
+    let from = def("T", Node::Struct(fields(vec![])));
+    let to = def("T", Node::Struct(fields(vec![("x", Node::I32)])));
 
     let divergences = partial(derive(&from, &to, &Hints::new()));
     assert_eq!(
@@ -145,8 +145,8 @@ fn field_added_non_optional_no_hint_is_undefaulted() {
 /// A field present only in the source classifies as one `Remove`.
 #[test]
 fn field_removed_is_complete() {
-    let from = def("T", Schema::Struct(fields(vec![("x", Schema::I32)])));
-    let to = def("T", Schema::Struct(fields(vec![])));
+    let from = def("T", Node::Struct(fields(vec![("x", Node::I32)])));
+    let to = def("T", Node::Struct(fields(vec![])));
 
     let m = complete(derive(&from, &to, &Hints::new()));
     assert_eq!(
@@ -164,8 +164,8 @@ fn field_removed_is_complete() {
 /// does not also surface as a `Remove`.
 #[test]
 fn field_renamed_with_hint_is_complete_and_not_also_removed() {
-    let from = def("T", Schema::Struct(fields(vec![("old", Schema::String)])));
-    let to = def("T", Schema::Struct(fields(vec![("new", Schema::String)])));
+    let from = def("T", Node::Struct(fields(vec![("old", Node::String)])));
+    let to = def("T", Node::Struct(fields(vec![("new", Node::String)])));
     let hints = Hints::new().renamed(Target::Def("T".into()), "old", "new");
 
     let m = complete(derive(&from, &to, &hints));
@@ -186,8 +186,8 @@ fn field_renamed_with_hint_is_complete_and_not_also_removed() {
 /// `Undefaulted` rather than guessed at as a rename.
 #[test]
 fn same_remove_add_pair_without_hint_is_not_a_rename() {
-    let from = def("T", Schema::Struct(fields(vec![("old", Schema::String)])));
-    let to = def("T", Schema::Struct(fields(vec![("new", Schema::String)])));
+    let from = def("T", Node::Struct(fields(vec![("old", Node::String)])));
+    let to = def("T", Node::Struct(fields(vec![("new", Node::String)])));
 
     let divergences = partial(derive(&from, &to, &Hints::new()));
     assert_eq!(
@@ -204,10 +204,10 @@ fn same_remove_add_pair_without_hint_is_not_a_rename() {
 /// A field wrapped in `Optional` classifies as one `Wrap`.
 #[test]
 fn field_wrapped_is_complete() {
-    let from = def("T", Schema::Struct(fields(vec![("x", Schema::I32)])));
+    let from = def("T", Node::Struct(fields(vec![("x", Node::I32)])));
     let to = def(
         "T",
-        Schema::Struct(fields(vec![("x", Schema::Optional(Box::new(Schema::I32)))])),
+        Node::Struct(fields(vec![("x", Node::Optional(Box::new(Node::I32)))])),
     );
 
     let m = complete(derive(&from, &to, &Hints::new()));
@@ -224,13 +224,10 @@ fn field_wrapped_is_complete() {
 /// `Wrap`, and the `Wrap` names the *target* field.
 #[test]
 fn rename_and_wrap_on_same_field() {
-    let from = def("T", Schema::Struct(fields(vec![("old", Schema::I32)])));
+    let from = def("T", Node::Struct(fields(vec![("old", Node::I32)])));
     let to = def(
         "T",
-        Schema::Struct(fields(vec![(
-            "new",
-            Schema::Optional(Box::new(Schema::I32)),
-        )])),
+        Node::Struct(fields(vec![("new", Node::Optional(Box::new(Node::I32)))])),
     );
     let hints = Hints::new().renamed(Target::Def("T".into()), "old", "new");
 
@@ -262,16 +259,16 @@ fn rename_and_wrap_on_same_field() {
 #[test]
 fn nested_def_reached_two_ways_produces_one_op() {
     let root_struct = |inner: &str| {
-        Schema::Struct(fields(vec![
-            ("a", Schema::List(Box::new(re(inner)))),
-            ("b", Schema::Optional(Box::new(re(inner)))),
+        Node::Struct(fields(vec![
+            ("a", Node::List(Box::new(re(inner)))),
+            ("b", Node::Optional(Box::new(re(inner)))),
         ]))
     };
     let from = doc(
         re("Root"),
         vec![
             ("Root", root_struct("Inner")),
-            ("Inner", Schema::Struct(fields(vec![("x", Schema::I32)]))),
+            ("Inner", Node::Struct(fields(vec![("x", Node::I32)]))),
         ],
     );
     let to = doc(
@@ -280,7 +277,7 @@ fn nested_def_reached_two_ways_produces_one_op() {
             ("Root", root_struct("Inner")),
             (
                 "Inner",
-                Schema::Struct(fields(vec![("x", Schema::I32), ("y", Schema::String)])),
+                Node::Struct(fields(vec![("x", Node::I32), ("y", Node::String)])),
             ),
         ],
     );
@@ -305,28 +302,28 @@ fn nested_def_reached_two_ways_produces_one_op() {
 fn recursive_type_produces_one_op() -> anyhow::Result<()> {
     mod old {
         #[derive(facet::Facet)]
-        pub struct Node {
-            pub children: Vec<Node>,
+        pub struct Branch {
+            pub children: Vec<Branch>,
             pub label: String,
         }
     }
     mod new {
         #[derive(facet::Facet)]
-        pub struct Node {
-            pub children: Vec<Node>,
+        pub struct Branch {
+            pub children: Vec<Branch>,
             pub name: String,
         }
     }
 
-    let from = schema_of::<old::Node>()?;
-    let to = schema_of::<new::Node>()?;
-    let hints = Hints::new().renamed(Target::Def("Node".into()), "label", "name");
+    let from = schema_of::<old::Branch>()?;
+    let to = schema_of::<new::Branch>()?;
+    let hints = Hints::new().renamed(Target::Def("Branch".into()), "label", "name");
 
     let m = complete(derive(&from, &to, &hints));
     assert_eq!(
         m.ops,
         vec![op(
-            Target::Def("Node".into()),
+            Target::Def("Branch".into()),
             Change::Rename {
                 from: "label".into(),
                 to: "name".into(),
@@ -344,16 +341,16 @@ fn recursive_type_produces_one_op() -> anyhow::Result<()> {
 fn struct_variant_field_change_is_addressed_by_variant_target() {
     let from = def(
         "E",
-        Schema::Enum(variants(vec![(
+        Node::Enum(variants(vec![(
             "V",
-            VariantKind::Struct(fields(vec![("x", Schema::I32)])),
+            VariantKind::Struct(fields(vec![("x", Node::I32)])),
         )])),
     );
     let to = def(
         "E",
-        Schema::Enum(variants(vec![(
+        Node::Enum(variants(vec![(
             "V",
-            VariantKind::Struct(fields(vec![("x", Schema::I32), ("y", Schema::String)])),
+            VariantKind::Struct(fields(vec![("x", Node::I32), ("y", Node::String)])),
         )])),
     );
     let hints = Hints::new().defaulted(
@@ -385,10 +382,10 @@ fn struct_variant_field_change_is_addressed_by_variant_target() {
 /// holds it, so it needs no lens and yields no op.
 #[test]
 fn enum_variant_added_is_complete_with_no_ops() {
-    let from = def("E", Schema::Enum(variants(vec![("A", VariantKind::Unit)])));
+    let from = def("E", Node::Enum(variants(vec![("A", VariantKind::Unit)])));
     let to = def(
         "E",
-        Schema::Enum(variants(vec![
+        Node::Enum(variants(vec![
             ("A", VariantKind::Unit),
             ("B", VariantKind::Unit),
         ])),
@@ -404,12 +401,12 @@ fn enum_variant_added_is_complete_with_no_ops() {
 fn enum_variant_removed_is_partial() {
     let from = def(
         "E",
-        Schema::Enum(variants(vec![
+        Node::Enum(variants(vec![
             ("A", VariantKind::Unit),
             ("B", VariantKind::Unit),
         ])),
     );
-    let to = def("E", Schema::Enum(variants(vec![("A", VariantKind::Unit)])));
+    let to = def("E", Node::Enum(variants(vec![("A", VariantKind::Unit)])));
 
     let divergences = partial(derive(&from, &to, &Hints::new()));
     assert_eq!(
@@ -426,8 +423,8 @@ fn enum_variant_removed_is_partial() {
 /// A field retyped other than by an `Optional` wrap has no lens: `Retyped`.
 #[test]
 fn field_retyped_is_partial() {
-    let from = def("T", Schema::Struct(fields(vec![("x", Schema::String)])));
-    let to = def("T", Schema::Struct(fields(vec![("x", Schema::U32)])));
+    let from = def("T", Node::Struct(fields(vec![("x", Node::String)])));
+    let to = def("T", Node::Struct(fields(vec![("x", Node::U32)])));
 
     let divergences = partial(derive(&from, &to, &Hints::new()));
     assert_eq!(
@@ -435,8 +432,8 @@ fn field_retyped_is_partial() {
         vec![Divergence::Retyped {
             at: Target::Def("T".into()),
             field: "x".into(),
-            from: Schema::String,
-            to: Schema::U32,
+            from: Node::String,
+            to: Node::U32,
         }]
     );
 }
@@ -448,8 +445,8 @@ fn field_retyped_is_partial() {
 /// reaches.
 #[test]
 fn root_change_is_partial() {
-    let from = def("T", Schema::Struct(fields(vec![])));
-    let to = doc(Schema::I32, vec![]);
+    let from = def("T", Node::Struct(fields(vec![])));
+    let to = doc(Node::I32, vec![]);
 
     let divergences = partial(derive(&from, &to, &Hints::new()));
     assert_eq!(
@@ -457,7 +454,7 @@ fn root_change_is_partial() {
         vec![
             Divergence::Root {
                 from: re("T"),
-                to: Schema::I32,
+                to: Node::I32,
             },
             Divergence::Unpaired {
                 name: "T".into(),
@@ -471,11 +468,8 @@ fn root_change_is_partial() {
 /// the side it's present on.
 #[test]
 fn unpaired_definition_is_partial() {
-    let from = doc(
-        Schema::Unit,
-        vec![("Orphan", Schema::Struct(fields(vec![])))],
-    );
-    let to = doc(Schema::Unit, vec![]);
+    let from = doc(Node::Unit, vec![("Orphan", Node::Struct(fields(vec![])))]);
+    let to = doc(Node::Unit, vec![]);
 
     let divergences = partial(derive(&from, &to, &Hints::new()));
     assert_eq!(
@@ -511,7 +505,7 @@ struct RenamedTarget {
 fn derive_to_picks_up_declared_rename_hints() -> anyhow::Result<()> {
     let from = def(
         "RenamedTarget",
-        Schema::Struct(fields(vec![("old_id", Schema::String)])),
+        Node::Struct(fields(vec![("old_id", Node::String)])),
     );
 
     let m = complete(derive_to::<RenamedTarget>(&from, &Hints::new())?);
@@ -536,18 +530,18 @@ fn derive_to_picks_up_declared_rename_hints() -> anyhow::Result<()> {
 fn derivation_is_deterministic() -> anyhow::Result<()> {
     let from = def(
         "T",
-        Schema::Struct(fields(vec![
-            ("old", Schema::I32),
-            ("gone", Schema::Bool),
-            ("same", Schema::String),
+        Node::Struct(fields(vec![
+            ("old", Node::I32),
+            ("gone", Node::Bool),
+            ("same", Node::String),
         ])),
     );
     let to = def(
         "T",
-        Schema::Struct(fields(vec![
-            ("new", Schema::Optional(Box::new(Schema::I32))),
-            ("same", Schema::String),
-            ("fresh", Schema::I32),
+        Node::Struct(fields(vec![
+            ("new", Node::Optional(Box::new(Node::I32))),
+            ("same", Node::String),
+            ("fresh", Node::I32),
         ])),
     );
     let hints = Hints::new()

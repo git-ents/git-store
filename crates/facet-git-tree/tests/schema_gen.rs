@@ -6,15 +6,15 @@
 //!       (transparency collapse, RawTree, dynamic values, scalars, byte
 //!       sequences, composites), deduplicates named user types into `defs`
 //!       with deterministic `_2`-suffixed names, and breaks recursion with
-//!       `Schema::Ref`.
+//!       `Node::Ref`.
 //!   schema.representation
-//!     — the `Schema`/`SchemaDoc` shapes asserted here are the public,
+//!     — the `Node`/`Schema` shapes asserted here are the public,
 //!       semver-major on-disk contract.
 
 use std::collections::BTreeMap;
 
 use facet::Facet;
-use facet_git_tree::{RawTree, Schema, SchemaDoc, SchemaError, VariantKind, schema_of};
+use facet_git_tree::{Node, RawTree, Schema, SchemaError, VariantKind, schema_of};
 
 mod common;
 use common::{
@@ -23,7 +23,7 @@ use common::{
 
 // --- helpers ---
 
-fn fields(pairs: Vec<(&str, Schema)>) -> BTreeMap<String, Schema> {
+fn fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, Node> {
     pairs.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
@@ -31,19 +31,19 @@ fn variants(pairs: Vec<(&str, VariantKind)>) -> BTreeMap<String, VariantKind> {
     pairs.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
-fn re(name: &str) -> Schema {
-    Schema::Ref(name.into())
+fn re(name: &str) -> Node {
+    Node::Ref(name.into())
 }
 
-fn doc(root: Schema, defs: Vec<(&str, Schema)>) -> SchemaDoc {
-    SchemaDoc {
+fn doc(root: Node, defs: Vec<(&str, Node)>) -> Schema {
+    Schema {
         root,
         defs: defs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
     }
 }
 
-fn point_def() -> Schema {
-    Schema::Struct(fields(vec![("x", Schema::F64), ("y", Schema::F64)]))
+fn point_def() -> Node {
+    Node::Struct(fields(vec![("x", Node::F64), ("y", Node::F64)]))
 }
 
 // --- named structs enter defs, referenced by Ref ---
@@ -67,10 +67,10 @@ fn person_schema() -> anyhow::Result<()> {
             re("Person"),
             vec![(
                 "Person",
-                Schema::Struct(fields(vec![
-                    ("name", Schema::String),
-                    ("age", Schema::U32),
-                    ("active", Schema::Bool),
+                Node::Struct(fields(vec![
+                    ("name", Node::String),
+                    ("age", Node::U32),
+                    ("active", Node::Bool),
                 ]))
             )]
         )
@@ -88,9 +88,9 @@ fn nested_schema() -> anyhow::Result<()> {
             vec![
                 (
                     "Nested",
-                    Schema::Struct(fields(vec![
+                    Node::Struct(fields(vec![
                         ("location", re("Point")),
-                        ("label", Schema::String),
+                        ("label", Node::String),
                     ]))
                 ),
                 ("Point", point_def()),
@@ -111,7 +111,7 @@ fn with_vec_schema() -> anyhow::Result<()> {
             re("WithVec"),
             vec![(
                 "WithVec",
-                Schema::Struct(fields(vec![("items", Schema::List(Box::new(Schema::I64)))]))
+                Node::Struct(fields(vec![("items", Node::List(Box::new(Node::I64)))]))
             )]
         )
     );
@@ -127,10 +127,10 @@ fn with_array_schema() -> anyhow::Result<()> {
             re("WithArray"),
             vec![(
                 "WithArray",
-                Schema::Struct(fields(vec![(
+                Node::Struct(fields(vec![(
                     "values",
-                    Schema::Array {
-                        elem: Box::new(Schema::I32),
+                    Node::Array {
+                        elem: Box::new(Node::I32),
                         len: 4
                     }
                 )]))
@@ -149,11 +149,11 @@ fn with_map_schema() -> anyhow::Result<()> {
             re("WithMap"),
             vec![(
                 "WithMap",
-                Schema::Struct(fields(vec![(
+                Node::Struct(fields(vec![(
                     "table",
-                    Schema::Map {
-                        key: Box::new(Schema::String),
-                        value: Box::new(Schema::String)
+                    Node::Map {
+                        key: Box::new(Node::String),
+                        value: Box::new(Node::String)
                     }
                 )]))
             )]
@@ -171,10 +171,7 @@ fn with_optional_schema() -> anyhow::Result<()> {
             re("WithOptional"),
             vec![(
                 "WithOptional",
-                Schema::Struct(fields(vec![(
-                    "maybe",
-                    Schema::Optional(Box::new(Schema::I32))
-                )]))
+                Node::Struct(fields(vec![("maybe", Node::Optional(Box::new(Node::I32)))]))
             )]
         )
     );
@@ -184,7 +181,7 @@ fn with_optional_schema() -> anyhow::Result<()> {
 /// A `u8` sequence is `Bytes`, not a `List` — mirroring the blob encoding.
 #[test]
 fn byte_seq_schema_is_bytes() -> anyhow::Result<()> {
-    assert_eq!(schema_of::<Vec<u8>>()?, doc(Schema::Bytes, vec![]));
+    assert_eq!(schema_of::<Vec<u8>>()?, doc(Node::Bytes, vec![]));
     Ok(())
 }
 
@@ -206,7 +203,7 @@ fn unit_field_schema_errors() {
     );
 }
 
-/// A unit struct still yields `Schema::Unit`: unlike `()`, it has a real
+/// A unit struct still yields `Node::Unit`: unlike `()`, it has a real
 /// (empty-tree) encoding to describe — it is simply reached through the
 /// struct branch, not the scalar table `()` is refused from.
 #[test]
@@ -215,7 +212,7 @@ fn unit_struct_schema_is_unit() -> anyhow::Result<()> {
     struct Marker;
     assert_eq!(
         schema_of::<Marker>()?,
-        doc(re("Marker"), vec![("Marker", Schema::Unit)])
+        doc(re("Marker"), vec![("Marker", Node::Unit)])
     );
     Ok(())
 }
@@ -232,15 +229,15 @@ fn enum_schema() -> anyhow::Result<()> {
             re("Event"),
             vec![(
                 "Event",
-                Schema::Enum(variants(vec![
+                Node::Enum(variants(vec![
                     ("Ping", VariantKind::Unit),
-                    ("Message", VariantKind::Newtype(Box::new(Schema::String))),
-                    ("Move", VariantKind::Tuple(vec![Schema::I32, Schema::I32])),
+                    ("Message", VariantKind::Newtype(Box::new(Node::String))),
+                    ("Move", VariantKind::Tuple(vec![Node::I32, Node::I32])),
                     (
                         "Login",
                         VariantKind::Struct(fields(vec![
-                            ("user", Schema::String),
-                            ("ok", Schema::Bool),
+                            ("user", Node::String),
+                            ("ok", Node::Bool),
                         ]))
                     ),
                 ]))
@@ -265,7 +262,7 @@ fn raw_tree_field_schema() -> anyhow::Result<()> {
             re("WithRaw"),
             vec![(
                 "WithRaw",
-                Schema::Struct(fields(vec![("raw", Schema::RawTree)]))
+                Node::Struct(fields(vec![("raw", Node::RawTree)]))
             )]
         )
     );
@@ -281,7 +278,7 @@ fn value_field_schema_is_dynamic() -> anyhow::Result<()> {
             re("WithValue"),
             vec![(
                 "WithValue",
-                Schema::Struct(fields(vec![("meta", Schema::Dynamic)]))
+                Node::Struct(fields(vec![("meta", Node::Dynamic)]))
             )]
         )
     );
@@ -300,9 +297,9 @@ fn recursive_schema_uses_ref() -> anyhow::Result<()> {
             re("TreeNode"),
             vec![(
                 "TreeNode",
-                Schema::Struct(fields(vec![
-                    ("value", Schema::I64),
-                    ("children", Schema::List(Box::new(re("TreeNode")))),
+                Node::Struct(fields(vec![
+                    ("value", Node::I64),
+                    ("children", Node::List(Box::new(re("TreeNode")))),
                 ]))
             )]
         )
@@ -340,10 +337,10 @@ fn name_collision_disambiguated() -> anyhow::Result<()> {
             vec![
                 (
                     "Both",
-                    Schema::Struct(fields(vec![("first", re("Dup")), ("second", re("Dup_2"))]))
+                    Node::Struct(fields(vec![("first", re("Dup")), ("second", re("Dup_2"))]))
                 ),
-                ("Dup", Schema::Struct(fields(vec![("x", Schema::I32)]))),
-                ("Dup_2", Schema::Struct(fields(vec![("y", Schema::U8)]))),
+                ("Dup", Node::Struct(fields(vec![("x", Node::I32)]))),
+                ("Dup_2", Node::Struct(fields(vec![("y", Node::U8)]))),
             ]
         )
     );
@@ -366,7 +363,7 @@ fn transparent_newtype_schema_collapses() -> anyhow::Result<()> {
     #[derive(Facet)]
     #[facet(transparent)]
     struct Hex(String);
-    assert_eq!(schema_of::<Hex>()?, doc(Schema::String, vec![]));
+    assert_eq!(schema_of::<Hex>()?, doc(Node::String, vec![]));
     Ok(())
 }
 
@@ -384,7 +381,7 @@ fn transparent_newtype_schema_collapses() -> anyhow::Result<()> {
 #[test]
 fn excessively_nested_shape_schema_is_rejected() {
     type Nested = Option<Option<Option<Option<Option<i32>>>>>;
-    let err = SchemaDoc::from_shape_with_limit(<Nested as facet::Facet>::SHAPE, 3).unwrap_err();
+    let err = Schema::from_shape_with_limit(<Nested as facet::Facet>::SHAPE, 3).unwrap_err();
     assert!(
         matches!(err, SchemaError::MaxDepth(3)),
         "expected MaxDepth(3), got {err:?}"

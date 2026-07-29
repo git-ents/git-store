@@ -1,4 +1,4 @@
-//! Derive a [`Migration`] from a pair of [`SchemaDoc`]s.
+//! Derive a [`Migration`] from a pair of [`Schema`]s.
 //!
 //! [`derive`] classifies every difference it can express in the lens
 //! vocabulary (`crate::migration`) and reports the rest as [`Divergence`]s —
@@ -13,7 +13,7 @@ use facet::Facet;
 
 use crate::error::SchemaError;
 use crate::migration::{Change, Constant, Hints, Migration, Op, Target};
-use crate::schema::{Schema, SchemaDoc, VariantKind};
+use crate::schema::{Node, Schema, VariantKind};
 
 /// The outcome of [`derive`].
 #[derive(Debug, Clone, PartialEq)]
@@ -58,9 +58,9 @@ pub enum Divergence {
     /// The documents' root schemas differ.
     Root {
         /// The source root.
-        from: Schema,
+        from: Node,
         /// The target root.
-        to: Schema,
+        to: Node,
     },
     /// A definition reachable from one root has no counterpart in the other.
     Unpaired {
@@ -75,9 +75,9 @@ pub enum Divergence {
         /// The definition's name.
         name: String,
         /// The source body.
-        from: Schema,
+        from: Node,
         /// The target body.
-        to: Schema,
+        to: Node,
     },
     /// A field's schema changed other than by an `Optional` wrap.
     Retyped {
@@ -86,9 +86,9 @@ pub enum Divergence {
         /// The field's target-side name.
         field: String,
         /// The source schema.
-        from: Schema,
+        from: Node,
         /// The target schema.
-        to: Schema,
+        to: Node,
     },
     /// The target has a field the source lacks, and no default is available.
     Undefaulted {
@@ -118,7 +118,7 @@ pub enum Side {
 
 /// Classify the edge from `from` to `to`, using `hints` for the facts a
 /// schema diff cannot contain.
-pub fn derive(from: &SchemaDoc, to: &SchemaDoc, hints: &Hints) -> Derivation {
+pub fn derive(from: &Schema, to: &Schema, hints: &Hints) -> Derivation {
     let mut ops = Vec::new();
     let mut unclassified = Vec::new();
 
@@ -155,7 +155,7 @@ pub fn derive(from: &SchemaDoc, to: &SchemaDoc, hints: &Hints) -> Derivation {
 /// [`derive`] onto the schema of `T`, taking the rename hints `T`'s
 /// `#[facet(migrate::renamed_from = …)]` attributes declare.
 pub fn derive_to<T: for<'a> Facet<'a>>(
-    from: &SchemaDoc,
+    from: &Schema,
     extra: &Hints,
 ) -> Result<Derivation, SchemaError> {
     let (to, declared) = crate::schema_and_hints_of::<T>()?;
@@ -166,14 +166,14 @@ pub fn derive_to<T: for<'a> Facet<'a>>(
 /// Compare two paired definitions, dispatching on their shared kind.
 fn diff_def(
     name: &str,
-    a: &Schema,
-    b: &Schema,
+    a: &Node,
+    b: &Node,
     hints: &Hints,
     ops: &mut Vec<Op>,
     unclassified: &mut Vec<Divergence>,
 ) {
     match (a, b) {
-        (Schema::Struct(fa), Schema::Struct(fb)) => {
+        (Node::Struct(fa), Node::Struct(fb)) => {
             diff_fields(
                 &Target::Def(name.to_owned()),
                 fa,
@@ -183,7 +183,7 @@ fn diff_def(
                 unclassified,
             );
         }
-        (Schema::Enum(va), Schema::Enum(vb)) => {
+        (Node::Enum(va), Node::Enum(vb)) => {
             diff_enum(name, va, vb, hints, ops, unclassified);
         }
         _ if a == b => {}
@@ -234,8 +234,8 @@ fn diff_enum(
     if kind_mismatch {
         unclassified.push(Divergence::Definition {
             name: name.to_owned(),
-            from: Schema::Enum(a.clone()),
-            to: Schema::Enum(b.clone()),
+            from: Node::Enum(a.clone()),
+            to: Node::Enum(b.clone()),
         });
     }
 }
@@ -246,12 +246,12 @@ fn diff_enum(
 fn classify_retype(
     at: &Target,
     field: &str,
-    from: &Schema,
-    to: &Schema,
+    from: &Node,
+    to: &Node,
     wraps: &mut Vec<String>,
     unclassified: &mut Vec<Divergence>,
 ) {
-    if matches!(to, Schema::Optional(inner) if **inner == *from) {
+    if matches!(to, Node::Optional(inner) if **inner == *from) {
         wraps.push(field.to_owned());
         return;
     }
@@ -269,8 +269,8 @@ fn classify_retype(
 /// the *target* field.
 fn diff_fields(
     at: &Target,
-    a: &BTreeMap<String, Schema>,
-    b: &BTreeMap<String, Schema>,
+    a: &BTreeMap<String, Node>,
+    b: &BTreeMap<String, Node>,
     hints: &Hints,
     ops: &mut Vec<Op>,
     unclassified: &mut Vec<Divergence>,
@@ -303,7 +303,7 @@ fn diff_fields(
 
         if let Some(default) = hints.default_of(at, field) {
             adds.push((field.clone(), default.clone()));
-        } else if matches!(&b[field], Schema::Optional(_)) {
+        } else if matches!(&b[field], Node::Optional(_)) {
             adds.push((field.clone(), Constant::Null));
         } else {
             unclassified.push(Divergence::Undefaulted {

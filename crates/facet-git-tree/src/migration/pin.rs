@@ -2,7 +2,7 @@
 //! [`MigrationSchema::ENTRY`] entry spliced onto its tree at write time, the
 //! generation of `schema_of::<Migration>()` it was written against.
 //!
-//! A `Migration` is a stored, self-hosted document exactly as [`SchemaDoc`]
+//! A `Migration` is a stored, self-hosted document exactly as [`Schema`]
 //! is, and its own shape will evolve — a future generation may add a
 //! [`Change`](crate::migration::Change) variant. A reader that silently
 //! ignored an operation it did not understand would produce a *wrong* value,
@@ -12,7 +12,7 @@
 //!
 //! This tower is separate from the schema-schema tower
 //! ([`crate::schema::pin`]): the two documents evolve independently, and
-//! adding a `Change` variant must not invalidate every stored `SchemaDoc`.
+//! adding a `Change` variant must not invalidate every stored `Schema`.
 
 use gix_object::{Find, Write};
 
@@ -21,7 +21,7 @@ use crate::de::find_tree_entries;
 use crate::error::MigrationPinError;
 use crate::migration::Migration;
 use crate::schema::pin::{decode_oid, splice_pin};
-use crate::schema::{SchemaDoc, schema_of};
+use crate::schema::{Schema, schema_of};
 use crate::ser::serialize_into;
 
 /// One generation of the migration document's own schema: the tree that a
@@ -84,7 +84,7 @@ const GENESIS_HEX: &str = "2804eb09c0825a75f388beb064bbc80666f5aebb";
 /// The current generation's own migration-schema document —
 /// `schema_of::<Migration>()`, unconditionally describable since it is this
 /// crate's own fixed shape.
-fn migration_schema_doc() -> SchemaDoc {
+fn migration_schema_doc() -> Schema {
     schema_of::<Migration>().expect("Migration's own shape is always describable")
 }
 

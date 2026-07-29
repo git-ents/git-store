@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 
 use facet::Facet;
 use facet_git_tree::{
-    ObjectId, SchemaDoc, deserialize, deserialize_value_with_schema, serialize_into,
+    ObjectId, Schema, deserialize, deserialize_value_with_schema, serialize_into,
     serialize_value_with_schema, validate_with_schema,
 };
 use facet_value::Value;
@@ -22,14 +22,14 @@ pub trait Encoding {
     /// Encode `value` under `doc`, returning the written root object.
     fn write<S: Find + Write + ?Sized>(
         value: &Self::Value,
-        doc: &SchemaDoc,
+        doc: &Schema,
         objects: &S,
     ) -> Result<ObjectId, Error>;
 
     /// Decode the value rooted at `root`, guided by `doc`.
     fn read<S: Find + Write + ?Sized>(
         root: &ObjectId,
-        doc: &SchemaDoc,
+        doc: &Schema,
         objects: &S,
     ) -> Result<Self::Value, Error>;
 }
@@ -45,7 +45,7 @@ impl<T: for<'a> Facet<'a>> Encoding for Typed<T> {
 
     fn write<S: Find + Write + ?Sized>(
         value: &T,
-        doc: &SchemaDoc,
+        doc: &Schema,
         objects: &S,
     ) -> Result<ObjectId, Error> {
         let root = serialize_into(value, objects)?;
@@ -58,7 +58,7 @@ impl<T: for<'a> Facet<'a>> Encoding for Typed<T> {
 
     fn read<S: Find + Write + ?Sized>(
         root: &ObjectId,
-        _doc: &SchemaDoc,
+        _doc: &Schema,
         objects: &S,
     ) -> Result<T, Error> {
         Ok(deserialize(root, objects)?)
@@ -70,7 +70,7 @@ impl Encoding for Dynamic {
 
     fn write<S: Find + Write + ?Sized>(
         value: &Value,
-        doc: &SchemaDoc,
+        doc: &Schema,
         objects: &S,
     ) -> Result<ObjectId, Error> {
         Ok(serialize_value_with_schema(value, doc, objects)?)
@@ -78,7 +78,7 @@ impl Encoding for Dynamic {
 
     fn read<S: Find + Write + ?Sized>(
         root: &ObjectId,
-        doc: &SchemaDoc,
+        doc: &Schema,
         objects: &S,
     ) -> Result<Value, Error> {
         Ok(deserialize_value_with_schema(root, doc, objects)?)

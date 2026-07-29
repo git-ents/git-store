@@ -360,7 +360,7 @@ Recursion depth MUST be bounded by the same maximum-depth limit that bounds ordi
 [role="requirement", id="schema.representation"]
 .Schema Representation
 --
-`Schema` and `SchemaDoc` MUST be ordinary `Facet` values, self-hosted: a schema document is stored as a Git tree via this crate's own encoding, with no special-cased representation.
+`Node` and `Schema` MUST be ordinary `Facet` values, self-hosted: a schema document is stored as a Git tree via this crate's own encoding, with no special-cased representation.
 
 Their on-disk form is a public contract: any change to the encoded shape of the schema types is a breaking change and MUST be released as a semver-major version, per link:#compatibility.update[compatibility with prior releases].
 
@@ -368,24 +368,24 @@ The schema types are defined as follows.
 
 [source,rust]
 ----
-pub struct SchemaDoc {
-    pub root: Schema,
-    pub defs: BTreeMap<String, Schema>,
+pub struct Schema {
+    pub root: Node,
+    pub defs: BTreeMap<String, Node>,
 }
 
 #[repr(u8)]
-pub enum Schema {
+pub enum Node {
     Unit, Bool, Char, String,
     I8, I16, I32, I64, I128, ISize,
     U8, U16, U32, U64, U128, USize,
     F32, F64,
     Bytes,
-    Struct(BTreeMap<String, Schema>),
-    Tuple(Vec<Schema>),
-    List(Box<Schema>),
-    Array { elem: Box<Schema>, len: usize },
-    Map { key: Box<Schema>, value: Box<Schema> },
-    Optional(Box<Schema>),
+    Struct(BTreeMap<String, Node>),
+    Tuple(Vec<Node>),
+    List(Box<Node>),
+    Array { elem: Box<Node>, len: usize },
+    Map { key: Box<Node>, value: Box<Node> },
+    Optional(Box<Node>),
     Enum(BTreeMap<String, VariantKind>),
     RawTree,
     Dynamic,
@@ -395,9 +395,9 @@ pub enum Schema {
 #[repr(u8)]
 pub enum VariantKind {
     Unit,
-    Newtype(Box<Schema>),
-    Tuple(Vec<Schema>),
-    Struct(BTreeMap<String, Schema>),
+    Newtype(Box<Node>),
+    Tuple(Vec<Node>),
+    Struct(BTreeMap<String, Node>),
 }
 ----
 
@@ -423,22 +423,22 @@ root/Ref                                 -> "Issue\n"
 .Schema-Schema Pin
 --
 Every stored schema document MUST carry, at the fixed top-level tree entry name `schema`, a reference to the tree of the schema-schema generation it was written against.
-That entry is a storage-layer splice added when a document is written, NOT a field of `SchemaDoc`: a `schema:` field on the type would make `schema_of::<SchemaDoc>()` describe the pin and recurse without bottom.
+That entry is a storage-layer splice added when a document is written, NOT a field of `Schema`: a `schema:` field on the type would make `schema_of::<Schema>()` describe the pin and recurse without bottom.
 This is the same construction as `gix-store`'s subtree schema binding, which splices `{value/, schema/}` onto a data commit's tree.
 
-A generation's tree is the serialization of `schema_of::<SchemaDoc>()` — the document describing `SchemaDoc`'s own shape — under that generation's encoding.
+A generation's tree is the serialization of `schema_of::<Schema>()` — the document describing `Schema`'s own shape — under that generation's encoding.
 
 The recursion bottoms out at a root generation, whose tree is written with no pin spliced in.
 Absence of a `schema` entry therefore means "this is the root of the tower", and is legitimate ONLY when the tree's own object id is one the reader recognizes as a root generation.
 A reader MUST reject an unpinned tree whose own id it does not recognize as a root: that is a truncated or hand-written document, not the bottom.
-A reader MUST carry the recognized generations as compiled-in constants; the genesis tree of this format version is `ac6765ad5cb7f41804706777260a43751eb2db41`.
+A reader MUST carry the recognized generations as compiled-in constants; the genesis tree of this format version is `09961be517a580c73b94d6b84b5a3e7dac2f0ac3`.
 
 Generation N's own tree MUST pin generation N−1 under its own `schema` entry.
 Ancestry through those entries is what restores the ordering a version number gave and a bare object id does not; there is one generation today, so the chain has length zero, but the format reserves the shape.
 
 A reader MUST determine what a document was written against, and refuse it if it does not recognize it, WITHOUT deserializing the document.
 The read is `git ls-tree <tree> schema` — one tree entry lookup, strictly cheaper than the `git cat-file blob <tree>:version` it replaces, since the pinned id is in the entry itself and no object need be read.
-This ordering is load-bearing, for the same reason the old `version` pre-read was: a document written by a newer binary may contain a `Schema` variant the reader has never heard of, and a typed deserialize attempted first fails with an opaque reflection error before the check is ever reached.
+This ordering is load-bearing, for the same reason the old `version` pre-read was: a document written by a newer binary may contain a `Node` variant the reader has never heard of, and a typed deserialize attempted first fails with an opaque reflection error before the check is ever reached.
 
 An object-id pin admits equality only.
 A reader MUST NOT infer that an unrecognized pin is newer or older than what it speaks, and the diagnostic MUST say what it honestly knows: this document was written against schema-schema `<oid>`, which I do not recognize; I speak `<the recognized set>`.
@@ -447,33 +447,33 @@ Publishing a schema is governed by the same refusal as reading one: a writer MUS
 A published schema that is unpinned or otherwise unreadable MUST remain replaceable, republishing being the remedy those conditions name.
 
 The pin covers less than `version` did, and this requirement does not claim otherwise.
-`version` bound `SchemaDoc`'s own on-disk shape and the value codec a schema of that version describes together, in lockstep: a reader that rejected an unrecognized version thereby also refused to misread a value written by a newer codec, with no separate value-format version needed anywhere.
-The schema-schema pin covers only which generation of `Schema`/`SchemaDoc` a document's schema tree belongs to; it carries no information about the codec that interprets values against that schema (link:#serialization.schema-directed[schema-directed serialization], link:#deserialization.schema-driven[schema-driven deserialization]).
-A codec change that leaves `SchemaDoc`'s own encoded shape untouched is invisible to this pin — the format currently has no mechanism that would catch it.
+`version` bound `Schema`'s own on-disk shape and the value codec a schema of that version describes together, in lockstep: a reader that rejected an unrecognized version thereby also refused to misread a value written by a newer codec, with no separate value-format version needed anywhere.
+The schema-schema pin covers only which generation of `Node`/`Schema` a document's schema tree belongs to; it carries no information about the codec that interprets values against that schema (link:#serialization.schema-directed[schema-directed serialization], link:#deserialization.schema-driven[schema-driven deserialization]).
+A codec change that leaves `Schema`'s own encoded shape untouched is invisible to this pin — the format currently has no mechanism that would catch it.
 --
 
 [role="requirement", id="schema.generation"]
 .Schema Generation
 --
-The converter from a `Facet` shape to a schema document — `schema_of::<T>()` / `SchemaDoc::from_shape` — MUST mirror the encoder's dispatch order exactly: transparency collapse first (smart pointers and transparent newtypes resolve to their pointee or inner shape), then `RawTree`, then dynamic values, then the scalar table, then byte sequences, then composites (structs, sequences, maps, options, enums).
+The converter from a `Facet` shape to a schema document — `schema_of::<T>()` / `Schema::from_shape` — MUST mirror the encoder's dispatch order exactly: transparency collapse first (smart pointers and transparent newtypes resolve to their pointee or inner shape), then `RawTree`, then dynamic values, then the scalar table, then byte sequences, then composites (structs, sequences, maps, options, enums).
 A shape and its transparent wrappers therefore always produce the same schema, just as they produce the same encoding.
 This is the same collapse link:#serialization.design.trees.collections[map-key layout selection] applies, so both agree on what a given shape actually encodes to.
 
 The scalar table MUST refuse `()` (the unit type) exactly as the encoder's scalar leaf encoding does: `()` has no textual (`Display`/`FromStr`) rendering, so it cannot reach a leaf blob and cannot be described by a schema either.
-This does not remove `Schema::Unit` from the format — a unit struct still resolves to it, describing the (always, statically) empty tree its *composite* encoding writes; only the scalar table's direct mapping from `()` is refused.
+This does not remove `Node::Unit` from the format — a unit struct still resolves to it, describing the (always, statically) empty tree its *composite* encoding writes; only the scalar table's direct mapping from `()` is refused.
 
 [IMPORTANT]
 ====
-A unit *enum variant* does NOT resolve to `Schema::Unit`, despite the name similarity: it is described by `VariantKind::Unit` (link:#schema.representation[schema representation]), whose payload write is the bare name-blob collapse defined by link:#serialization.design.trees.variants[variant encoding], not an empty tree. A unit struct *field*'s emptiness is static (that type's encoding is *always* the empty tree, regardless of value, so at a fixed path there is never anything to diff); a unit enum variant's emptiness is one of several live possibilities for that field (the value legitimately varies between `Low`, `Medium`, `High`, …), which is exactly why it needs a shape that shows up in a diff and the unit struct field does not.
+A unit *enum variant* does NOT resolve to `Node::Unit`, despite the name similarity: it is described by `VariantKind::Unit` (link:#schema.representation[schema representation]), whose payload write is the bare name-blob collapse defined by link:#serialization.design.trees.variants[variant encoding], not an empty tree. A unit struct *field*'s emptiness is static (that type's encoding is *always* the empty tree, regardless of value, so at a fixed path there is never anything to diff); a unit enum variant's emptiness is one of several live possibilities for that field (the value legitimately varies between `Low`, `Medium`, `High`, …), which is exactly why it needs a shape that shows up in a diff and the unit struct field does not.
 
 That reasoning is about a *fixed path*, and does not extend to a unit struct reached through a varying one. A `Vec` of unit structs encodes every element as an empty tree, so its length — a genuine, varying property of the value — contributes no blob to `git ls-tree -r` and no line to `git diff`; likewise `Option<UnitStruct>` renders `Some` as an empty tree, visible only as the disappearance of the `None` marker. These remain unmarked, and so remain invisible to blob-oriented tooling, which is the same defect this marker exists to remove — narrowed, not eliminated.
 ====
 
-Named user types — structs and enums — MUST be deduplicated into the document's `defs` table and referenced by `Schema::Ref(name)`.
+Named user types — structs and enums — MUST be deduplicated into the document's `defs` table and referenced by `Node::Ref(name)`.
 Names MUST be assigned deterministically: the key is the type's `type_identifier`, and when distinct types share an identifier, later occurrences in pre-order traversal of the shape are disambiguated with `_2`, `_3`, … suffixes.
 Recursive types are representable because a type's name is registered before its body is computed; the cycle is broken by the `Ref`.
 
-Generation MUST be deterministic: the same input shape always yields an identical `SchemaDoc`, so a generated schema serializes to a stable object id.
+Generation MUST be deterministic: the same input shape always yields an identical `Schema`, so a generated schema serializes to a stable object id.
 
 Shape recursion MUST be bounded by the same maximum nesting depth that bounds ordinary deserialization (link:#deserialization.schema-driven[schema-driven deserialization] already applies this bound to reads); a shape nested deeper than that limit MUST fail generation rather than recurse unboundedly, since data written that deep could never be read back regardless of what schema described it.
 --
@@ -544,7 +544,7 @@ Recursion depth MUST be bounded by the same maximum-depth limit that bounds dese
 [NOTE]
 ====
 Publishing a schema under a ref — e.g. `refs/schema/issue` — is a convention owned by higher layers such as `git-store`; `facet-git-tree` itself remains oid-in/oid-out and performs no ref operations.
-A schema is published by serializing its `SchemaDoc` through this crate and pointing the ref at the resulting tree, or at a commit wrapping that tree for history and signing — the higher layer's choice.
+A schema is published by serializing its `Schema` through this crate and pointing the ref at the resulting tree, or at a commit wrapping that tree for history and signing — the higher layer's choice.
 ====
 
 === Migration

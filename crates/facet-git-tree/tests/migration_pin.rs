@@ -1,7 +1,7 @@
 //! Integration tests for the migration-schema pin: every stored [`Migration`]
 //! tree names, out of band, the generation of `schema_of::<Migration>()` it
 //! was written against — exactly as the schema-schema pin does for
-//! [`SchemaDoc`] (see `tests/schema_self_host.rs`), but for a separate,
+//! [`Schema`] (see `tests/schema_self_host.rs`), but for a separate,
 //! independently-evolving tower.
 
 use facet_git_tree::{

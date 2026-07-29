@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use facet::Facet;
 use facet_git_tree::{
-    Derivation, Hints, ObjectId, SchemaDoc, SchemaPinError, deserialize_value_with_schema,
+    Derivation, Hints, ObjectId, Schema, SchemaPinError, deserialize_value_with_schema,
     migration::derive::derive, schema_of,
 };
 use facet_value::Value;
@@ -99,7 +99,7 @@ where
     pub fn get_at(&self, commit: ObjectId) -> Result<E::Value, Error> {
         let root = self.store.commit_tree(commit)?;
         let (value_tree, schema_tree) = self.store.split(root, commit)?;
-        let doc = SchemaDoc::read_pinned(&schema_tree, self.store.objects())?;
+        let doc = Schema::read_pinned(&schema_tree, self.store.objects())?;
         E::read(&value_tree, &doc, self.store.objects())
     }
 
@@ -130,7 +130,7 @@ where
     pub fn get_at_migrated(&self, commit: ObjectId) -> Result<Value, Error> {
         let root = self.store.commit_tree(commit)?;
         let (value_tree, schema_tree) = self.store.split(root, commit)?;
-        let doc = SchemaDoc::read_pinned(&schema_tree, self.store.objects())?;
+        let doc = Schema::read_pinned(&schema_tree, self.store.objects())?;
         let value = deserialize_value_with_schema(&value_tree, &doc, self.store.objects())?;
         self.schema().upcast(&value, &schema_tree)
     }
@@ -165,7 +165,7 @@ where
     }
 
     /// The current schema tip, or [`Error::NoSchema`] when none is published.
-    fn current_schema(&self) -> Result<(ObjectId, SchemaDoc), Error> {
+    fn current_schema(&self) -> Result<(ObjectId, Schema), Error> {
         let tip = self
             .store
             .refs()
@@ -175,7 +175,7 @@ where
                 kind: self.name.clone(),
             })?;
         let tree = self.store.commit_tree(tip)?;
-        let doc = SchemaDoc::read_pinned(&tree, self.store.objects())?;
+        let doc = Schema::read_pinned(&tree, self.store.objects())?;
         Ok((tip, doc))
     }
 }
@@ -210,13 +210,13 @@ where
 
     /// Publish (or evolve) the schema, committing it forward over the current
     /// tip.
-    pub fn put(&self, doc: &SchemaDoc) -> Result<ObjectId, Error> {
+    pub fn put(&self, doc: &Schema) -> Result<ObjectId, Error> {
         self.write(doc, &Hints::new())
     }
 
     /// [`put`](Self::put) with authoring hints, which are what let a
     /// remove-plus-add pair be recognised as the rename it actually is.
-    pub fn write(&self, doc: &SchemaDoc, hints: &Hints) -> Result<ObjectId, Error> {
+    pub fn write(&self, doc: &Schema, hints: &Hints) -> Result<ObjectId, Error> {
         let previous = match self
             .store
             .refs()
@@ -232,11 +232,11 @@ where
                 // overwritable — republishing is the migration path those
                 // errors name.
                 if let Err(err @ SchemaPinError::Unrecognized { .. }) =
-                    SchemaDoc::read_pin(&tree, self.store.objects())
+                    Schema::read_pin(&tree, self.store.objects())
                 {
                     return Err(err.into());
                 }
-                SchemaDoc::read_pinned(&tree, self.store.objects()).ok()
+                Schema::read_pinned(&tree, self.store.objects()).ok()
             }
             None => None,
         };
@@ -255,7 +255,7 @@ where
     }
 
     /// The current schema, or `None` when never published.
-    pub fn get(&self) -> Result<Option<SchemaDoc>, Error> {
+    pub fn get(&self) -> Result<Option<Schema>, Error> {
         match self
             .store
             .refs()
@@ -264,7 +264,7 @@ where
         {
             Some(tip) => {
                 let tree = self.store.commit_tree(tip)?;
-                Ok(Some(SchemaDoc::read_pinned(&tree, self.store.objects())?))
+                Ok(Some(Schema::read_pinned(&tree, self.store.objects())?))
             }
             None => Ok(None),
         }

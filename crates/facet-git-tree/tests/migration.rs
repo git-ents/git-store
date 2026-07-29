@@ -3,7 +3,7 @@
 //! Covers:
 //!   - `Migration`/`Op`/`Target`/`Change`/`Constant` are self-hosted: an
 //!     ordinary `Facet` value describable by `schema_of` and roundtripping
-//!     through this crate's own tree encoding, exactly like `SchemaDoc`.
+//!     through this crate's own tree encoding, exactly like `Schema`.
 //!   - `schema_and_hints_of` collects `#[facet(migrate::renamed_from = …)]`
 //!     hints from named struct fields and struct enum variant fields, keyed
 //!     by the right `Target`.
@@ -14,8 +14,7 @@ use std::collections::BTreeMap;
 
 use facet::Facet;
 use facet_git_tree::{
-    Change, Constant, Hints, Migration, Op, Schema, SchemaDoc, Target, schema_and_hints_of,
-    schema_of,
+    Change, Constant, Hints, Migration, Node, Op, Schema, Target, schema_and_hints_of, schema_of,
 };
 
 mod common;
@@ -23,7 +22,7 @@ use common::{Person, roundtrip};
 
 // --- self-hosting ---
 
-/// `Migration` is itself describable by a schema, exactly like `SchemaDoc`.
+/// `Migration` is itself describable by a schema, exactly like `Schema`.
 #[test]
 fn migration_schema_of_succeeds() -> anyhow::Result<()> {
     schema_of::<Migration>()?;
@@ -157,21 +156,21 @@ fn struct_variant_field_rename_hint_is_collected() -> anyhow::Result<()> {
 /// A type with no `migrate` attributes yields empty `Hints`, and
 /// `schema_and_hints_of`'s schema half matches plain `schema_of` exactly —
 /// the hint-collection refactor of `Walker`/`define` changes nothing about
-/// the generated `SchemaDoc`.
+/// the generated `Schema`.
 #[test]
 fn no_attributes_yields_empty_hints_and_unchanged_schema() -> anyhow::Result<()> {
     let (doc, hints) = schema_and_hints_of::<Person>()?;
     assert_eq!(hints, Hints::default());
     assert_eq!(doc, schema_of::<Person>()?);
 
-    let expected = SchemaDoc {
-        root: Schema::Ref("Person".into()),
+    let expected = Schema {
+        root: Node::Ref("Person".into()),
         defs: BTreeMap::from([(
             "Person".into(),
-            Schema::Struct(BTreeMap::from([
-                ("name".into(), Schema::String),
-                ("age".into(), Schema::U32),
-                ("active".into(), Schema::Bool),
+            Node::Struct(BTreeMap::from([
+                ("name".into(), Node::String),
+                ("age".into(), Node::U32),
+                ("active".into(), Node::Bool),
             ])),
         )]),
     };

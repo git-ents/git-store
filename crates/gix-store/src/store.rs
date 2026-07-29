@@ -37,7 +37,7 @@ impl Default for Layout {
 /// A content-addressed store layered over a [`RefStore`] and an object
 /// database.
 ///
-/// Every kind is a published [`SchemaDoc`](facet_git_tree::SchemaDoc); every
+/// Every kind is a published [`Schema`](facet_git_tree::Schema); every
 /// entity is a commit chain whose tree is `{value/, schema/}` — the encoded
 /// entity, and the tree of the schema it was validated against. Binding the
 /// schema by subtree rather than by parent or trailer keeps it reachable by

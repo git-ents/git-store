@@ -14,7 +14,7 @@ use std::fmt::Debug;
 
 use facet::Facet;
 use facet_git_tree::{
-    EntryKind, ObjectStore, RawTree, Schema, SchemaDoc, SchemaWriteError, VariantKind,
+    EntryKind, Node, ObjectStore, RawTree, Schema, SchemaWriteError, VariantKind,
     deserialize_value_with_schema, schema_of, serialize, serialize_into,
     serialize_value_with_schema,
 };
@@ -31,8 +31,8 @@ fn typed_root<T: for<'a> Facet<'a>>(value: &T) -> facet_git_tree::ObjectId {
     serialize(value).expect("typed serialize").0
 }
 
-/// A single-field [`Schema::Struct`] body, for tests that only need one field.
-fn one_field(name: &str, schema: Schema) -> BTreeMap<String, Schema> {
+/// A single-field [`Node::Struct`] body, for tests that only need one field.
+fn one_field(name: &str, schema: Node) -> BTreeMap<String, Node> {
     BTreeMap::from([(name.to_owned(), schema)])
 }
 
@@ -201,12 +201,12 @@ fn raw_tree_reference_matches_typed() {
     assert_eq!(written, typed);
 }
 
-/// A `Schema::Dynamic` node delegates to the ordinary dynamic encoder, so it
+/// A `Node::Dynamic` node delegates to the ordinary dynamic encoder, so it
 /// matches a plain `serialize` of the same value.
 #[test]
 fn dynamic_node_matches_plain_serialize() {
-    let doc = SchemaDoc {
-        root: Schema::Dynamic,
+    let doc = Schema {
+        root: Node::Dynamic,
         defs: Default::default(),
     };
     let v = value!({ "a": [1, 2], "b": "x" });
@@ -269,8 +269,8 @@ fn float_into_integer_field_is_rejected() {
 #[test]
 fn integer_too_large_for_f64_is_refused() {
     // 2^53 + 1 has no exact f64 representation.
-    let doc = SchemaDoc {
-        root: Schema::F64,
+    let doc = Schema {
+        root: Node::F64,
         defs: Default::default(),
     };
     let store = ObjectStore::default();
@@ -347,8 +347,8 @@ fn multi_member_enum_object_is_rejected() {
 
 #[test]
 fn unknown_ref_is_rejected() {
-    let doc = SchemaDoc {
-        root: Schema::Ref("missing".into()),
+    let doc = Schema {
+        root: Node::Ref("missing".into()),
         defs: Default::default(),
     };
     let store = ObjectStore::default();
@@ -376,8 +376,8 @@ fn priority_field_change_is_a_visible_blob_diff() {
         ("Medium".to_owned(), VariantKind::Unit),
         ("High".to_owned(), VariantKind::Unit),
     ]);
-    let doc = SchemaDoc {
-        root: Schema::Struct(one_field("priority", Schema::Enum(priority_variants))),
+    let doc = Schema {
+        root: Node::Struct(one_field("priority", Node::Enum(priority_variants))),
         defs: Default::default(),
     };
 
@@ -420,8 +420,8 @@ fn priority_field_change_is_a_visible_blob_diff() {
 /// `git ls-tree -r` rather than vanishing as an empty, unlisted directory.
 #[test]
 fn empty_tags_list_is_visible_as_a_marker_entry() {
-    let doc = SchemaDoc {
-        root: Schema::Struct(one_field("tags", Schema::List(Box::new(Schema::String)))),
+    let doc = Schema {
+        root: Node::Struct(one_field("tags", Node::List(Box::new(Node::String)))),
         defs: Default::default(),
     };
     let store = ObjectStore::default();
@@ -446,9 +446,9 @@ fn ref_cycle_hits_the_depth_bound() {
     // A definition that refers only to itself: no value structure is ever
     // consumed, so only the depth bound stops the recursion.
     let mut defs = std::collections::BTreeMap::new();
-    defs.insert("loop".to_string(), Schema::Ref("loop".into()));
-    let doc = SchemaDoc {
-        root: Schema::Ref("loop".into()),
+    defs.insert("loop".to_string(), Node::Ref("loop".into()));
+    let doc = Schema {
+        root: Node::Ref("loop".into()),
         defs,
     };
     let store = ObjectStore::default();
@@ -461,7 +461,7 @@ fn ref_cycle_hits_the_depth_bound() {
 
 // --- the presence marker does not swallow fixed-arity or forged shapes ---
 
-/// A zero-element `Schema::Tuple` MUST encode as the literal empty tree, not
+/// A zero-element `Node::Tuple` MUST encode as the literal empty tree, not
 /// the presence marker.
 ///
 /// A tuple's arity is fixed by the schema, so an empty one encodes identically
@@ -474,8 +474,8 @@ fn ref_cycle_hits_the_depth_bound() {
 /// permanently on the same data.
 #[test]
 fn an_empty_tuple_is_not_markered_and_reads_back() {
-    let doc = SchemaDoc {
-        root: Schema::Struct(one_field("nothing", Schema::Tuple(vec![]))),
+    let doc = Schema {
+        root: Node::Struct(one_field("nothing", Node::Tuple(vec![]))),
         defs: Default::default(),
     };
     let store = ObjectStore::default();
@@ -505,7 +505,7 @@ fn zero_field_tuple_struct_matches_typed() {
 /// A schema-declared field named exactly the reserved presence marker MUST be
 /// rejected at write time.
 ///
-/// A `SchemaDoc` is data — `git store schema put` ingests one from hand-written
+/// A `Schema` is data — `git store schema put` ingests one from hand-written
 /// JSON — so a field name is untrusted input, and the `#[derive(Facet)]`
 /// guarantee that a field cannot be named a bare `_` does not hold for it.
 /// Left unchecked, such a field encoded to a tree byte-identical to the one
@@ -513,8 +513,8 @@ fn zero_field_tuple_struct_matches_typed() {
 /// round-trip rather than a loud failure.
 #[test]
 fn a_schema_field_named_as_the_presence_marker_is_rejected() {
-    let doc = SchemaDoc {
-        root: Schema::Struct(one_field("_", Schema::String)),
+    let doc = Schema {
+        root: Node::Struct(one_field("_", Node::String)),
         defs: Default::default(),
     };
     let store = ObjectStore::default();

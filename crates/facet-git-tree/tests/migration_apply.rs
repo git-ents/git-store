@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 
 use facet::Facet;
 use facet_git_tree::{
-    Change, Constant, Edge, Migration, MigrationError, Op, Schema, SchemaDoc, Target, apply,
+    Change, Constant, Edge, Migration, MigrationError, Node, Op, Schema, Target, apply,
     apply_chain, deserialize_value_with_schema, schema_of, serialize,
 };
 use facet_value::{Value, value};
@@ -31,7 +31,7 @@ use facet_value::{Value, value};
 /// `deserialize_value_with_schema(serialize(value))`, the schema-driven
 /// analogue of `common::roundtrip` this suite's tests build their fixtures
 /// from.
-fn read<T>(value: &T) -> anyhow::Result<(Value, SchemaDoc)>
+fn read<T>(value: &T) -> anyhow::Result<(Value, Schema)>
 where
     T: for<'a> Facet<'a>,
 {
@@ -234,7 +234,7 @@ struct WrapNew {
     count: Option<i64>,
 }
 
-/// `Wrap` is the identity on the value: `Schema::Optional` reads `Some(x)`
+/// `Wrap` is the identity on the value: `Node::Optional` reads `Some(x)`
 /// and `x` as the same `Value`, so the migrated value equals both the
 /// unmigrated one and the far side's typed reading.
 #[test]
@@ -512,12 +512,12 @@ fn apply_chain_composes_edges_in_series() -> anyhow::Result<()> {
 
 // --- errors ---
 
-/// `Schema::Ref` naming no definition is `MigrationError::UnknownRef`.
+/// `Node::Ref` naming no definition is `MigrationError::UnknownRef`.
 #[test]
 fn unknown_ref_is_reachable() {
     let value = value!(42);
-    let doc = SchemaDoc {
-        root: Schema::Ref("nope".into()),
+    let doc = Schema {
+        root: Node::Ref("nope".into()),
         defs: Default::default(),
     };
     let err = apply(&value, &doc, &Migration::default()).unwrap_err();
@@ -532,8 +532,8 @@ fn unknown_ref_is_reachable() {
 #[test]
 fn mismatch_is_reachable() {
     let value = value!("not an object");
-    let doc = SchemaDoc {
-        root: Schema::Struct(Default::default()),
+    let doc = Schema {
+        root: Node::Struct(Default::default()),
         defs: Default::default(),
     };
     let err = apply(&value, &doc, &Migration::default()).unwrap_err();

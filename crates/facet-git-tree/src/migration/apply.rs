@@ -1,5 +1,5 @@
 //! Read-time upcast: applying a [`Migration`]'s operations to an
-//! already-read [`Value`], guided by the source [`SchemaDoc`]'s definition
+//! already-read [`Value`], guided by the source [`Schema`]'s definition
 //! structure.
 //!
 //! `git-attest` binds attestations to object hashes, so migration must never
@@ -21,17 +21,13 @@ use facet_value::{VArray, VNumber, VObject, Value};
 use crate::de::MAX_DEPTH;
 use crate::error::MigrationError;
 use crate::migration::{Change, Constant, Migration, Target};
-use crate::schema::{Schema, SchemaDoc, VariantKind};
+use crate::schema::{Node, Schema, VariantKind};
 
 /// Upcast a value read against `from` into one conforming to the schema on
 /// the far side of `migration`.
 ///
 /// Never writes an object and never mutates stored state.
-pub fn apply(
-    value: &Value,
-    from: &SchemaDoc,
-    migration: &Migration,
-) -> Result<Value, MigrationError> {
+pub fn apply(value: &Value, from: &Schema, migration: &Migration) -> Result<Value, MigrationError> {
     walk(value, &from.root, from, migration, &Path::ROOT, 0)
 }
 
@@ -39,7 +35,7 @@ pub fn apply(
 /// off it.
 #[derive(Debug, Clone, Copy)]
 pub struct Edge<'a> {
-    pub from: &'a SchemaDoc,
+    pub from: &'a Schema,
     pub migration: &'a Migration,
 }
 
@@ -121,9 +117,9 @@ impl<'a> Path<'a> {
 /// Migrate one schema node's value.
 ///
 /// `def_name` is `Some` exactly when `schema` is the body of the definition
-/// just resolved through a [`Schema::Ref`] one hop up — the only condition
+/// just resolved through a [`Node::Ref`] one hop up — the only condition
 /// under which a [`Target`] can name what is being walked. Every other
-/// caller passes `None`, since a [`Schema::Struct`]/[`Schema::Enum`] reached
+/// caller passes `None`, since a [`Node::Struct`]/[`Node::Enum`] reached
 /// any other way (only possible inside a definition body, or as a
 /// hand-authored document's bare root) has no name a `Target` could address.
 ///
@@ -132,9 +128,9 @@ impl<'a> Path<'a> {
 /// fails rather than recursing unboundedly.
 fn walk_named(
     value: &Value,
-    schema: &Schema,
+    schema: &Node,
     def_name: Option<&str>,
-    doc: &SchemaDoc,
+    doc: &Schema,
     migration: &Migration,
     path: &Path,
     depth: usize,
@@ -146,7 +142,7 @@ fn walk_named(
         });
     }
     match schema {
-        Schema::Ref(name) => {
+        Node::Ref(name) => {
             let target = doc
                 .defs
                 .get(name)
@@ -156,7 +152,7 @@ fn walk_named(
                 })?;
             walk_named(value, target, Some(name), doc, migration, path, depth + 1)
         }
-        Schema::Struct(fields) => {
+        Node::Struct(fields) => {
             let obj = as_object(value, path)?;
             let mut result = walk_struct(obj, fields, doc, migration, path, depth)?;
             if let Some(name) = def_name {
@@ -164,20 +160,20 @@ fn walk_named(
             }
             Ok(result.into())
         }
-        Schema::Enum(variants) => {
+        Node::Enum(variants) => {
             walk_enum(value, def_name, variants, doc, migration, path, depth).map(Into::into)
         }
-        Schema::Tuple(elems) => {
+        Node::Tuple(elems) => {
             walk_tuple(as_array(value, path)?, elems, doc, migration, path, depth)
         }
-        Schema::List(elem) => walk_seq(as_array(value, path)?, elem, doc, migration, path, depth),
-        Schema::Array { elem, len } => {
+        Node::List(elem) => walk_seq(as_array(value, path)?, elem, doc, migration, path, depth),
+        Node::Array { elem, len } => {
             let arr = as_array(value, path)?;
             expect_len(path, *len, arr.as_slice().len())?;
             walk_seq(arr, elem, doc, migration, path, depth)
         }
-        Schema::Map { key, value: val } => walk_map(value, key, val, doc, migration, path, depth),
-        Schema::Optional(inner) => {
+        Node::Map { key, value: val } => walk_map(value, key, val, doc, migration, path, depth),
+        Node::Optional(inner) => {
             if value.is_null() {
                 Ok(Value::NULL)
             } else {
@@ -193,8 +189,8 @@ fn walk_named(
 /// [`walk_named`] with no definition name in scope.
 fn walk(
     value: &Value,
-    schema: &Schema,
-    doc: &SchemaDoc,
+    schema: &Node,
+    doc: &Schema,
     migration: &Migration,
     path: &Path,
     depth: usize,
@@ -206,8 +202,8 @@ fn walk(
 /// the value — the same leniency `schema::read`'s `read_struct` applies.
 fn walk_struct(
     obj: &VObject,
-    fields: &BTreeMap<String, Schema>,
-    doc: &SchemaDoc,
+    fields: &BTreeMap<String, Node>,
+    doc: &Schema,
     migration: &Migration,
     path: &Path,
     depth: usize,
@@ -229,7 +225,7 @@ fn walk_enum(
     value: &Value,
     def_name: Option<&str>,
     variants: &BTreeMap<String, VariantKind>,
-    doc: &SchemaDoc,
+    doc: &Schema,
     migration: &Migration,
     path: &Path,
     depth: usize,
@@ -276,12 +272,12 @@ fn walk_enum(
     Ok(out)
 }
 
-/// Migrate a fixed-length sequence (a [`Schema::Tuple`], or a tuple enum
+/// Migrate a fixed-length sequence (a [`Node::Tuple`], or a tuple enum
 /// variant's payload) element-wise with `elems`.
 fn walk_tuple(
     arr: &VArray,
-    elems: &[Schema],
-    doc: &SchemaDoc,
+    elems: &[Node],
+    doc: &Schema,
     migration: &Migration,
     path: &Path,
     depth: usize,
@@ -301,12 +297,12 @@ fn walk_tuple(
     Ok(out.into())
 }
 
-/// Migrate a variable-length sequence ([`Schema::List`] or [`Schema::Array`])
+/// Migrate a variable-length sequence ([`Node::List`] or [`Node::Array`])
 /// element-wise with a single element schema.
 fn walk_seq(
     arr: &VArray,
-    elem: &Schema,
-    doc: &SchemaDoc,
+    elem: &Node,
+    doc: &Schema,
     migration: &Migration,
     path: &Path,
     depth: usize,
@@ -323,9 +319,9 @@ fn walk_seq(
 /// `schema::read` produces.
 fn walk_map(
     value: &Value,
-    key: &Schema,
-    val: &Schema,
-    doc: &SchemaDoc,
+    key: &Node,
+    val: &Node,
+    doc: &Schema,
     migration: &Migration,
     path: &Path,
     depth: usize,
@@ -388,7 +384,7 @@ fn apply_change(object: &mut VObject, change: &Change) {
         Change::Add { field, default } => {
             object.insert(field.clone(), Value::from(default));
         }
-        // `Schema::Optional` reads as `null` or the inner value directly, so
+        // `Node::Optional` reads as `null` or the inner value directly, so
         // `Some(x)` and `x` are the same `Value` — `Wrap` is the identity here.
         Change::Wrap { .. } => {}
     }
@@ -481,25 +477,25 @@ fn value_kind(v: &Value) -> &'static str {
 /// Whether `schema` decides scalar-keyed map layout. Mirrors the read path's
 /// `is_scalar_schema` (`schema/read.rs`), duplicated here since that one is
 /// private to its module.
-fn is_scalar_schema(schema: &Schema) -> bool {
+fn is_scalar_schema(schema: &Node) -> bool {
     matches!(
         schema,
-        Schema::Bool
-            | Schema::Char
-            | Schema::String
-            | Schema::I8
-            | Schema::I16
-            | Schema::I32
-            | Schema::I64
-            | Schema::I128
-            | Schema::ISize
-            | Schema::U8
-            | Schema::U16
-            | Schema::U32
-            | Schema::U64
-            | Schema::U128
-            | Schema::USize
-            | Schema::F32
-            | Schema::F64
+        Node::Bool
+            | Node::Char
+            | Node::String
+            | Node::I8
+            | Node::I16
+            | Node::I32
+            | Node::I64
+            | Node::I128
+            | Node::ISize
+            | Node::U8
+            | Node::U16
+            | Node::U32
+            | Node::U64
+            | Node::U128
+            | Node::USize
+            | Node::F32
+            | Node::F64
     )
 }

@@ -1,8 +1,8 @@
-//! Self-hosted schemas: [`Schema`]/[`SchemaDoc`] describe how a `Facet` type
+//! Self-hosted schemas: [`Node`]/[`Schema`] describe how a `Facet` type
 //! is encoded, and are themselves ordinary `Facet` values stored through this
 //! crate's own tree encoding.
 //!
-//! [`schema_of`] converts a `Facet` type's shape into a [`SchemaDoc`] by
+//! [`schema_of`] converts a `Facet` type's shape into a [`Schema`] by
 //! mirroring the encoder's dispatch order, so a schema always describes
 //! exactly what serialization writes. With the `value` cargo feature, a
 //! schema drives [`deserialize_value_with_schema`](crate::schema::read)'s
@@ -31,7 +31,7 @@ use crate::ser::is_byte_seq;
 ///
 /// `root` describes the value itself; `defs` holds the bodies of every named
 /// user type (struct or enum) the root reaches, keyed by the deterministic
-/// names that [`Schema::Ref`] nodes use. A `BTreeMap` keeps the encoding
+/// names that [`Node::Ref`] nodes use. A `BTreeMap` keeps the encoding
 /// order-independent of construction, so equal documents share an object id.
 ///
 /// This type carries no format-version field: a stored document instead pins
@@ -39,12 +39,12 @@ use crate::ser::is_byte_seq;
 /// onto the tree at write time — see [`pin`](crate::schema::pin) — which is a
 /// storage-layer concern, not part of this Rust type.
 #[derive(Debug, Clone, PartialEq, Facet)]
-pub struct SchemaDoc {
+pub struct Schema {
     /// The schema of the value itself. Named user types appear as
-    /// [`Schema::Ref`] nodes resolved through `defs`.
-    pub root: Schema,
+    /// [`Node::Ref`] nodes resolved through `defs`.
+    pub root: Node,
     /// The definition table for named user types, keyed by assigned name.
-    pub defs: BTreeMap<String, Schema>,
+    pub defs: BTreeMap<String, Node>,
 }
 
 /// A single schema node: the shape of one value in the encoding.
@@ -55,7 +55,7 @@ pub struct SchemaDoc {
 /// a semver-major break.
 #[derive(Debug, Clone, PartialEq, Facet)]
 #[repr(u8)]
-pub enum Schema {
+pub enum Node {
     /// The unit type `()` or a unit struct: an empty tree.
     Unit,
     /// `bool`: a `true`/`false` blob.
@@ -96,16 +96,16 @@ pub enum Schema {
     Bytes,
     /// A named-field struct: a tree with one entry per field, keyed by field
     /// name — the map key *is* the tree entry name (`schema.representation`).
-    Struct(BTreeMap<String, Schema>),
+    Struct(BTreeMap<String, Node>),
     /// A tuple or tuple struct: a tree with ordinal-named entries.
-    Tuple(Vec<Schema>),
+    Tuple(Vec<Node>),
     /// A variable-length sequence (`Vec<T>`, `[T]`): an ordinal-named tree.
-    List(Box<Schema>),
+    List(Box<Node>),
     /// A fixed-length array `[T; N]`: an ordinal-named tree of exactly `len`
     /// entries.
     Array {
         /// The element schema.
-        elem: Box<Schema>,
+        elem: Box<Node>,
         /// The exact element count.
         len: usize,
     },
@@ -113,13 +113,13 @@ pub enum Schema {
     /// pair sub-trees for composite keys.
     Map {
         /// The key schema; whether it is a scalar variant decides the layout.
-        key: Box<Schema>,
+        key: Box<Node>,
         /// The value schema.
-        value: Box<Schema>,
+        value: Box<Node>,
     },
     /// An `Option<T>`: the presence-marker tree (`crate::marker`) for `None`,
     /// a single `some` entry for `Some`.
-    Optional(Box<Schema>),
+    Optional(Box<Node>),
     /// An enum: externally tagged by the live variant's name — a bare blob
     /// holding that name for a unit variant ([`VariantKind::Unit`]), a
     /// single-entry tree naming it for every other variant. Keyed by variant
@@ -145,20 +145,20 @@ pub enum VariantKind {
     /// content on either side.
     Unit,
     /// A single-field tuple variant: the field's own encoding directly.
-    Newtype(Box<Schema>),
+    Newtype(Box<Node>),
     /// A multi-field tuple variant: an ordinal-named tree.
-    Tuple(Vec<Schema>),
+    Tuple(Vec<Node>),
     /// A struct variant: a name-keyed tree.
-    Struct(BTreeMap<String, Schema>),
+    Struct(BTreeMap<String, Node>),
 }
 
-/// Generate the [`SchemaDoc`] describing how `T` is encoded.
+/// Generate the [`Schema`] describing how `T` is encoded.
 ///
-/// The shorthand for [`SchemaDoc::from_shape`] applied to `T`'s shape.
+/// The shorthand for [`Schema::from_shape`] applied to `T`'s shape.
 ///
 /// ```
 /// use facet::Facet;
-/// use facet_git_tree::{Schema, schema_of};
+/// use facet_git_tree::{Node, schema_of};
 ///
 /// #[derive(Facet)]
 /// struct Point {
@@ -167,29 +167,29 @@ pub enum VariantKind {
 /// }
 ///
 /// let doc = schema_of::<Point>()?;
-/// assert_eq!(doc.root, Schema::Ref("Point".into()));
+/// assert_eq!(doc.root, Node::Ref("Point".into()));
 /// assert!(doc.defs.contains_key("Point"));
 /// # Ok::<(), facet_git_tree::SchemaError>(())
 /// ```
-pub fn schema_of<T: for<'a> Facet<'a>>() -> Result<SchemaDoc, SchemaError> {
-    SchemaDoc::from_shape(<T as Facet>::SHAPE)
+pub fn schema_of<T: for<'a> Facet<'a>>() -> Result<Schema, SchemaError> {
+    Schema::from_shape(<T as Facet>::SHAPE)
 }
 
 /// [`schema_of`] together with the rename hints `T`'s
 /// `#[facet(migrate::renamed_from = …)]` attributes declare.
-pub fn schema_and_hints_of<T: for<'a> Facet<'a>>() -> Result<(SchemaDoc, Hints), SchemaError> {
-    SchemaDoc::from_shape_with_hints(<T as Facet>::SHAPE)
+pub fn schema_and_hints_of<T: for<'a> Facet<'a>>() -> Result<(Schema, Hints), SchemaError> {
+    Schema::from_shape_with_hints(<T as Facet>::SHAPE)
 }
 
-impl SchemaDoc {
-    /// Generate the [`SchemaDoc`] describing how values of `shape` are
+impl Schema {
+    /// Generate the [`Schema`] describing how values of `shape` are
     /// encoded.
     ///
     /// The walker mirrors the encoder's dispatch order exactly
     /// (`schema.generation`): transparency collapse, then [`RawTree`], then
     /// dynamic values, then the scalar table, then byte sequences, then
     /// composites. Named user types (structs and enums) are deduplicated into
-    /// [`defs`](SchemaDoc::defs) and referenced by [`Schema::Ref`]; names are
+    /// [`defs`](Schema::defs) and referenced by [`Node::Ref`]; names are
     /// assigned deterministically in pre-order, so the same shape always
     /// yields an identical — and identically-encoded — document.
     pub fn from_shape(shape: &'static Shape) -> Result<Self, SchemaError> {
@@ -217,7 +217,7 @@ impl SchemaDoc {
         let mut walker = Walker::new(limit);
         let root = walker.node(shape, 0)?;
         Ok((
-            SchemaDoc {
+            Schema {
                 root,
                 defs: walker.defs,
             },
@@ -226,11 +226,11 @@ impl SchemaDoc {
     }
 }
 
-/// The `Shape` → [`Schema`] walker: tracks named-type definitions and the
+/// The `Shape` → [`Node`] walker: tracks named-type definitions and the
 /// deterministic name assignment while recursing through a shape.
 struct Walker {
     /// Finished (or in-progress) definitions, keyed by assigned name.
-    defs: BTreeMap<String, Schema>,
+    defs: BTreeMap<String, Node>,
     /// Assigned name per user type, keyed by type identity.
     names: HashMap<ConstTypeId, String>,
     /// How many types have claimed each identifier, for `_2`, `_3`, …
@@ -261,7 +261,7 @@ impl Walker {
     /// that could never be read back regardless of what schema described it,
     /// so generation is refused here rather than recursing unboundedly on a
     /// pathological (or adversarially deep) type.
-    fn node(&mut self, shape: &'static Shape, depth: usize) -> Result<Schema, SchemaError> {
+    fn node(&mut self, shape: &'static Shape, depth: usize) -> Result<Node, SchemaError> {
         if depth > self.limit {
             return Err(SchemaError::MaxDepth(self.limit));
         }
@@ -273,12 +273,12 @@ impl Walker {
 
         // RawTree → a verbatim tree reference.
         if shape.is_type::<RawTree>() {
-            return Ok(Schema::RawTree);
+            return Ok(Node::RawTree);
         }
 
         // Dynamic value → shape decided at runtime, not describable further.
         if let Def::DynamicValue(_) = shape.def {
-            return Ok(Schema::Dynamic);
+            return Ok(Node::Dynamic);
         }
 
         // Scalar leaf → the per-width scalar table.
@@ -289,7 +289,7 @@ impl Walker {
         // Byte sequence → a single blob, before generic sequence handling,
         // exactly as the encoder special-cases it.
         if is_byte_seq(shape) {
-            return Ok(Schema::Bytes);
+            return Ok(Node::Bytes);
         }
 
         // Struct or tuple. An anonymous tuple `(A, B)` has no user name and is
@@ -297,16 +297,16 @@ impl Walker {
         // named user types and live in `defs`.
         if let facet::Type::User(facet::UserType::Struct(st)) = shape.ty {
             if matches!(st.kind, facet::StructKind::Tuple) {
-                return Ok(Schema::Tuple(self.field_schemas(st.fields, depth + 1)?));
+                return Ok(Node::Tuple(self.field_schemas(st.fields, depth + 1)?));
             }
             return self.define(shape, |walker, name| match st.kind {
-                facet::StructKind::Unit => Ok(Schema::Unit),
+                facet::StructKind::Unit => Ok(Node::Unit),
                 facet::StructKind::TupleStruct => {
-                    Ok(Schema::Tuple(walker.field_schemas(st.fields, depth + 1)?))
+                    Ok(Node::Tuple(walker.field_schemas(st.fields, depth + 1)?))
                 }
                 _ => {
                     walker.record_rename_hints(&Target::Def(name.to_owned()), st.fields);
-                    Ok(Schema::Struct(
+                    Ok(Node::Struct(
                         walker.named_field_schemas(st.fields, depth + 1)?,
                     ))
                 }
@@ -315,21 +315,21 @@ impl Walker {
 
         // Sequences, maps, options — the same order the encoder checks them.
         match shape.def {
-            Def::List(d) => return Ok(Schema::List(Box::new(self.node(d.t, depth + 1)?))),
-            Def::Slice(d) => return Ok(Schema::List(Box::new(self.node(d.t, depth + 1)?))),
+            Def::List(d) => return Ok(Node::List(Box::new(self.node(d.t, depth + 1)?))),
+            Def::Slice(d) => return Ok(Node::List(Box::new(self.node(d.t, depth + 1)?))),
             Def::Array(d) => {
-                return Ok(Schema::Array {
+                return Ok(Node::Array {
                     elem: Box::new(self.node(d.t, depth + 1)?),
                     len: d.n,
                 });
             }
             Def::Map(d) => {
-                return Ok(Schema::Map {
+                return Ok(Node::Map {
                     key: Box::new(self.node(d.k, depth + 1)?),
                     value: Box::new(self.node(d.v, depth + 1)?),
                 });
             }
-            Def::Option(d) => return Ok(Schema::Optional(Box::new(self.node(d.t, depth + 1)?))),
+            Def::Option(d) => return Ok(Node::Optional(Box::new(self.node(d.t, depth + 1)?))),
             _ => {}
         }
 
@@ -363,7 +363,7 @@ impl Walker {
                     };
                     variants.insert(variant.name.to_owned(), kind);
                 }
-                Ok(Schema::Enum(variants))
+                Ok(Node::Enum(variants))
             });
         }
 
@@ -375,7 +375,7 @@ impl Walker {
         &mut self,
         fields: &'static [facet::Field],
         depth: usize,
-    ) -> Result<Vec<Schema>, SchemaError> {
+    ) -> Result<Vec<Node>, SchemaError> {
         fields.iter().map(|f| self.node(f.shape(), depth)).collect()
     }
 
@@ -384,14 +384,14 @@ impl Walker {
         &mut self,
         fields: &'static [facet::Field],
         depth: usize,
-    ) -> Result<BTreeMap<String, Schema>, SchemaError> {
+    ) -> Result<BTreeMap<String, Node>, SchemaError> {
         fields
             .iter()
             .map(|f| Ok((f.name.to_owned(), self.node(f.shape(), depth)?)))
             .collect()
     }
 
-    /// Register `shape` as a named definition and return the [`Schema::Ref`]
+    /// Register `shape` as a named definition and return the [`Node::Ref`]
     /// to it, computing the body via `body` on first encounter.
     ///
     /// The name is claimed *before* the body is computed, so a recursive type
@@ -403,10 +403,10 @@ impl Walker {
     fn define(
         &mut self,
         shape: &'static Shape,
-        body: impl FnOnce(&mut Self, &str) -> Result<Schema, SchemaError>,
-    ) -> Result<Schema, SchemaError> {
+        body: impl FnOnce(&mut Self, &str) -> Result<Node, SchemaError>,
+    ) -> Result<Node, SchemaError> {
         if let Some(name) = self.names.get(&shape.id) {
-            return Ok(Schema::Ref(name.clone()));
+            return Ok(Node::Ref(name.clone()));
         }
         let claimed = self.claimed.entry(shape.type_identifier).or_insert(0);
         *claimed += 1;
@@ -418,7 +418,7 @@ impl Walker {
         self.names.insert(shape.id, name.clone());
         let schema = body(self, &name)?;
         self.defs.insert(name.clone(), schema);
-        Ok(Schema::Ref(name))
+        Ok(Node::Ref(name))
     }
 
     /// Record each of `fields`' `#[facet(migrate::renamed_from = …)]` hint,
@@ -459,38 +459,38 @@ fn collapse(shape: &'static Shape) -> Result<&'static Shape, SchemaError> {
 
 /// The per-width scalar table, mirroring [`facet::ScalarType`].
 ///
-/// Every textual scalar (`str`, `String`, `Cow<str>`) is [`Schema::String`];
+/// Every textual scalar (`str`, `String`, `Cow<str>`) is [`Node::String`];
 /// every numeric width maps 1:1. Scalars outside the table (network address
 /// types, `ConstTypeId`, future additions) are unsupported, exactly as the
 /// encoder's `scalar_bytes` refuses them. `()` (`ScalarType::Unit`) is
 /// likewise refused here: `scalar_bytes` has no textual rendering for it
 /// either — `Display`/`FromStr` on `()` is not implemented — so it cannot
-/// reach a leaf blob. [`Schema::Unit`] remains reachable, but only for a unit
+/// reach a leaf blob. [`Node::Unit`] remains reachable, but only for a unit
 /// struct or a unit enum variant, whose *composite* (not scalar) encoding is
 /// the empty tree those actually write.
-fn scalar_schema(shape: &'static Shape) -> Result<Schema, SchemaError> {
+fn scalar_schema(shape: &'static Shape) -> Result<Node, SchemaError> {
     let Some(scalar) = shape.scalar_type() else {
         return Err(SchemaError::UnsupportedScalar(shape.type_identifier));
     };
     Ok(match scalar {
         ScalarType::Unit => return Err(SchemaError::UnsupportedScalar(shape.type_identifier)),
-        ScalarType::Bool => Schema::Bool,
-        ScalarType::Char => Schema::Char,
-        ScalarType::Str | ScalarType::String | ScalarType::CowStr => Schema::String,
-        ScalarType::F32 => Schema::F32,
-        ScalarType::F64 => Schema::F64,
-        ScalarType::U8 => Schema::U8,
-        ScalarType::U16 => Schema::U16,
-        ScalarType::U32 => Schema::U32,
-        ScalarType::U64 => Schema::U64,
-        ScalarType::U128 => Schema::U128,
-        ScalarType::USize => Schema::USize,
-        ScalarType::I8 => Schema::I8,
-        ScalarType::I16 => Schema::I16,
-        ScalarType::I32 => Schema::I32,
-        ScalarType::I64 => Schema::I64,
-        ScalarType::I128 => Schema::I128,
-        ScalarType::ISize => Schema::ISize,
+        ScalarType::Bool => Node::Bool,
+        ScalarType::Char => Node::Char,
+        ScalarType::Str | ScalarType::String | ScalarType::CowStr => Node::String,
+        ScalarType::F32 => Node::F32,
+        ScalarType::F64 => Node::F64,
+        ScalarType::U8 => Node::U8,
+        ScalarType::U16 => Node::U16,
+        ScalarType::U32 => Node::U32,
+        ScalarType::U64 => Node::U64,
+        ScalarType::U128 => Node::U128,
+        ScalarType::USize => Node::USize,
+        ScalarType::I8 => Node::I8,
+        ScalarType::I16 => Node::I16,
+        ScalarType::I32 => Node::I32,
+        ScalarType::I64 => Node::I64,
+        ScalarType::I128 => Node::I128,
+        ScalarType::ISize => Node::ISize,
         _ => return Err(SchemaError::UnsupportedScalar(shape.type_identifier)),
     })
 }

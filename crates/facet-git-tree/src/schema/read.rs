@@ -1,5 +1,5 @@
 //! Schema-driven deserialization: reading a tree into a full-fidelity
-//! [`facet_value::Value`] guided by a [`SchemaDoc`].
+//! [`facet_value::Value`] guided by a [`Schema`].
 //!
 //! Where the bare heuristic read is documented lossy (numbers come back as
 //! strings, enums as plain objects), a schema supplies the type information
@@ -19,7 +19,7 @@ use crate::de::{
     find_tree_entries, map_pair_entries, sort_by_ordinal, validate_option_entries,
 };
 use crate::error::{DeserializeError, SchemaReadError};
-use crate::schema::{Schema, SchemaDoc, VariantKind};
+use crate::schema::{Node, Schema, VariantKind};
 use crate::{EntryKind, ObjectId};
 
 /// Deserialize the tree at `root` into a full-fidelity [`Value`], guided by
@@ -49,7 +49,7 @@ use crate::{EntryKind, ObjectId};
 /// ```
 pub fn deserialize_value_with_schema<F: Find + ?Sized>(
     root: &ObjectId,
-    doc: &SchemaDoc,
+    doc: &Schema,
     store: &F,
 ) -> Result<Value, SchemaReadError> {
     read_node(root, &doc.root, doc, store, 0)
@@ -60,7 +60,7 @@ pub fn deserialize_value_with_schema<F: Find + ?Sized>(
 /// Exactly [`deserialize_value_with_schema`] with the result discarded.
 pub fn validate_with_schema<F: Find + ?Sized>(
     root: &ObjectId,
-    doc: &SchemaDoc,
+    doc: &Schema,
     store: &F,
 ) -> Result<(), SchemaReadError> {
     deserialize_value_with_schema(root, doc, store).map(|_| ())
@@ -71,13 +71,13 @@ type Entries = Vec<(String, ObjectId, EntryKind)>;
 
 /// Read one schema node's value from the object at `oid`.
 ///
-/// `depth` counts every hop — including [`Schema::Ref`] resolution — against
+/// `depth` counts every hop — including [`Node::Ref`] resolution — against
 /// the same [`MAX_DEPTH`] limit that bounds typed deserialization, so
 /// `Ref`-to-`Ref` chains cannot recurse unboundedly.
 fn read_node<F: Find + ?Sized>(
     oid: &ObjectId,
-    schema: &Schema,
-    doc: &SchemaDoc,
+    schema: &Node,
+    doc: &Schema,
     store: &F,
     depth: usize,
 ) -> Result<Value, SchemaReadError> {
@@ -85,16 +85,16 @@ fn read_node<F: Find + ?Sized>(
         return Err(DeserializeError::MaxDepth(MAX_DEPTH).into());
     }
     match schema {
-        Schema::Unit => {
+        Node::Unit => {
             expect_empty_tree(oid, store)?;
             Ok(Value::NULL)
         }
-        Schema::Bool => match blob_text(oid, store)?.as_str() {
+        Node::Bool => match blob_text(oid, store)?.as_str() {
             "true" => Ok(Value::from(true)),
             "false" => Ok(Value::from(false)),
             other => Err(invalid_scalar("Bool", other)),
         },
-        Schema::Char => {
+        Node::Char => {
             let text = blob_text(oid, store)?;
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
@@ -102,50 +102,50 @@ fn read_node<F: Find + ?Sized>(
                 _ => Err(invalid_scalar("Char", &text)),
             }
         }
-        Schema::String => Ok(Value::from(blob_text(oid, store)?)),
-        Schema::I8 => int_value::<i8, F>(oid, store, "I8"),
-        Schema::I16 => int_value::<i16, F>(oid, store, "I16"),
-        Schema::I32 => int_value::<i32, F>(oid, store, "I32"),
-        Schema::I64 => int_value::<i64, F>(oid, store, "I64"),
-        Schema::I128 => int_value::<i128, F>(oid, store, "I128"),
+        Node::String => Ok(Value::from(blob_text(oid, store)?)),
+        Node::I8 => int_value::<i8, F>(oid, store, "I8"),
+        Node::I16 => int_value::<i16, F>(oid, store, "I16"),
+        Node::I32 => int_value::<i32, F>(oid, store, "I32"),
+        Node::I64 => int_value::<i64, F>(oid, store, "I64"),
+        Node::I128 => int_value::<i128, F>(oid, store, "I128"),
         // `isize`/`usize` have no `From` into the 128-bit widths (their size
         // is platform-defined), but are at most 64 bits on every supported
         // platform, so the widening cast is lossless.
-        Schema::ISize => {
+        Node::ISize => {
             let text = blob_text(oid, store)?;
             let v: isize = text.parse().map_err(|_| invalid_scalar("ISize", &text))?;
             Ok(VNumber::from_i128(v as i128).into())
         }
-        Schema::U8 => uint_value::<u8, F>(oid, store, "U8"),
-        Schema::U16 => uint_value::<u16, F>(oid, store, "U16"),
-        Schema::U32 => uint_value::<u32, F>(oid, store, "U32"),
-        Schema::U64 => uint_value::<u64, F>(oid, store, "U64"),
-        Schema::U128 => uint_value::<u128, F>(oid, store, "U128"),
-        Schema::USize => {
+        Node::U8 => uint_value::<u8, F>(oid, store, "U8"),
+        Node::U16 => uint_value::<u16, F>(oid, store, "U16"),
+        Node::U32 => uint_value::<u32, F>(oid, store, "U32"),
+        Node::U64 => uint_value::<u64, F>(oid, store, "U64"),
+        Node::U128 => uint_value::<u128, F>(oid, store, "U128"),
+        Node::USize => {
             let text = blob_text(oid, store)?;
             let v: usize = text.parse().map_err(|_| invalid_scalar("USize", &text))?;
             Ok(VNumber::from_u128(v as u128).into())
         }
-        Schema::F32 => {
+        Node::F32 => {
             let text = blob_text(oid, store)?;
             let v: f32 = text.parse().map_err(|_| invalid_scalar("F32", &text))?;
             Ok(Value::from(v))
         }
-        Schema::F64 => {
+        Node::F64 => {
             let text = blob_text(oid, store)?;
             let v: f64 = text.parse().map_err(|_| invalid_scalar("F64", &text))?;
             Ok(Value::from(v))
         }
-        Schema::Bytes => Ok(Value::from(find_blob_bytes(oid, store)?)),
-        Schema::Struct(fields) => {
+        Node::Bytes => Ok(Value::from(find_blob_bytes(oid, store)?)),
+        Node::Struct(fields) => {
             let entries = find_tree_entries(oid, store)?;
             Ok(read_struct(&entries, fields, doc, store, depth)?.into())
         }
-        Schema::Tuple(elems) => {
+        Node::Tuple(elems) => {
             let entries = find_tree_entries(oid, store)?;
             Ok(read_tuple(entries, elems, doc, store, depth)?.into())
         }
-        Schema::List(elem) => {
+        Node::List(elem) => {
             let mut entries = find_tree_entries(oid, store)?;
             if crate::marker::is_marker(&entries) {
                 entries.clear();
@@ -157,7 +157,7 @@ fn read_node<F: Find + ?Sized>(
             }
             Ok(array.into())
         }
-        Schema::Array { elem, len } => {
+        Node::Array { elem, len } => {
             let mut entries = find_tree_entries(oid, store)?;
             if crate::marker::is_marker(&entries) {
                 entries.clear();
@@ -179,7 +179,7 @@ fn read_node<F: Find + ?Sized>(
         // does on write: scalar keys name the entries directly; composite keys
         // store ordinal-named `{ k, v }` pair sub-trees. The marker tree
         // written for an empty map (either layout) is stripped up front.
-        Schema::Map { key, value } => {
+        Node::Map { key, value } => {
             let mut entries = find_tree_entries(oid, store)?;
             if crate::marker::is_marker(&entries) {
                 entries.clear();
@@ -203,14 +203,14 @@ fn read_node<F: Find + ?Sized>(
             }
             Ok(array.into())
         }
-        Schema::Optional(inner) => {
+        Node::Optional(inner) => {
             let entries = find_tree_entries(oid, store)?;
             let Some(inner_oid) = validate_option_entries(&entries)? else {
                 return Ok(Value::NULL);
             };
             read_node(&inner_oid, inner, doc, store, depth + 1)
         }
-        Schema::Enum(variants) => {
+        Node::Enum(variants) => {
             let (variant_name, inner_oid) = extract_enum_entry(oid, store)?;
             let Some(kind) = variants.get(&variant_name) else {
                 return Err(SchemaReadError::UnknownVariant {
@@ -252,7 +252,7 @@ fn read_node<F: Find + ?Sized>(
         }
         // A raw tree is opaque to the schema: surface the reference itself,
         // as 40-character lowercase hex, after verifying it is a tree.
-        Schema::RawTree => {
+        Node::RawTree => {
             let mut buf = Vec::new();
             let data = find_object(oid, &mut buf, store)?;
             if data.kind != Kind::Tree {
@@ -269,8 +269,8 @@ fn read_node<F: Find + ?Sized>(
         // than resetting it — otherwise a `Dynamic` node nested near
         // `MAX_DEPTH` could recurse further than an ordinary typed read of
         // the same effective depth ever could.
-        Schema::Dynamic => Ok(deserialize_at_depth::<Value>(oid, store, depth)?),
-        Schema::Ref(name) => {
+        Node::Dynamic => Ok(deserialize_at_depth::<Value>(oid, store, depth)?),
+        Node::Ref(name) => {
             let Some(target) = doc.defs.get(name) else {
                 return Err(SchemaReadError::UnknownRef(name.clone()));
             };
@@ -288,8 +288,8 @@ fn read_node<F: Find + ?Sized>(
 /// error, so every tree conformed to every struct schema.
 fn read_struct<F: Find + ?Sized>(
     entries: &Entries,
-    fields: &BTreeMap<String, Schema>,
-    doc: &SchemaDoc,
+    fields: &BTreeMap<String, Node>,
+    doc: &Schema,
     store: &F,
     depth: usize,
 ) -> Result<VObject, SchemaReadError> {
@@ -315,8 +315,8 @@ fn read_struct<F: Find + ?Sized>(
 /// `elems`, requiring the counts to match.
 fn read_tuple<F: Find + ?Sized>(
     mut entries: Entries,
-    elems: &[Schema],
-    doc: &SchemaDoc,
+    elems: &[Node],
+    doc: &Schema,
     store: &F,
     depth: usize,
 ) -> Result<VArray, SchemaReadError> {
@@ -336,26 +336,26 @@ fn read_tuple<F: Find + ?Sized>(
 
 /// Whether `schema` is a scalar node, deciding the map layout exactly as
 /// `Def::Scalar` does on the write side.
-fn is_scalar_schema(schema: &Schema) -> bool {
+fn is_scalar_schema(schema: &Node) -> bool {
     matches!(
         schema,
-        Schema::Bool
-            | Schema::Char
-            | Schema::String
-            | Schema::I8
-            | Schema::I16
-            | Schema::I32
-            | Schema::I64
-            | Schema::I128
-            | Schema::ISize
-            | Schema::U8
-            | Schema::U16
-            | Schema::U32
-            | Schema::U64
-            | Schema::U128
-            | Schema::USize
-            | Schema::F32
-            | Schema::F64
+        Node::Bool
+            | Node::Char
+            | Node::String
+            | Node::I8
+            | Node::I16
+            | Node::I32
+            | Node::I64
+            | Node::I128
+            | Node::ISize
+            | Node::U8
+            | Node::U16
+            | Node::U32
+            | Node::U64
+            | Node::U128
+            | Node::USize
+            | Node::F32
+            | Node::F64
     )
 }
 
