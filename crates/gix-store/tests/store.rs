@@ -932,6 +932,47 @@ fn update_rebuilds_from_the_entry_the_retry_actually_commits_over() {
     );
 }
 
+/// A caller whose forwarding needs an existing entry can refuse to commit at
+/// all, rather than recreating an entity from nothing, and gets its own error
+/// type back.
+#[test]
+fn try_update_lets_rebuild_refuse_an_absent_entry() {
+    #[derive(Debug)]
+    enum Refusal {
+        Absent,
+        Store(
+            #[expect(dead_code, reason = "carried for Debug, never matched on")] gix_store::Error,
+        ),
+    }
+
+    impl From<gix_store::Error> for Refusal {
+        fn from(err: gix_store::Error) -> Self {
+            Refusal::Store(err)
+        }
+    }
+
+    let store = store();
+    let counter = store.kind::<Counter>(seg("counter"));
+    counter.publish().unwrap();
+
+    let refused = counter.try_update::<Refusal>(&entity("missing"), |current| match current {
+        Some(entry) => Ok((
+            "bump".to_owned(),
+            Counter {
+                n: entry.value.n + 1,
+            },
+        )),
+        None => Err(Refusal::Absent),
+    });
+
+    assert!(matches!(refused, Err(Refusal::Absent)));
+    assert_eq!(
+        counter.get(&entity("missing")).unwrap(),
+        None,
+        "a refused rebuild writes no ref"
+    );
+}
+
 /// A [`Put::anonymous`] whose first `Create` loses to spurious backend
 /// contention — nothing actually landed — retries the very same create
 /// rather than reporting [`Error::NameTaken`]: the name is still free, so

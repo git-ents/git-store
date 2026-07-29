@@ -185,10 +185,27 @@ where
         name: &RefPath,
         rebuild: impl Fn(Option<&Entry<E::Value>>) -> (String, E::Value),
     ) -> Result<ObjectId, Error> {
+        self.try_update(name, |current| Ok(rebuild(current)))
+    }
+
+    /// [`update`](Self::update) where `rebuild` may fail — for a caller whose
+    /// forwarding is conditional on what it commits over, such as one that
+    /// refuses to recreate an entity a concurrent writer just deleted.
+    ///
+    /// `rebuild`'s error type carries through, so it may be the caller's own
+    /// rather than [`Error`].
+    pub fn try_update<Er>(
+        &self,
+        name: &RefPath,
+        rebuild: impl Fn(Option<&Entry<E::Value>>) -> Result<(String, E::Value), Er>,
+    ) -> Result<ObjectId, Er>
+    where
+        Er: From<Error>,
+    {
         let reference = self.reference(name);
         loop {
             let current = self.get_entry(name)?;
-            let (summary, value) = rebuild(current.as_ref());
+            let (summary, value) = rebuild(current.as_ref())?;
             let (message, tree) = commit_body(self, &value, summary)?;
             let parent = current.as_ref().map(|entry| entry.commit);
             let commit = self.store.write_commit(&message, tree, parent)?;
@@ -206,7 +223,7 @@ where
             match self.store.refs().apply(edit) {
                 Ok(()) => return Ok(commit),
                 Err(ApplyError::LostRace { .. }) => continue,
-                Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
+                Err(ApplyError::Backend(err)) => return Err(Error::backend(err).into()),
             }
         }
     }
