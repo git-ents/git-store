@@ -291,13 +291,18 @@ where
     }
 }
 
+fn commit_segment(commit: ObjectId) -> RefSegment {
+    RefSegment::new(commit.to_string()).expect("object id hex is a valid ref segment")
+}
+
 /// The name [`Put::anonymous`] stores a commit under: the commit's own id.
-///
-/// An [`ObjectId`]'s hex rendering is always a valid ref-name segment.
 pub fn entity_name(commit: ObjectId) -> RefPath {
-    RefSegment::new(commit.to_string())
-        .expect("object id hex is a valid ref segment")
-        .into()
+    commit_segment(commit).into()
+}
+
+/// The name [`Put::anonymous_under`] stores a commit under: `<group>/<commit-oid>`.
+pub fn entity_name_under(group: &RefPath, commit: ObjectId) -> RefPath {
+    group.join(&commit_segment(commit))
 }
 
 /// A pending write of one value. Consumed by [`at`](Self::at) or
@@ -334,6 +339,19 @@ where
     /// anonymous entity collides only when two distinct commits share an
     /// object id.
     pub fn anonymous(self) -> Result<ObjectId, Error> {
+        self.anonymous_at(entity_name)
+    }
+
+    /// Commit the value at a fresh name under `group`: `<group>/<commit-oid>`.
+    ///
+    /// Recoverable with [`entity_name_under`]. Grouping this way makes
+    /// listing every anonymous entity in `group` a ref-prefix scan instead of
+    /// a full-store scan.
+    pub fn anonymous_under(self, group: &RefPath) -> Result<ObjectId, Error> {
+        self.anonymous_at(|commit| entity_name_under(group, commit))
+    }
+
+    fn anonymous_at(self, name: impl FnOnce(ObjectId) -> RefPath) -> Result<ObjectId, Error> {
         let kind = self.kind;
         let default = || format!("store {}/<auto>", kind.name);
         let (message, tree) = self.build(default)?;
@@ -342,7 +360,7 @@ where
         // Write the commit before touching any ref, so its id — which
         // determines the entity's name — is known first.
         let commit = store.write_commit(&message, tree, None)?;
-        let reference = kind.reference(&entity_name(commit));
+        let reference = kind.reference(&name(commit));
 
         match store.refs().apply(RefEdit::Create {
             name: reference.clone(),

@@ -19,7 +19,7 @@ mod store;
 
 pub use encoding::{Dynamic, Encoding, Typed};
 pub use error::{Error, Subtree};
-pub use kind::{Kind, KindSchema, Put, entity_name};
+pub use kind::{Kind, KindSchema, Put, entity_name, entity_name_under};
 pub use provenance::SchemaLabel;
 pub use store::{Layout, RepoStore, Store};
 

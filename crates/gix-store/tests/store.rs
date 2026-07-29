@@ -13,7 +13,7 @@ use facet_value::value;
 use gix_refstore::RefEdit;
 use gix_store::{
     Committer, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix, RefSegment, RefStore,
-    Store, Subtree, entity_name,
+    Store, Subtree, entity_name, entity_name_under,
 };
 
 fn seg(s: &str) -> RefSegment {
@@ -722,6 +722,31 @@ fn anonymous_names_an_entity_by_its_whole_commit_id() {
 
     let name = entity_name(commit);
     assert_eq!(name.to_string(), commit.to_string());
+    assert_eq!(store.dynamic(seg("counter")).list().unwrap(), vec![name]);
+}
+
+/// [`gix_store::kind::Put::anonymous_under`] names the entity
+/// `<group>/<commit-oid>`, so entities of one group list as a nested
+/// `RefPath` and [`entity_name_under`] recovers the same name without string
+/// surgery.
+#[test]
+fn anonymous_under_names_an_entity_by_group_and_whole_commit_id() {
+    let store = store();
+    store
+        .dynamic(seg("counter"))
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+
+    let group = entity("batch-1");
+    let commit = store
+        .dynamic(seg("counter"))
+        .write(&value!({ "n": 1 }))
+        .anonymous_under(&group)
+        .unwrap();
+
+    let name = entity_name_under(&group, commit);
+    assert_eq!(name.to_string(), format!("batch-1/{commit}"));
     assert_eq!(store.dynamic(seg("counter")).list().unwrap(), vec![name]);
 }
 
