@@ -279,8 +279,13 @@ fn read_node<F: Find + ?Sized>(
     }
 }
 
-/// Read a name-keyed tree as a [`VObject`], skipping fields whose entry is
-/// missing — the same leniency the typed decoder applies.
+/// Read a name-keyed tree as a [`VObject`], requiring the tree's entries and
+/// the schema's fields to correspond exactly.
+///
+/// Strictness is what makes this function usable as a conformance check
+/// ([`validate_with_schema`]): under the previous leniency a tree sharing no
+/// field name at all with the schema read as an empty object rather than an
+/// error, so every tree conformed to every struct schema.
 fn read_struct<F: Find + ?Sized>(
     entries: &Entries,
     fields: &BTreeMap<String, Schema>,
@@ -290,10 +295,18 @@ fn read_struct<F: Find + ?Sized>(
 ) -> Result<VObject, SchemaReadError> {
     let mut object = VObject::new();
     for (name, schema) in fields {
-        if let Some((_, child_oid, _)) = entries.iter().find(|(n, _, _)| n == name) {
-            let v = read_node(child_oid, schema, doc, store, depth + 1)?;
-            object.insert(name.clone(), v);
-        }
+        let (_, child_oid, _) = entries.iter().find(|(n, _, _)| n == name).ok_or_else(|| {
+            SchemaReadError::MissingField {
+                field: name.clone(),
+            }
+        })?;
+        let v = read_node(child_oid, schema, doc, store, depth + 1)?;
+        object.insert(name.clone(), v);
+    }
+    if let Some((entry, _, _)) = entries.iter().find(|(n, _, _)| !fields.contains_key(n)) {
+        return Err(SchemaReadError::UnexpectedEntry {
+            entry: entry.clone(),
+        });
     }
     Ok(object)
 }

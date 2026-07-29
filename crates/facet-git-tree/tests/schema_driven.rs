@@ -360,3 +360,41 @@ fn validate_ok_and_err() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A struct schema rejects a tree missing one of its fields, rather than
+/// reading the field as absent.
+#[test]
+fn struct_read_requires_every_schema_field() -> anyhow::Result<()> {
+    let (root, store) = serialize(&Point { x: 1.0, y: 2.0 })?;
+    let mut doc = schema_of::<Point>()?;
+    let Some(Schema::Struct(fields)) = doc.defs.get_mut("Point") else {
+        panic!("Point is a struct definition");
+    };
+    fields.insert("z".into(), Schema::F64);
+
+    let err = validate_with_schema(&root, &doc, &store).unwrap_err();
+    assert!(
+        matches!(&err, SchemaReadError::MissingField { field } if field == "z"),
+        "expected MissingField, got {err:?}"
+    );
+    Ok(())
+}
+
+/// A struct schema rejects a tree carrying an entry it does not define, so a
+/// tree that merely overlaps a schema does not pass as conforming.
+#[test]
+fn struct_read_rejects_entries_absent_from_the_schema() -> anyhow::Result<()> {
+    let (root, store) = serialize(&Point { x: 1.0, y: 2.0 })?;
+    let mut doc = schema_of::<Point>()?;
+    let Some(Schema::Struct(fields)) = doc.defs.get_mut("Point") else {
+        panic!("Point is a struct definition");
+    };
+    fields.remove("y");
+
+    let err = validate_with_schema(&root, &doc, &store).unwrap_err();
+    assert!(
+        matches!(&err, SchemaReadError::UnexpectedEntry { entry } if entry == "y"),
+        "expected UnexpectedEntry, got {err:?}"
+    );
+    Ok(())
+}

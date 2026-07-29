@@ -383,6 +383,22 @@ pub enum SchemaReadError {
         /// How many entries the tree actually holds.
         found: usize,
     },
+    /// A struct tree lacks an entry for a field the schema defines.
+    ///
+    /// An `Optional` field is still a present entry — the presence marker
+    /// encodes `None` — so an absent entry always means the tree does not
+    /// describe this schema, never that the field is simply unset.
+    #[error("struct field {field:?} is missing from the tree")]
+    MissingField {
+        /// The field the schema defines and the tree omits.
+        field: String,
+    },
+    /// A struct tree carries an entry the schema does not define.
+    #[error("tree entry {entry:?} has no counterpart in the schema")]
+    UnexpectedEntry {
+        /// The entry name found in the tree.
+        entry: String,
+    },
 }
 
 /// An error produced by schema-directed serialization
