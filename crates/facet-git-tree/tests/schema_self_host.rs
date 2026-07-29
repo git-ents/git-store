@@ -22,7 +22,7 @@ use facet_git_tree::{
 use gix_object::Write as _;
 
 mod common;
-use common::{Event, Nested, Person, TreeNode, find_entry};
+use common::{Event, Nested, Person, TreeNode, find_entry, splice_codec};
 
 /// A schema document roundtrips through the crate's own serialize/deserialize.
 #[test]
@@ -160,18 +160,22 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
 // --- schema-schema pin ---
 
 /// Golden object id of [`SchemaSchema::GENESIS`]: `serialize(&schema_of::<
-/// Schema>()?)`'s root, with no pin spliced in — the value the compiled-in
-/// hex constant in `pin.rs` must match.
+/// Schema>()?)`'s root, with the shared [`codec`] fixture spliced under
+/// `codec` and no pin spliced in — the value the compiled-in hex constant in
+/// `pin.rs` must match.
 ///
 /// This is the golden-oid guard for the whole format, one level above
-/// [`person_schema_golden_oid`]: if this id changes, either `Schema`'s own
-/// shape changed or the encoding did, and every schema tree in every
-/// downstream repository pins a generation that no longer exists. Do not
-/// update the compiled-in constant without releasing accordingly.
+/// [`person_schema_golden_oid`]: if this id changes, `Schema`'s own shape
+/// changed, the encoding did, or the codec fixture did, and every schema tree
+/// in every downstream repository pins a generation that no longer exists.
+/// Do not update the compiled-in constant without releasing accordingly.
 #[test]
 fn genesis_constant_is_real() -> anyhow::Result<()> {
+    let store = ObjectStore::default();
     let doc = schema_of::<Schema>()?;
-    let (root, _store) = serialize(&doc)?;
+    let root = serialize_into(&doc, &store)?;
+    let root = splice_codec(&store, &root);
+
     assert_eq!(&root, SchemaSchema::GENESIS.tree());
     Ok(())
 }
@@ -207,8 +211,10 @@ fn write_pinned_document_has_a_resolvable_pin() -> anyhow::Result<()> {
 /// legitimate, and [`Schema::read_pin`] reads it as genesis.
 #[test]
 fn absent_pin_on_a_known_root_reads_as_genesis() -> anyhow::Result<()> {
+    let store = ObjectStore::default();
     let doc = schema_of::<Schema>()?;
-    let (root, store) = serialize(&doc)?;
+    let root = serialize_into(&doc, &store)?;
+    let root = splice_codec(&store, &root);
 
     let recognized = Schema::read_pin(&root, &store)?;
     assert_eq!(recognized.tree(), SchemaSchema::GENESIS.tree());

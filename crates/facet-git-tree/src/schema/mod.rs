@@ -11,6 +11,7 @@
 //! The normative rules live in `docs/specification.adoc` under
 //! `schema.representation` and `schema.generation`.
 
+pub mod codec;
 pub mod pin;
 #[cfg(feature = "value")]
 pub mod read;

@@ -13,6 +13,10 @@
 //! This tower is separate from the schema-schema tower
 //! ([`crate::schema::pin`]): the two documents evolve independently, and
 //! adding a `Change` variant must not invalidate every stored `Schema`.
+//!
+//! Each generation's own tree also carries a [`codec`] entry, exactly as the
+//! schema-schema tower's does — the *same* fixture, spliced under the same
+//! name, so the two towers share one content-addressed `codec` object.
 
 use gix_object::{Find, Write};
 
@@ -20,8 +24,8 @@ use crate::ObjectId;
 use crate::de::find_tree_entries;
 use crate::error::MigrationPinError;
 use crate::migration::Migration;
-use crate::schema::pin::{decode_oid, splice_pin};
-use crate::schema::{Schema, schema_of};
+use crate::schema::pin::{decode_oid, splice_entry, splice_pin};
+use crate::schema::{Schema, codec, schema_of};
 use crate::ser::serialize_into;
 
 /// One generation of the migration document's own schema: the tree that a
@@ -79,7 +83,7 @@ impl MigrationSchema {
 
 /// Hex text for [`MigrationSchema::GENESIS`]'s tree id, kept as a named
 /// constant so it stays human-checkable against the golden-oid test.
-const GENESIS_HEX: &str = "2804eb09c0825a75f388beb064bbc80666f5aebb";
+const GENESIS_HEX: &str = "0afeeeb9f8e78c485199757eea274bb1d0e8a8db";
 
 /// The current generation's own migration-schema document —
 /// `schema_of::<Migration>()`, unconditionally describable since it is this
@@ -88,10 +92,12 @@ fn migration_schema_doc() -> Schema {
     schema_of::<Migration>().expect("Migration's own shape is always describable")
 }
 
-/// Write the current generation's own tree into `store`, so a pin to it
-/// resolves from the store alone.
+/// Write the current generation's own tree — including its [`codec`]
+/// fixture — into `store`, so a pin to it resolves from the store alone.
 fn materialize<S: Write + Find + ?Sized>(store: &S) -> Result<ObjectId, MigrationPinError> {
     let tree = serialize_into(&migration_schema_doc(), store)?;
+    let codec_tree = codec::codec_tree(store)?;
+    let tree = splice_entry::<S, MigrationPinError>(tree, codec::ENTRY, &codec_tree, store)?;
     match MigrationSchema::CURRENT.parent() {
         Some(parent) => splice_pin(tree, parent.tree(), store),
         None => Ok(tree),

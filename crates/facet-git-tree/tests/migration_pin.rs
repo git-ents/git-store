@@ -6,12 +6,12 @@
 
 use facet_git_tree::{
     EntryKind, Migration, MigrationPinError, MigrationSchema, ObjectStore, SchemaSchema, schema_of,
-    serialize, serialize_into,
+    serialize_into,
 };
 use gix_object::Write as _;
 
 mod common;
-use common::find_entry;
+use common::{find_entry, splice_codec};
 
 fn sample_migration() -> Migration {
     use facet_git_tree::{Change, Op, Target};
@@ -39,15 +39,19 @@ fn sample_migration() -> Migration {
 }
 
 /// Golden object id of [`MigrationSchema::GENESIS`]: `serialize(&schema_of::<
-/// Migration>()?)`'s root, with no pin spliced in — the value the compiled-in
-/// hex constant in `migration/pin.rs` must match.
+/// Migration>()?)`'s root, with the shared [`codec`] fixture spliced under
+/// `codec` and no pin spliced in — the value the compiled-in hex constant in
+/// `migration/pin.rs` must match.
 ///
 /// Do not update the compiled-in constant without releasing accordingly: it
-/// covers `Migration`'s own on-disk shape.
+/// covers `Migration`'s own on-disk shape and the codec fixture.
 #[test]
 fn genesis_constant_is_real() -> anyhow::Result<()> {
+    let store = ObjectStore::default();
     let doc = schema_of::<Migration>()?;
-    let (root, _store) = serialize(&doc)?;
+    let root = serialize_into(&doc, &store)?;
+    let root = splice_codec(&store, &root);
+
     assert_eq!(&root, MigrationSchema::GENESIS.tree());
     Ok(())
 }

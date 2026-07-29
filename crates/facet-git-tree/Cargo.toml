@@ -5,11 +5,16 @@ edition = "2024"
 readme = "README.md"
 
 [features]
-value = ["dep:facet-value"]
+# The pin towers' codec fixture (`schema::codec`) needs a `Def::DynamicValue`
+# type reachable unconditionally — its generation id must not depend on which
+# features happen to be enabled — so `facet-value` is a plain dependency
+# below, not gated by this feature. `value` instead gates the exact-integer /
+# QName / UUID downcast fast paths and the schema-driven read/write modules.
+value = []
 
 [dependencies]
 facet = { version = "0.50.0-rc.0", features = ["reflect"] }
-facet-value = { version = "0.50.0-rc.5", optional = true }
+facet-value = "0.50.0-rc.5"
 gix-hash = { version = "0.25.1", features = ["sha1"] }
 gix-object = "0.62.0"
 gix-odb = "0.82.0"
@@ -17,7 +22,6 @@ thiserror = "2"
 
 [dev-dependencies]
 anyhow = "1"
-facet-value = "0.50.0-rc.5"
 proptest = "1"
 rstest = "0.26"
 

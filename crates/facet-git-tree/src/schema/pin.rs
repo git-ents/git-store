@@ -8,12 +8,17 @@
 //! subtree schema binding splices `{value/, schema/}` onto a data commit's
 //! tree: the pinned tree sits beside the document it governs, reachable by
 //! ordinary tree walking, with nothing to deserialize to find it.
+//!
+//! Each generation's own tree also carries a [`codec`] entry: a fixture value
+//! exercising every construct the codec can encode, so a change to how a
+//! value is *spelled* — not just to `Schema`'s own shape — moves the
+//! generation id too.
 
 use gix_object::{Find, Write};
 
 use crate::de::find_tree_entries;
 use crate::error::{DeserializeError, SchemaPinError, SerializeError};
-use crate::schema::{Schema, schema_of};
+use crate::schema::{Schema, codec, schema_of};
 use crate::ser::serialize_into;
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 
@@ -69,7 +74,7 @@ impl SchemaSchema {
 
 /// Hex text for [`SchemaSchema::GENESIS`]'s tree id, kept as a named constant
 /// so it stays human-checkable against the golden-oid test.
-const GENESIS_HEX: &str = "09961be517a580c73b94d6b84b5a3e7dac2f0ac3";
+const GENESIS_HEX: &str = "b82f18bc0b9f8c5d389d0ca161480365d72b08d6";
 
 /// Decode a 40-character lowercase-hex SHA-1 literal at compile time, so a
 /// malformed constant is a compile error rather than a silent runtime bug.
@@ -107,30 +112,36 @@ fn schema_schema_doc() -> Schema {
     schema_of::<Schema>().expect("Schema's own shape is always describable")
 }
 
-/// Add the [`SchemaSchema::ENTRY`] entry naming `pin` to the already-written
+/// Add an entry named `name` pointing at `target` to the already-written
 /// tree `doc`.
 ///
-/// Shared with `migration::pin`, whose entry name (`MigrationSchema::ENTRY`)
-/// is the same literal `"schema"`; generic over the error so each tower keeps
-/// its own, rather than one collapsing into the other at a call site that
-/// would have to name conditions this function cannot produce.
-pub(crate) fn splice_pin<S, E>(doc: ObjectId, pin: &ObjectId, store: &S) -> Result<ObjectId, E>
+/// Shared by both towers' pin splice ([`splice_pin`]) and their codec splice
+/// (`materialize`, here and in `migration::pin`); generic over the error so
+/// each tower keeps its own, rather than one collapsing into the other at a
+/// call site that would have to name conditions this function cannot
+/// produce.
+pub(crate) fn splice_entry<S, E>(
+    doc: ObjectId,
+    name: &str,
+    target: &ObjectId,
+    store: &S,
+) -> Result<ObjectId, E>
 where
     S: Write + Find + ?Sized,
     E: From<SerializeError> + From<DeserializeError>,
 {
     let mut entries: Vec<TreeEntry> = find_tree_entries(&doc, store)?
         .into_iter()
-        .map(|(name, oid, kind)| TreeEntry {
+        .map(|(entry_name, oid, kind)| TreeEntry {
             mode: EntryMode::from(kind),
-            filename: name.into(),
+            filename: entry_name.into(),
             oid,
         })
         .collect();
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
-        filename: SchemaSchema::ENTRY.into(),
-        oid: *pin,
+        filename: name.into(),
+        oid: *target,
     });
     entries.sort();
     store
@@ -139,10 +150,25 @@ where
         .map_err(E::from)
 }
 
-/// Write the current generation's own tree into `store`, so a pin to it
-/// resolves from the store alone.
+/// Add the [`SchemaSchema::ENTRY`] entry naming `pin` to the already-written
+/// tree `doc`.
+///
+/// Shared with `migration::pin`, whose entry name (`MigrationSchema::ENTRY`)
+/// is the same literal `"schema"`.
+pub(crate) fn splice_pin<S, E>(doc: ObjectId, pin: &ObjectId, store: &S) -> Result<ObjectId, E>
+where
+    S: Write + Find + ?Sized,
+    E: From<SerializeError> + From<DeserializeError>,
+{
+    splice_entry(doc, SchemaSchema::ENTRY, pin, store)
+}
+
+/// Write the current generation's own tree — including its [`codec`]
+/// fixture — into `store`, so a pin to it resolves from the store alone.
 fn materialize<S: Write + Find + ?Sized>(store: &S) -> Result<ObjectId, SchemaPinError> {
     let tree = serialize_into(&schema_schema_doc(), store)?;
+    let codec_tree = codec::codec_tree(store)?;
+    let tree = splice_entry::<S, SchemaPinError>(tree, codec::ENTRY, &codec_tree, store)?;
     match SchemaSchema::CURRENT.parent() {
         Some(parent) => splice_pin(tree, parent.tree(), store),
         None => Ok(tree),

@@ -9,7 +9,11 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use facet::Facet;
-use facet_git_tree::{EntryKind, ObjectId, ObjectStore, TreeEntry, deserialize, serialize};
+use facet_git_tree::schema::codec;
+use facet_git_tree::{
+    EntryKind, EntryMode, ObjectId, ObjectStore, TreeEntry, deserialize, serialize,
+};
+use gix_object::Write as _;
 
 // --- shared fixtures ---
 
@@ -139,6 +143,24 @@ pub fn tree_entries(store: &ObjectStore, tree_id: &ObjectId) -> Vec<TreeEntry> {
     store
         .get_tree(tree_id)
         .unwrap_or_else(|| panic!("expected tree at {tree_id:?}"))
+}
+
+/// Splice a `codec` entry, pointing at the shared codec fixture tree, onto
+/// `tree` — reproducing the pin towers' own `materialize` step from public
+/// API alone, so the golden-oid tests can independently recompute a
+/// generation's own tree rather than trusting the towers' private wiring.
+pub fn splice_codec(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
+    let codec_tree = codec::codec_tree(store).expect("codec fixture writes");
+    let mut entries = store.get_tree(tree).expect("tree present");
+    entries.push(TreeEntry {
+        mode: EntryMode::from(EntryKind::Tree),
+        filename: "codec".into(),
+        oid: codec_tree,
+    });
+    entries.sort();
+    store
+        .write(&gix_object::Tree { entries })
+        .expect("tree write")
 }
 
 // --- roundtrip ---
