@@ -46,6 +46,6 @@ pub use edit::{Expectation, RefEdit};
 pub use gix::actor::Signature;
 pub use gix_hash::ObjectId;
 pub use memory::MemoryRefStore;
-pub use name::{InvalidRefName, RefName, RefPrefix, RefSegment, Violation};
+pub use name::{InvalidRefName, RefName, RefPath, RefPrefix, RefSegment, Violation};
 pub use repo::{GixError, GixRefStore};
 pub use store::{ApplyError, Committer, RefStore};

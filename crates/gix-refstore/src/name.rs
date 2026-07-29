@@ -187,6 +187,91 @@ impl TryFrom<String> for RefSegment {
     }
 }
 
+/// One or more `/`-separated segments *relative* to a namespace (e.g.
+/// `carbonara`, or `<target>/<id>` two levels under a prefix).
+///
+/// What [`RefName::relative_to`] recovers and [`RefPrefix::join_path`]
+/// consumes, so a caller reads the pieces of a nested name off
+/// [`segments`](Self::segments) instead of splitting a string.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RefPath(Vec<RefSegment>);
+
+impl RefPath {
+    /// Validates `value` a segment at a time.
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidRefName> {
+        let value = value.into();
+        match check_path(&value) {
+            // Every segment passed `check_path`, so none needs re-checking.
+            Ok(()) => Ok(Self(
+                value.split('/').map(|s| RefSegment(s.to_owned())).collect(),
+            )),
+            Err(violation) => Err(InvalidRefName { value, violation }),
+        }
+    }
+
+    /// The segments, outermost first. Never empty.
+    pub fn segments(&self) -> &[RefSegment] {
+        &self.0
+    }
+
+    /// The single segment this path is, or `None` when it is nested deeper.
+    pub fn as_segment(&self) -> Option<&RefSegment> {
+        match self.0.as_slice() {
+            [segment] => Some(segment),
+            _ => None,
+        }
+    }
+
+    /// `<self>/<segment>`.
+    pub fn join(&self, segment: &RefSegment) -> RefPath {
+        let mut segments = self.0.clone();
+        segments.push(segment.clone());
+        RefPath(segments)
+    }
+}
+
+impl From<RefSegment> for RefPath {
+    fn from(segment: RefSegment) -> Self {
+        RefPath(vec![segment])
+    }
+}
+
+impl fmt::Display for RefPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, segment) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str("/")?;
+            }
+            f.write_str(&segment.0)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for RefPath {
+    type Err = InvalidRefName;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for RefPath {
+    type Error = InvalidRefName;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for RefPath {
+    type Error = InvalidRefName;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
 /// A whole ref, one or more `/`-separated segments (e.g.
 /// `refs/store/recipe/carbonara`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -213,8 +298,18 @@ impl RefName {
     }
 
     /// What `self` names under `prefix`, or `None` when it is not under it.
-    /// The result may itself contain `/` when the ref is nested deeper.
-    pub fn strip_prefix(&self, prefix: &RefPrefix) -> Option<&str> {
+    pub fn relative_to(&self, prefix: &RefPrefix) -> Option<RefPath> {
+        // A suffix of an already-valid ref, cut at a segment boundary, is
+        // itself always a valid path.
+        RefPath::new(self.suffix(prefix)?).ok()
+    }
+
+    /// Whether `self` lives under `prefix`.
+    pub fn is_under(&self, prefix: &RefPrefix) -> bool {
+        self.suffix(prefix).is_some()
+    }
+
+    fn suffix(&self, prefix: &RefPrefix) -> Option<&str> {
         self.0.strip_prefix(prefix.0.as_str())?.strip_prefix('/')
     }
 }
@@ -278,6 +373,11 @@ impl RefPrefix {
     /// The ref `<self>/<segment>`.
     pub fn join(&self, segment: &RefSegment) -> RefName {
         RefName(format!("{}/{}", self.0, segment.0))
+    }
+
+    /// The ref `<self>/<path>`, one level per segment of `path`.
+    pub fn join_path(&self, path: &RefPath) -> RefName {
+        RefName(format!("{}/{path}", self.0))
     }
 
     /// The namespace `<self>/<segment>`, for listing what lives under it.

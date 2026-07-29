@@ -1,7 +1,7 @@
 //! Every rejection rule in `RefName`/`RefPrefix`/`RefSegment::new`, plus the
 //! accepted shapes and the path-composition helpers built on top of them.
 
-use gix_refstore::{RefName, RefPrefix, RefSegment, Violation};
+use gix_refstore::{RefName, RefPath, RefPrefix, RefSegment, Violation};
 
 fn assert_path_violation(value: &str, expected: Violation) {
     let name_err = RefName::new(value).expect_err("RefName::new should reject");
@@ -12,6 +12,8 @@ fn assert_path_violation(value: &str, expected: Violation) {
         expected,
         "RefPrefix::new({value:?})"
     );
+    let path_err = RefPath::new(value).expect_err("RefPath::new should reject");
+    assert_eq!(path_err.violation(), expected, "RefPath::new({value:?})");
 }
 
 #[test]
@@ -91,19 +93,52 @@ fn name_join() {
 }
 
 #[test]
-fn name_strip_prefix() {
+fn name_relative_to() {
     let prefix = RefPrefix::new("refs/store/foo").expect("valid prefix");
 
     let nested = RefName::new("refs/store/foo/a/b").expect("valid name");
-    assert_eq!(nested.strip_prefix(&prefix), Some("a/b"));
+    assert_eq!(nested.relative_to(&prefix), RefPath::new("a/b").ok());
+    assert!(nested.is_under(&prefix));
 
     let same_leading_text = RefName::new("refs/store/foobar").expect("valid name");
     assert_eq!(
-        same_leading_text.strip_prefix(&prefix),
+        same_leading_text.relative_to(&prefix),
         None,
         "a shared text prefix across a segment boundary is not containment"
     );
+    assert!(!same_leading_text.is_under(&prefix));
 
     let unrelated = RefName::new("refs/heads/main").expect("valid name");
-    assert_eq!(unrelated.strip_prefix(&prefix), None);
+    assert_eq!(unrelated.relative_to(&prefix), None);
+}
+
+#[test]
+fn path_segments() {
+    let path = RefPath::new("a/b").expect("valid path");
+    let segments = ["a", "b"].map(|s| RefSegment::new(s).expect("valid segment"));
+    assert_eq!(path.segments(), segments);
+    assert_eq!(path.as_segment(), None);
+    assert_eq!(path.to_string(), "a/b");
+
+    let flat = RefPath::new("a").expect("valid path");
+    assert_eq!(flat.as_segment(), Some(&segments[0]));
+    assert_eq!(flat.join(&segments[1]), path);
+    assert_eq!(RefPath::from(segments[0].clone()), flat);
+}
+
+#[test]
+fn prefix_join_path() {
+    let prefix = RefPrefix::new("refs/anchors").expect("valid prefix");
+    let path = RefPath::new("a/b").expect("valid path");
+    assert_eq!(prefix.join_path(&path).as_str(), "refs/anchors/a/b");
+}
+
+/// A nested name survives the round trip it exists for: composed onto a
+/// prefix, then recovered from the resulting ref with its segments intact.
+#[test]
+fn path_round_trips_through_a_ref_name() {
+    let prefix = RefPrefix::new("refs/anchors").expect("valid prefix");
+    let path = RefPath::new("dead/beef").expect("valid path");
+    let name = prefix.join_path(&path);
+    assert_eq!(name.relative_to(&prefix), Some(path));
 }

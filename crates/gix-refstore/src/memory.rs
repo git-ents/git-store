@@ -66,7 +66,7 @@ impl RefStore for MemoryRefStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(refs
             .iter()
-            .filter(|(name, _)| name.strip_prefix(prefix).is_some())
+            .filter(|(name, _)| name.is_under(prefix))
             .map(|(name, id)| (name.clone(), *id))
             .collect())
     }

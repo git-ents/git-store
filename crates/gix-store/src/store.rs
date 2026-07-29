@@ -362,10 +362,7 @@ pub(crate) fn list_segments<R: RefStore>(
         .prefixed(prefix)
         .map_err(Error::backend)?
         .into_iter()
-        .filter_map(|(name, _)| {
-            name.strip_prefix(prefix)
-                .and_then(|s| RefSegment::new(s).ok())
-        })
+        .filter_map(|(name, _)| Some(name.relative_to(prefix)?.as_segment()?.clone()))
         .collect())
 }
 

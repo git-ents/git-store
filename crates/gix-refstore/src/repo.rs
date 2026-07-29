@@ -144,7 +144,7 @@ impl RefStore for GixRefStore<'_> {
             let Ok(name) = RefName::new(text) else {
                 continue;
             };
-            if name.strip_prefix(prefix).is_none() {
+            if !name.is_under(prefix) {
                 continue;
             }
             let id = reference.peel_to_id().map_err(GixError::git)?.detach();
