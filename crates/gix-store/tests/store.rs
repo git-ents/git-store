@@ -6,7 +6,8 @@
 
 use facet::Facet;
 use facet_git_tree::{
-    DeserializeError, GitObject, ObjectStore, SchemaPinError, TreeEntry, schema_of,
+    Constant, DeserializeError, GitObject, Hints, ObjectStore, SchemaPinError, Target, TreeEntry,
+    schema_of,
 };
 use facet_value::value;
 use gix_refstore::RefEdit;
@@ -939,4 +940,129 @@ fn an_unrecognized_pin_in_a_data_commits_schema_subtree_is_refused_on_retrieve()
          successful read here would mean a value fetched from elsewhere is decoded against a \
          schema this binary cannot vouch for"
     );
+}
+
+/// Two generations of one type. Derivation pairs definitions by name, so the
+/// type keeps its name across the edge exactly as a real evolution would.
+mod v1 {
+    use facet::Facet;
+    #[derive(Facet)]
+    pub struct Thing {
+        pub name: String,
+    }
+}
+mod v2 {
+    use facet::Facet;
+    #[derive(Facet)]
+    pub struct Thing {
+        pub name: String,
+        pub rank: u32,
+    }
+}
+
+/// `rank` is new on the target side, so the edge derives only with a default
+/// to fill it: without the hint the added field has no image.
+fn rank_defaulted() -> Hints {
+    Hints::new().defaulted(Target::Def("Thing".into()), "rank", Constant::Integer(0))
+}
+
+/// A schema advance records the derived migration in the advancing commit's
+/// own tree, and a value written under the predecessor upcasts through it.
+#[test]
+fn an_old_value_upcasts_to_the_current_schema() {
+    let store = store();
+    let thing = || store.dynamic(seg("thing"));
+
+    thing()
+        .schema()
+        .put(&schema_of::<v1::Thing>().unwrap())
+        .unwrap();
+    thing().put(&seg("a"), &value!({ "name": "old" })).unwrap();
+
+    let advance = thing()
+        .schema()
+        .write(&schema_of::<v2::Thing>().unwrap(), &rank_defaulted())
+        .unwrap();
+
+    // The migration travels in the schema commit's own tree.
+    assert!(
+        thing().schema().migration_at(advance).unwrap().is_some(),
+        "the advancing commit must record its migration"
+    );
+
+    // Reading under the value's own bound schema is unchanged...
+    assert_eq!(
+        thing().get(&seg("a")).unwrap(),
+        Some(value!({ "name": "old" }))
+    );
+    // ...and reading it as the current schema fills the added field.
+    assert_eq!(
+        thing().get_migrated(&seg("a")).unwrap(),
+        Some(value!({ "name": "old", "rank": 0 }))
+    );
+}
+
+/// Upcasting never rewrites: the stored value keeps its object id, so every
+/// attestation bound to that id survives the schema advance.
+#[test]
+fn upcasting_leaves_the_stored_value_untouched() {
+    let store = store();
+    let thing = || store.dynamic(seg("thing"));
+
+    thing()
+        .schema()
+        .put(&schema_of::<v1::Thing>().unwrap())
+        .unwrap();
+    let commit = thing().put(&seg("a"), &value!({ "name": "old" })).unwrap();
+    let before = commit_tree(&store, commit);
+
+    thing()
+        .schema()
+        .write(&schema_of::<v2::Thing>().unwrap(), &rank_defaulted())
+        .unwrap();
+    thing().get_migrated(&seg("a")).unwrap();
+
+    assert_eq!(
+        before,
+        commit_tree(&store, commit),
+        "upcasting must not rewrite the stored value"
+    );
+}
+
+/// A value whose bound schema was never published under this kind has no
+/// chain to the current schema, and says so.
+#[test]
+fn a_foreign_schema_tree_has_no_chain() {
+    let store = store();
+    store
+        .dynamic(seg("thing"))
+        .schema()
+        .put(&schema_of::<v1::Thing>().unwrap())
+        .unwrap();
+    let commit = store
+        .dynamic(seg("thing"))
+        .put(&seg("a"), &value!({ "name": "old" }))
+        .unwrap();
+
+    // Republish an unrelated shape as a *different* kind, then ask that kind
+    // to upcast a commit bound to the first kind's schema.
+    store
+        .dynamic(seg("other"))
+        .schema()
+        .put(&schema_of::<v2::Thing>().unwrap())
+        .unwrap();
+
+    let err = store
+        .dynamic(seg("other"))
+        .get_at_migrated(commit)
+        .unwrap_err();
+    assert!(matches!(err, Error::SchemaNotInHistory { .. }), "{err:?}");
+}
+
+/// The tree of the commit `id` names.
+fn commit_tree(store: &Store<MemoryRefStore, ObjectStore>, id: ObjectId) -> ObjectId {
+    let GitObject::Commit(commit) = store.objects().get(&id).unwrap() else {
+        panic!("expected a commit");
+    };
+    commit.tree
 }

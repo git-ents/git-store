@@ -705,9 +705,25 @@ The check is load-bearing in a way the schema case is not: a reader that silentl
 
 [NOTE]
 ====
-Where a migration lives is owned by higher layers, exactly as link:#schema.representation[schema publication] is.
 `facet-git-tree` provides the pure layer: types, derivation, application, and composition, all as functions over schema documents and values, with no notion of refs or commits.
+Where a migration lives is owned by higher layers, and `gix-store` defines that placement below.
 ====
+
+[role="requirement", id="migration.placement"]
+.Migration Placement
+--
+A schema commit that advances over a predecessor MUST record the migration off that predecessor at the fixed top-level tree entry name `migration` in its own tree, and a commit that establishes a kind MUST NOT carry one.
+
+Storing the migration in the schema commit rather than at a ref of its own is what keeps it reachable.
+A value's commit binds its schema tree; the schema commit carrying that tree also carries the migration off its predecessor; so a fetch of one data ref brings the schema *and* the lineage needed to upcast it, with no dependence on any further ref having been fetched.
+A separate migration ref would reintroduce exactly the failure `gix-store`'s subtree schema binding — the `{value/, schema/}` split on a data commit's tree — exists to prevent.
+
+An edge whose link:#migration.derivation[derivation] is incomplete MUST NOT be recorded.
+A reader that then needs that edge MUST fail, naming the schema commit that lacks it, rather than applying a partial migration: a silently lossy upcast produces a value that looks conformant and is not.
+
+Upcasting a value MUST locate the value's bound schema tree in the schema ref's history and apply each recorded migration from there forward, in order.
+A bound schema tree absent from that history MUST be refused — there is no chain to the current schema — rather than read as though no migration were needed.
+--
 
 === Structural Comparison
 

@@ -3,7 +3,11 @@
 use std::marker::PhantomData;
 
 use facet::Facet;
-use facet_git_tree::{ObjectId, SchemaDoc, SchemaPinError, schema_of};
+use facet_git_tree::{
+    Derivation, Hints, ObjectId, SchemaDoc, SchemaPinError, deserialize_value_with_schema,
+    migration::derive::derive, schema_of,
+};
+use facet_value::Value;
 use gix::objs::{Find, Write};
 use gix_refstore::{ApplyError, Committer, RefEdit, RefName, RefPrefix, RefSegment, RefStore};
 
@@ -99,6 +103,38 @@ where
         E::read(&value_tree, &doc, self.store.objects())
     }
 
+    /// The current value at `name`, upcast to this kind's current schema.
+    ///
+    /// A value written under an older schema is already readable through
+    /// [`get`](Self::get) — its own commit binds the schema it conforms to —
+    /// so this exists for the other half: reading it as the shape the kind
+    /// has *since* evolved into. The result is a [`Value`] whatever the
+    /// kind's encoding, because an upcast is defined over the schema, not
+    /// over any Rust type that happens to match one generation of it.
+    ///
+    /// Nothing is written: the stored value keeps its tree hash, and with it
+    /// every attestation made about it.
+    pub fn get_migrated(&self, name: &RefSegment) -> Result<Option<Value>, Error> {
+        match self
+            .store
+            .refs()
+            .read(&self.reference(name))
+            .map_err(Error::backend)?
+        {
+            Some(tip) => Ok(Some(self.get_at_migrated(tip)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// [`get_migrated`](Self::get_migrated) for one data commit.
+    pub fn get_at_migrated(&self, commit: ObjectId) -> Result<Value, Error> {
+        let root = self.store.commit_tree(commit)?;
+        let (value_tree, schema_tree) = self.store.split(root, commit)?;
+        let doc = SchemaDoc::read_pinned(&schema_tree, self.store.objects())?;
+        let value = deserialize_value_with_schema(&value_tree, &doc, self.store.objects())?;
+        self.schema().upcast(&value, &schema_tree)
+    }
+
     /// An entity's commits, tip-first along first parents; empty when absent.
     pub fn history(&self, name: &RefSegment) -> Result<Vec<ObjectId>, Error> {
         self.store.ref_history(&self.reference(name))
@@ -157,9 +193,9 @@ where
 
 /// A kind's schema ref.
 pub struct KindSchema<'s, R, O> {
-    store: &'s Store<R, O>,
-    kind: RefSegment,
-    reference: RefName,
+    pub(crate) store: &'s Store<R, O>,
+    pub(crate) kind: RefSegment,
+    pub(crate) reference: RefName,
 }
 
 impl<'s, R, O> KindSchema<'s, R, O>
@@ -175,25 +211,45 @@ where
     /// Publish (or evolve) the schema, committing it forward over the current
     /// tip.
     pub fn put(&self, doc: &SchemaDoc) -> Result<ObjectId, Error> {
-        if let Some(tip) = self
+        self.write(doc, &Hints::new())
+    }
+
+    /// [`put`](Self::put) with authoring hints, which are what let a
+    /// remove-plus-add pair be recognised as the rename it actually is.
+    pub fn write(&self, doc: &SchemaDoc, hints: &Hints) -> Result<ObjectId, Error> {
+        let previous = match self
             .store
             .refs()
             .read(&self.reference)
             .map_err(Error::backend)?
         {
-            let tree = self.store.commit_tree(tip)?;
-            // A tip pinned to a schema-schema this binary does not recognize
-            // is refused: publishing over it would silently replace a
-            // document whose meaning was never established here. A tip that
-            // is unpinned or otherwise unreadable stays overwritable —
-            // republishing is the migration path those errors name.
-            if let Err(err @ SchemaPinError::Unrecognized { .. }) =
-                SchemaDoc::read_pin(&tree, self.store.objects())
-            {
-                return Err(err.into());
+            Some(tip) => {
+                let tree = self.store.commit_tree(tip)?;
+                // A tip pinned to a schema-schema this binary does not
+                // recognize is refused: publishing over it would silently
+                // replace a document whose meaning was never established
+                // here. A tip that is unpinned or otherwise unreadable stays
+                // overwritable — republishing is the migration path those
+                // errors name.
+                if let Err(err @ SchemaPinError::Unrecognized { .. }) =
+                    SchemaDoc::read_pin(&tree, self.store.objects())
+                {
+                    return Err(err.into());
+                }
+                SchemaDoc::read_pinned(&tree, self.store.objects()).ok()
             }
+            None => None,
+        };
+        let mut tree = doc.write_pinned(self.store.objects())?;
+        // An edge this build can derive completely is recorded; a partial one
+        // is not, and the gap surfaces at read time as MigrationMissing
+        // naming the commit, rather than as a silently lossy upcast here.
+        if let Some(previous) = previous
+            && let Derivation::Complete(migration) = derive(&previous, doc, hints)
+        {
+            let written = migration.write_pinned(self.store.objects())?;
+            tree = self.store.bind_migration(tree, written)?;
         }
-        let tree = doc.write_pinned(self.store.objects())?;
         let message = format!("schema {}\n", self.kind);
         self.store.commit_forward(&self.reference, &message, tree)
     }

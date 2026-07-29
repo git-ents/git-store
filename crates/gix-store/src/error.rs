@@ -117,6 +117,32 @@ pub enum Error {
     /// known root.
     #[error(transparent)]
     SchemaPin(#[from] facet_git_tree::SchemaPinError),
+    /// The migration-schema pin failed, on the same terms as
+    /// [`SchemaPin`](Self::SchemaPin) but for a stored migration document.
+    #[error(transparent)]
+    MigrationPin(#[from] facet_git_tree::MigrationPinError),
+    /// Applying a migration to a value failed, with the offending path in the
+    /// message.
+    #[error(transparent)]
+    Migration(#[from] facet_git_tree::MigrationError),
+    /// A value's bound schema tree is not one this kind's schema ref ever
+    /// published, so no chain of migrations reaches the current schema.
+    #[error("schema tree {schema_tree} is not in the published history of kind {kind}")]
+    SchemaNotInHistory {
+        /// The kind whose history was searched.
+        kind: RefSegment,
+        /// The schema tree bound into the value's own commit.
+        schema_tree: ObjectId,
+    },
+    /// A schema commit advanced over a predecessor without recording a
+    /// migration, so values written under the predecessor cannot be upcast.
+    #[error("schema commit {commit} of kind {kind} records no migration off its parent")]
+    MigrationMissing {
+        /// The kind whose schema history holds the gap.
+        kind: RefSegment,
+        /// The schema commit lacking a `migration` entry.
+        commit: ObjectId,
+    },
     /// A backend failure from the ref store or object store.
     #[error(transparent)]
     Backend(Box<dyn std::error::Error + Send + Sync + 'static>),

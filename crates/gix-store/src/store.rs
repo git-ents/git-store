@@ -114,6 +114,35 @@ where
         self.with_commit(id, |c| Ok(c.tree()))
     }
 
+    /// A written tree's entries, as the mutable form a splice appends to.
+    pub(crate) fn tree_entries(
+        &self,
+        tree: ObjectId,
+    ) -> Result<Vec<gix::objs::tree::Entry>, Error> {
+        self.with_tree(tree, |tree| {
+            Ok(tree
+                .entries
+                .iter()
+                .map(|entry| gix::objs::tree::Entry {
+                    mode: entry.mode,
+                    filename: entry.filename.into(),
+                    oid: entry.oid.to_owned(),
+                })
+                .collect())
+        })
+    }
+
+    /// One named entry of a tree, or `None` when the tree does not carry it.
+    pub(crate) fn find_entry(&self, tree: ObjectId, name: &str) -> Result<Option<ObjectId>, Error> {
+        self.with_tree(tree, |tree| {
+            Ok(tree
+                .entries
+                .iter()
+                .find(|entry| entry.filename == name)
+                .map(|entry| entry.oid.to_owned()))
+        })
+    }
+
     /// Splice an already-written value tree and schema tree into the
     /// two-entry root a data commit's own tree becomes.
     pub(crate) fn bind_schema(&self, value: ObjectId, schema: ObjectId) -> Result<ObjectId, Error> {
@@ -292,7 +321,7 @@ where
     /// one, `Blob` otherwise. A value encoding and a schema tree are the only
     /// things bound here, and neither is ever executable, a symlink, or a
     /// submodule.
-    fn entry_mode(&self, oid: ObjectId) -> Result<gix::objs::tree::EntryMode, Error> {
+    pub(crate) fn entry_mode(&self, oid: ObjectId) -> Result<gix::objs::tree::EntryMode, Error> {
         let kind = self.kind_of(oid)?.ok_or(Error::MissingObject { oid })?;
         Ok(gix::objs::tree::EntryMode::from(
             if kind == gix::objs::Kind::Tree {
