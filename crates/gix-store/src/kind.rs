@@ -231,10 +231,27 @@ where
     /// The entity names published under this kind, ascending. Nesting is
     /// preserved: an entity named `<a>/<b>` lists as that path, not as `<a>`.
     pub fn list(&self) -> Result<Vec<RefPath>, Error> {
+        self.list_in(self.entities.clone())
+    }
+
+    /// [`list`](Self::list) narrowed to the entities nested under `group`,
+    /// scanning only that subtree's refs instead of every entity of the kind.
+    /// Names come back in full, `group` included.
+    pub fn list_under(&self, group: &RefPath) -> Result<Vec<RefPath>, Error> {
+        let prefix = group
+            .segments()
+            .iter()
+            .fold(self.entities.clone(), |prefix, segment| {
+                prefix.child(segment)
+            });
+        self.list_in(prefix)
+    }
+
+    fn list_in(&self, prefix: RefPrefix) -> Result<Vec<RefPath>, Error> {
         let mut names: Vec<RefPath> = self
             .store
             .refs()
-            .prefixed(&self.entities)
+            .prefixed(&prefix)
             .map_err(Error::backend)?
             .into_iter()
             .filter_map(|(name, _)| name.relative_to(&self.entities))

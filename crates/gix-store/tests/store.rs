@@ -175,6 +175,19 @@ fn entities_nest_under_a_single_kind_and_schema() {
         ["beef/one", "dead/one", "dead/two"].map(entity)
     );
     assert_eq!(
+        note.list_under(&entity("dead")).unwrap(),
+        ["dead/one", "dead/two"].map(entity),
+        "one group's entities, named in full, without scanning the others"
+    );
+    assert_eq!(
+        note.list_under(&entity("beef")).unwrap(),
+        ["beef/one"].map(entity)
+    );
+    assert!(
+        note.list_under(&entity("bee")).unwrap().is_empty(),
+        "a shared text prefix across a segment boundary is not a group"
+    );
+    assert_eq!(
         note.reference(&entity("dead/one")).as_str(),
         "refs/store/note/dead/one"
     );
