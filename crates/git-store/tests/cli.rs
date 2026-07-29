@@ -233,3 +233,38 @@ fn preexisting_schema_json_files_load_via_file_flag() {
         assert!(ok, "schema put {kind} from file failed: {err}");
     }
 }
+
+/// A nested entity name is one argument, not a special syntax: it stores,
+/// lists as the path it was given, and lands at the ref that spells it out.
+#[test]
+fn entity_names_may_nest() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "schema put failed: {err}");
+
+    let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
+    let (_, err, ok) = run(path, Some(recipe), &["put", "recipe", "italian/carbonara"]);
+    assert!(ok, "nested put failed: {err}");
+
+    let (out, err, ok) = run(path, None, &["get", "recipe", "italian/carbonara"]);
+    assert!(ok, "nested get failed: {err}");
+    assert!(out.contains("\"serves\": 4"), "get output: {out}");
+
+    let (out, _, ok) = run(path, None, &["ls", "recipe"]);
+    assert!(ok);
+    assert_eq!(out.trim(), "italian/carbonara");
+
+    let refs = Command::new("git")
+        .current_dir(path)
+        .args(["for-each-ref", "--format=%(refname)", "refs/store"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&refs.stdout).trim(),
+        "refs/store/recipe/italian/carbonara"
+    );
+}

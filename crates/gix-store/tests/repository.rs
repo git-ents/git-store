@@ -10,11 +10,15 @@ use std::collections::HashSet;
 use facet::Facet;
 use facet_git_tree::schema_of;
 use facet_value::value;
-use gix_store::{Layout, RefPrefix, RefSegment, RepoStore};
+use gix_store::{Layout, RefPath, RefPrefix, RefSegment, RepoStore};
 use test_support::init_repo;
 
 fn seg(s: &str) -> RefSegment {
     RefSegment::new(s).unwrap()
+}
+
+fn entity(s: &str) -> RefPath {
+    RefPath::new(s).unwrap()
 }
 
 #[derive(Facet)]
@@ -43,7 +47,7 @@ fn default_open_still_uses_refs_store_and_refs_schema() {
         .unwrap();
     store
         .dynamic(seg("counter"))
-        .put(&seg("c"), &value!({ "n": 1 }))
+        .put(&entity("c"), &value!({ "n": 1 }))
         .unwrap();
 
     assert!(
@@ -76,7 +80,7 @@ fn custom_layout_lands_refs_under_the_custom_namespace() {
         .unwrap();
     store
         .dynamic(seg("module"))
-        .put(&seg("a"), &value!({ "n": 1 }))
+        .put(&entity("a"), &value!({ "n": 1 }))
         .unwrap();
 
     assert!(repo.find_reference("refs/meta/rules-schema/module").is_ok());
@@ -123,7 +127,7 @@ fn fetched_data_ref_reads_back_without_any_schema_ref() {
     let carbonara = value!({ "title": "Carbonara", "serves": 4 });
     let commit = origin_store
         .dynamic(seg("recipe"))
-        .put(&seg("carbonara"), &carbonara)
+        .put(&entity("carbonara"), &carbonara)
         .unwrap();
 
     // A fresh repository, never told about `recipe`'s schema at all.
@@ -164,7 +168,7 @@ fn fetched_data_ref_reads_back_without_any_schema_ref() {
     assert_eq!(
         consumer_store
             .dynamic(seg("recipe"))
-            .get(&seg("carbonara"))
+            .get(&entity("carbonara"))
             .unwrap(),
         Some(carbonara)
     );
@@ -198,7 +202,7 @@ fn concurrent_writers_land_a_linear_history() {
                     let n = (t * WRITES + i) as u32;
                     store
                         .dynamic(seg("counter"))
-                        .put(&seg("c"), &value!({ "n": (n) }))
+                        .put(&entity("c"), &value!({ "n": (n) }))
                         .unwrap();
                 }
             });
@@ -207,7 +211,7 @@ fn concurrent_writers_land_a_linear_history() {
 
     let repo = gix::open(path).unwrap();
     let store = RepoStore::open(&repo);
-    let history = store.dynamic(seg("counter")).history(&seg("c")).unwrap();
+    let history = store.dynamic(seg("counter")).history(&entity("c")).unwrap();
 
     // Every write committed forward: none was lost to a race, and the chain is
     // linear (distinct commits, one per write).
@@ -255,7 +259,7 @@ fn committed_tree_has_the_plumbing_shape_stock_git_expects() {
     let carbonara = value!({ "title": "Carbonara", "serves": 4, "steps": ["boil", "fry"] });
     let commit = store
         .dynamic(seg("recipe"))
-        .put(&seg("carbonara"), &carbonara)
+        .put(&entity("carbonara"), &carbonara)
         .unwrap();
 
     let commit_obj = repo.find_commit(commit).unwrap();

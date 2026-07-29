@@ -12,12 +12,16 @@ use facet_git_tree::{
 use facet_value::value;
 use gix_refstore::RefEdit;
 use gix_store::{
-    Committer, Error, MemoryRefStore, ObjectId, RefName, RefPrefix, RefSegment, RefStore, Store,
-    Subtree,
+    Committer, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix, RefSegment, RefStore,
+    Store, Subtree, entity_name,
 };
 
 fn seg(s: &str) -> RefSegment {
     RefSegment::new(s).unwrap()
+}
+
+fn entity(s: &str) -> RefPath {
+    RefPath::new(s).unwrap()
 }
 
 fn store() -> Store<MemoryRefStore, ObjectStore> {
@@ -125,22 +129,61 @@ fn store_retrieve_list_and_schema_roundtrip() {
     let carbonara = value!({ "title": "Carbonara", "serves": 4, "steps": ["boil", "fry"] });
     store
         .dynamic(seg("recipe"))
-        .put(&seg("carbonara"), &carbonara)
+        .put(&entity("carbonara"), &carbonara)
         .unwrap();
 
     assert_eq!(
-        store.dynamic(seg("recipe")).get(&seg("carbonara")).unwrap(),
+        store
+            .dynamic(seg("recipe"))
+            .get(&entity("carbonara"))
+            .unwrap(),
         Some(carbonara)
     );
     assert_eq!(
-        store.dynamic(seg("recipe")).get(&seg("missing")).unwrap(),
+        store
+            .dynamic(seg("recipe"))
+            .get(&entity("missing"))
+            .unwrap(),
         None
     );
     assert_eq!(
         store.dynamic(seg("recipe")).list().unwrap(),
-        vec![seg("carbonara")]
+        vec![entity("carbonara")]
     );
     assert_eq!(store.kinds().unwrap(), vec![seg("recipe")]);
+}
+
+/// An entity name may nest, so an identity that is naturally composite —
+/// `<target>/<id>` — groups under its first segment without minting a kind,
+/// and with it a published schema, per group.
+#[test]
+fn entities_nest_under_a_single_kind_and_schema() {
+    let store = store();
+    let note = store.dynamic(seg("note"));
+    note.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+
+    for name in ["dead/two", "dead/one", "beef/one"] {
+        note.put(&entity(name), &value!({ "n": 1 })).unwrap();
+    }
+
+    assert_eq!(
+        note.list().unwrap(),
+        ["beef/one", "dead/one", "dead/two"].map(entity)
+    );
+    assert_eq!(
+        note.reference(&entity("dead/one")).as_str(),
+        "refs/store/note/dead/one"
+    );
+    assert_eq!(
+        note.get(&entity("dead/one")).unwrap(),
+        Some(value!({ "n": 1 }))
+    );
+    assert!(note.remove(&entity("dead/one")).unwrap());
+    assert_eq!(
+        store.kinds().unwrap(),
+        vec![seg("note")],
+        "three groups, one kind, one schema"
+    );
 }
 
 #[test]
@@ -149,7 +192,7 @@ fn unknown_kind_is_a_data_error() {
 
     let err = store
         .dynamic(seg("ghost"))
-        .put(&seg("x"), &value!({ "a": 1 }))
+        .put(&entity("x"), &value!({ "a": 1 }))
         .unwrap_err();
     assert!(matches!(err, Error::NoSchema { .. }), "{err:?}");
 }
@@ -174,7 +217,7 @@ fn old_versions_stay_readable_after_schema_evolves() {
         .put(&schema_of::<V1>().unwrap())
         .unwrap();
     let v1 = value!({ "name": "old" });
-    let old_commit = store.dynamic(seg("thing")).put(&seg("a"), &v1).unwrap();
+    let old_commit = store.dynamic(seg("thing")).put(&entity("a"), &v1).unwrap();
 
     // Evolve the kind: the schema ref moves forward, v1's tree stays reachable.
     store
@@ -187,9 +230,9 @@ fn old_versions_stay_readable_after_schema_evolves() {
     assert_eq!(store.dynamic(seg("thing")).get_at(old_commit).unwrap(), v1);
     // A new value conforming to v2 stores and reads under the evolved schema.
     let v2 = value!({ "name": "new", "rank": 1 });
-    store.dynamic(seg("thing")).put(&seg("b"), &v2).unwrap();
+    store.dynamic(seg("thing")).put(&entity("b"), &v2).unwrap();
     assert_eq!(
-        store.dynamic(seg("thing")).get(&seg("b")).unwrap(),
+        store.dynamic(seg("thing")).get(&entity("b")).unwrap(),
         Some(v2)
     );
 }
@@ -225,26 +268,29 @@ fn custom_layout_roundtrips_store_retrieve_and_history() {
         .unwrap();
     store
         .dynamic(seg("module"))
-        .put(&seg("a"), &value!({ "n": 1 }))
+        .put(&entity("a"), &value!({ "n": 1 }))
         .unwrap();
     store
         .dynamic(seg("module"))
-        .put(&seg("a"), &value!({ "n": 2 }))
+        .put(&entity("a"), &value!({ "n": 2 }))
         .unwrap();
 
     assert_eq!(
-        store.dynamic(seg("module")).get(&seg("a")).unwrap(),
+        store.dynamic(seg("module")).get(&entity("a")).unwrap(),
         Some(value!({ "n": 2 }))
     );
     assert_eq!(
         store
             .dynamic(seg("module"))
-            .history(&seg("a"))
+            .history(&entity("a"))
             .unwrap()
             .len(),
         2
     );
-    assert_eq!(store.dynamic(seg("module")).list().unwrap(), vec![seg("a")]);
+    assert_eq!(
+        store.dynamic(seg("module")).list().unwrap(),
+        vec![entity("a")]
+    );
     assert_eq!(store.kinds().unwrap(), vec![seg("module")]);
 
     // Refs actually landed under the custom namespace, not the default one.
@@ -285,7 +331,7 @@ fn schema_provenance_reads_the_trailer_written_at_store_time() {
         .unwrap();
     let data_commit = store
         .dynamic(seg("counter"))
-        .put(&seg("c"), &value!({ "n": 1 }))
+        .put(&entity("c"), &value!({ "n": 1 }))
         .unwrap();
 
     assert_eq!(
@@ -364,10 +410,10 @@ fn a_pre_binding_commit_whose_value_has_value_and_schema_fields_is_not_mistaken_
     // Stored properly, the same colliding value round-trips through the split.
     store
         .dynamic(seg("colliding"))
-        .put(&seg("new"), &colliding)
+        .put(&entity("new"), &colliding)
         .expect("store colliding value");
     assert_eq!(
-        store.dynamic(seg("colliding")).get(&seg("new")).unwrap(),
+        store.dynamic(seg("colliding")).get(&entity("new")).unwrap(),
         Some(colliding)
     );
 }
@@ -388,7 +434,7 @@ fn retrieve_at_reports_a_subtree_object_that_is_not_present() {
         .unwrap();
     let commit = store
         .dynamic(seg("counter"))
-        .put(&seg("c"), &value!({ "n": 1 }))
+        .put(&entity("c"), &value!({ "n": 1 }))
         .unwrap();
 
     // The schema entry names a tree that was never written to this store.
@@ -457,7 +503,7 @@ fn store_anonymous_binds_the_schema_by_subtree() {
     let schema_tree = schema_commit_obj.tree;
 
     let counter = value!({ "n": 7 });
-    let (name, commit) = store
+    let commit = store
         .dynamic(seg("counter"))
         .write(&counter)
         .anonymous()
@@ -479,7 +525,10 @@ fn store_anonymous_binds_the_schema_by_subtree() {
         counter
     );
     assert_eq!(
-        store.dynamic(seg("counter")).get(&name).unwrap(),
+        store
+            .dynamic(seg("counter"))
+            .get(&entity_name(commit))
+            .unwrap(),
         Some(counter)
     );
 }
@@ -495,12 +544,15 @@ fn delete_removes_an_entity() {
         .unwrap();
     store
         .dynamic(seg("counter"))
-        .put(&seg("c"), &value!({ "n": 1 }))
+        .put(&entity("c"), &value!({ "n": 1 }))
         .unwrap();
 
-    assert!(store.dynamic(seg("counter")).remove(&seg("c")).unwrap());
-    assert_eq!(store.dynamic(seg("counter")).get(&seg("c")).unwrap(), None);
-    assert!(!store.dynamic(seg("counter")).remove(&seg("c")).unwrap());
+    assert!(store.dynamic(seg("counter")).remove(&entity("c")).unwrap());
+    assert_eq!(
+        store.dynamic(seg("counter")).get(&entity("c")).unwrap(),
+        None
+    );
+    assert!(!store.dynamic(seg("counter")).remove(&entity("c")).unwrap());
 }
 
 // --- typed API ---
@@ -516,9 +568,9 @@ fn typed_kind_publish_put_get_roundtrips_a_real_value() {
         serves: 4,
         steps: vec!["boil".into(), "fry".into()],
     };
-    recipe.put(&seg("carbonara"), &carbonara).unwrap();
+    recipe.put(&entity("carbonara"), &carbonara).unwrap();
 
-    assert_eq!(recipe.get(&seg("carbonara")).unwrap(), Some(carbonara));
+    assert_eq!(recipe.get(&entity("carbonara")).unwrap(), Some(carbonara));
 }
 
 /// The native `Typed` encoding and the schema-directed `Dynamic` one are
@@ -541,31 +593,34 @@ fn typed_and_dynamic_kinds_interoperate_over_the_same_refs() {
     // Written typed, read dynamic.
     store
         .kind::<Recipe>(seg("recipe"))
-        .put(&seg("a"), &carbonara)
+        .put(&entity("a"), &carbonara)
         .unwrap();
     assert_eq!(
-        store.dynamic(seg("recipe")).get(&seg("a")).unwrap(),
+        store.dynamic(seg("recipe")).get(&entity("a")).unwrap(),
         Some(carbonara_value.clone())
     );
 
     // Written dynamic, read typed.
     store
         .dynamic(seg("recipe"))
-        .put(&seg("b"), &carbonara_value)
+        .put(&entity("b"), &carbonara_value)
         .unwrap();
     assert_eq!(
-        store.kind::<Recipe>(seg("recipe")).get(&seg("b")).unwrap(),
+        store
+            .kind::<Recipe>(seg("recipe"))
+            .get(&entity("b"))
+            .unwrap(),
         Some(carbonara.clone())
     );
 
     // The same content, written independently through both encodings with no
     // shared parent, lands on the same commit.
-    let (typed_name, typed_commit) = store
+    let typed_commit = store
         .kind::<Recipe>(seg("recipe"))
         .write(&carbonara)
         .anonymous()
         .unwrap();
-    let (dynamic_name, dynamic_commit) = store
+    let dynamic_commit = store
         .dynamic(seg("recipe"))
         .write(&carbonara_value)
         .anonymous()
@@ -574,7 +629,6 @@ fn typed_and_dynamic_kinds_interoperate_over_the_same_refs() {
         typed_commit, dynamic_commit,
         "typed and schema-directed encodings should be byte-identical"
     );
-    assert_eq!(typed_name, dynamic_name);
 }
 
 /// A typed `put` whose `T` no longer matches the published schema fails with
@@ -592,7 +646,7 @@ fn typed_put_against_a_mismatched_published_schema_fails_as_a_schema_read_error(
 
     let err = store
         .kind::<Counter>(seg("thing"))
-        .put(&seg("a"), &Counter { n: 1 })
+        .put(&entity("a"), &Counter { n: 1 })
         .unwrap_err();
     assert!(matches!(err, Error::SchemaRead(_)), "{err:?}");
 }
@@ -609,7 +663,7 @@ fn put_message_sets_the_commit_summary_and_keeps_the_schema_trailer() {
         .dynamic(seg("counter"))
         .write(&value!({ "n": 1 }))
         .message("bump the counter")
-        .at(&seg("c"))
+        .at(&entity("c"))
         .unwrap();
 
     let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap() else {
@@ -646,6 +700,29 @@ fn anonymous_write_of_identical_content_twice_is_idempotent() {
         .anonymous()
         .unwrap();
     assert_eq!(first, second);
+}
+
+/// An anonymous entity is named by its commit id *in full*, so two unrelated
+/// values collide only when their commits do. A truncation would put the
+/// entity namespace's collision odds far below the object database's own.
+#[test]
+fn anonymous_names_an_entity_by_its_whole_commit_id() {
+    let store = store();
+    store
+        .dynamic(seg("counter"))
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+
+    let commit = store
+        .dynamic(seg("counter"))
+        .write(&value!({ "n": 1 }))
+        .anonymous()
+        .unwrap();
+
+    let name = entity_name(commit);
+    assert_eq!(name.to_string(), commit.to_string());
+    assert_eq!(store.dynamic(seg("counter")).list().unwrap(), vec![name]);
 }
 
 // --- schema-schema pin ---
@@ -878,16 +955,19 @@ fn an_unrecognized_pin_in_a_data_commits_schema_subtree_is_refused_on_retrieve()
     let carbonara = value!({ "title": "Carbonara", "serves": 4, "steps": ["boil"] });
     store
         .dynamic(seg("recipe"))
-        .put(&seg("carbonara"), &carbonara)
+        .put(&entity("carbonara"), &carbonara)
         .unwrap();
     // Reading works before the rewrite, so the failure below is the pin
     // gate rather than a fixture that never read in the first place.
     assert_eq!(
-        store.dynamic(seg("recipe")).get(&seg("carbonara")).unwrap(),
+        store
+            .dynamic(seg("recipe"))
+            .get(&entity("carbonara"))
+            .unwrap(),
         Some(carbonara)
     );
 
-    let reference = store.dynamic(seg("recipe")).reference(&seg("carbonara"));
+    let reference = store.dynamic(seg("recipe")).reference(&entity("carbonara"));
     let tip = store.refs().read(&reference).unwrap().unwrap();
     let GitObject::Commit(tip_obj) = store.objects().get(&tip).unwrap() else {
         panic!("expected a commit");
@@ -928,7 +1008,7 @@ fn an_unrecognized_pin_in_a_data_commits_schema_subtree_is_refused_on_retrieve()
 
     let err = store
         .dynamic(seg("recipe"))
-        .get(&seg("carbonara"))
+        .get(&entity("carbonara"))
         .unwrap_err();
     assert!(
         matches!(
@@ -977,7 +1057,9 @@ fn an_old_value_upcasts_to_the_current_schema() {
         .schema()
         .put(&schema_of::<v1::Thing>().unwrap())
         .unwrap();
-    thing().put(&seg("a"), &value!({ "name": "old" })).unwrap();
+    thing()
+        .put(&entity("a"), &value!({ "name": "old" }))
+        .unwrap();
 
     let advance = thing()
         .schema()
@@ -992,12 +1074,12 @@ fn an_old_value_upcasts_to_the_current_schema() {
 
     // Reading under the value's own bound schema is unchanged...
     assert_eq!(
-        thing().get(&seg("a")).unwrap(),
+        thing().get(&entity("a")).unwrap(),
         Some(value!({ "name": "old" }))
     );
     // ...and reading it as the current schema fills the added field.
     assert_eq!(
-        thing().get_migrated(&seg("a")).unwrap(),
+        thing().get_migrated(&entity("a")).unwrap(),
         Some(value!({ "name": "old", "rank": 0 }))
     );
 }
@@ -1013,14 +1095,16 @@ fn upcasting_leaves_the_stored_value_untouched() {
         .schema()
         .put(&schema_of::<v1::Thing>().unwrap())
         .unwrap();
-    let commit = thing().put(&seg("a"), &value!({ "name": "old" })).unwrap();
+    let commit = thing()
+        .put(&entity("a"), &value!({ "name": "old" }))
+        .unwrap();
     let before = commit_tree(&store, commit);
 
     thing()
         .schema()
         .write(&schema_of::<v2::Thing>().unwrap(), &rank_defaulted())
         .unwrap();
-    thing().get_migrated(&seg("a")).unwrap();
+    thing().get_migrated(&entity("a")).unwrap();
 
     assert_eq!(
         before,
@@ -1041,7 +1125,7 @@ fn a_foreign_schema_tree_has_no_chain() {
         .unwrap();
     let commit = store
         .dynamic(seg("thing"))
-        .put(&seg("a"), &value!({ "name": "old" }))
+        .put(&entity("a"), &value!({ "name": "old" }))
         .unwrap();
 
     // Republish an unrelated shape as a *different* kind, then ask that kind

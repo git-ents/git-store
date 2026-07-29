@@ -18,7 +18,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use facet_git_tree::{Node, Schema, VariantKind};
 use facet_value::{Value, from_value};
-use gix_store::{Dynamic, GixRefStore, Kind, ObjectId, RefSegment, RepoStore};
+use gix_store::{Dynamic, GixRefStore, Kind, ObjectId, RefPath, RefSegment, RepoStore};
 
 /// A handle on one kind, over the CLI's own repo-backed store.
 pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, GixRefStore<'r>, &'r gix::OdbHandle>;
@@ -130,7 +130,7 @@ fn main() -> Result<()> {
         Some(Command::Get { kind, name }) => {
             let (name, rev) = split_name_rev(&name);
             let handle = store.dynamic(segment("kind", &kind)?);
-            let name_seg = segment("name", name)?;
+            let name_seg = entity(name)?;
             let value = match rev {
                 Some(rev) => {
                     let oid = resolve_at(&repo, &handle, &name_seg, rev)?;
@@ -147,19 +147,19 @@ fn main() -> Result<()> {
             };
             println!("{}", to_json(&value)?);
         }
-        Some(Command::List { kind }) => print_lines(match &kind {
-            Some(kind) => store.dynamic(segment("kind", kind)?).list()?,
-            None => store.kinds()?,
-        }),
+        Some(Command::List { kind: Some(kind) }) => {
+            print_lines(store.dynamic(segment("kind", &kind)?).list()?)
+        }
+        Some(Command::List { kind: None }) => print_lines(store.kinds()?),
         Some(Command::Log { kind, name }) => {
-            let name_seg = segment("name", &name)?;
+            let name_seg = entity(&name)?;
             print_log(
                 &repo,
                 store.dynamic(segment("kind", &kind)?).history(&name_seg)?,
             )?
         }
         Some(Command::Rm { kind, name }) => {
-            let name_seg = segment("name", &name)?;
+            let name_seg = entity(&name)?;
             if !store.dynamic(segment("kind", &kind)?).remove(&name_seg)? {
                 bail!("no entity {kind}/{name}");
             }
@@ -214,6 +214,12 @@ fn segment(what: &str, value: &str) -> Result<RefSegment> {
     RefSegment::new(value).with_context(|| format!("invalid {what} {value:?}"))
 }
 
+/// Validate an entity-name argument, which may name a nested entity
+/// (`<a>/<b>`) as well as a flat one.
+fn entity(value: &str) -> Result<RefPath> {
+    RefPath::new(value).with_context(|| format!("invalid name {value:?}"))
+}
+
 /// The store action: gather JSON (file, stdin, or the editor), then commit it
 /// forward under the kind at the chosen name.
 fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
@@ -226,7 +232,7 @@ fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
         interactive,
     } = args;
     let name = name.as_deref().unwrap_or(&kind);
-    let name_seg = segment("name", name)?;
+    let name_seg = entity(name)?;
     let handle = store.dynamic(segment("kind", &kind)?);
 
     let value = if interactive {
@@ -288,7 +294,7 @@ fn split_name_rev(token: &str) -> (&str, Option<&str>) {
 fn resolve_at(
     repo: &gix::Repository,
     kind: &DynKind<'_, '_>,
-    name: &RefSegment,
+    name: &RefPath,
     rev: &str,
 ) -> Result<ObjectId> {
     let spec = if rev.starts_with(['~', '^', '@']) {
@@ -364,7 +370,7 @@ fn edit_in_editor(seed: &str) -> Result<String> {
 }
 
 /// Print one item per line.
-fn print_lines(items: Vec<RefSegment>) {
+fn print_lines<T: std::fmt::Display>(items: Vec<T>) {
     for item in items {
         println!("{item}");
     }

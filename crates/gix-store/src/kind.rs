@@ -9,11 +9,13 @@ use facet_git_tree::{
 };
 use facet_value::Value;
 use gix::objs::{Find, Write};
-use gix_refstore::{ApplyError, Committer, RefEdit, RefName, RefPrefix, RefSegment, RefStore};
+use gix_refstore::{
+    ApplyError, Committer, RefEdit, RefName, RefPath, RefPrefix, RefSegment, RefStore,
+};
 
 use crate::encoding::{Encoding, Typed};
 use crate::error::Error;
-use crate::store::{Store, list_segments};
+use crate::store::Store;
 
 /// One kind: its schema ref and the entities under it.
 pub struct Kind<'s, E, R, O> {
@@ -53,8 +55,8 @@ where
     }
 
     /// The ref an entity of this kind lives at.
-    pub fn reference(&self, name: &RefSegment) -> RefName {
-        self.entities.join(name)
+    pub fn reference(&self, name: &RefPath) -> RefName {
+        self.entities.join_path(name)
     }
 
     /// This kind's schema.
@@ -67,7 +69,7 @@ where
     }
 
     /// Store `value` at `name`, with a default commit summary.
-    pub fn put(&self, name: &RefSegment, value: &E::Value) -> Result<ObjectId, Error> {
+    pub fn put(&self, name: &RefPath, value: &E::Value) -> Result<ObjectId, Error> {
         self.write(value).at(name)
     }
 
@@ -82,7 +84,7 @@ where
     }
 
     /// The current value at `name`, or `None` when absent.
-    pub fn get(&self, name: &RefSegment) -> Result<Option<E::Value>, Error> {
+    pub fn get(&self, name: &RefPath) -> Result<Option<E::Value>, Error> {
         match self
             .store
             .refs()
@@ -114,7 +116,7 @@ where
     ///
     /// Nothing is written: the stored value keeps its tree hash, and with it
     /// every attestation made about it.
-    pub fn get_migrated(&self, name: &RefSegment) -> Result<Option<Value>, Error> {
+    pub fn get_migrated(&self, name: &RefPath) -> Result<Option<Value>, Error> {
         match self
             .store
             .refs()
@@ -136,17 +138,30 @@ where
     }
 
     /// An entity's commits, tip-first along first parents; empty when absent.
-    pub fn history(&self, name: &RefSegment) -> Result<Vec<ObjectId>, Error> {
+    pub fn history(&self, name: &RefPath) -> Result<Vec<ObjectId>, Error> {
         self.store.ref_history(&self.reference(name))
     }
 
-    /// The entity names published under this kind, ascending.
-    pub fn list(&self) -> Result<Vec<RefSegment>, Error> {
-        list_segments(self.store.refs(), &self.entities)
+    /// The entity names published under this kind, ascending. Nesting is
+    /// preserved: an entity named `<a>/<b>` lists as that path, not as `<a>`.
+    pub fn list(&self) -> Result<Vec<RefPath>, Error> {
+        let mut names: Vec<RefPath> = self
+            .store
+            .refs()
+            .prefixed(&self.entities)
+            .map_err(Error::backend)?
+            .into_iter()
+            .filter_map(|(name, _)| name.relative_to(&self.entities))
+            .collect();
+        // `prefixed` is ascending by *ref name*, which orders `a/b` against
+        // `a-b` by the separator byte; `RefPath` orders segment by segment.
+        // Sort so the result agrees with the type it is returned as.
+        names.sort();
+        Ok(names)
     }
 
     /// Delete an entity's ref. Returns whether it existed.
-    pub fn remove(&self, name: &RefSegment) -> Result<bool, Error> {
+    pub fn remove(&self, name: &RefPath) -> Result<bool, Error> {
         let reference = self.reference(name);
         loop {
             let Some(expected) = self.store.refs().read(&reference).map_err(Error::backend)? else {
@@ -276,6 +291,15 @@ where
     }
 }
 
+/// The name [`Put::anonymous`] stores a commit under: the commit's own id.
+///
+/// An [`ObjectId`]'s hex rendering is always a valid ref-name segment.
+pub fn entity_name(commit: ObjectId) -> RefPath {
+    RefSegment::new(commit.to_string())
+        .expect("object id hex is a valid ref segment")
+        .into()
+}
+
 /// A pending write of one value. Consumed by [`at`](Self::at) or
 /// [`anonymous`](Self::anonymous).
 pub struct Put<'k, E: Encoding, R, O> {
@@ -296,7 +320,7 @@ where
     }
 
     /// Commit the value forward at `name`.
-    pub fn at(self, name: &RefSegment) -> Result<ObjectId, Error> {
+    pub fn at(self, name: &RefPath) -> Result<ObjectId, Error> {
         let kind = self.kind;
         let default = || format!("store {}/{name}", kind.name);
         let (message, tree) = self.build(default)?;
@@ -304,8 +328,12 @@ where
             .commit_forward(&kind.reference(name), &message, tree)
     }
 
-    /// Commit the value at a fresh name derived from the commit's own id.
-    pub fn anonymous(self) -> Result<(RefSegment, ObjectId), Error> {
+    /// Commit the value at a fresh name: the commit's own id, in full.
+    ///
+    /// The returned id *is* the name, recoverable with [`entity_name`], so an
+    /// anonymous entity collides only when two distinct commits share an
+    /// object id.
+    pub fn anonymous(self) -> Result<ObjectId, Error> {
         let kind = self.kind;
         let default = || format!("store {}/<auto>", kind.name);
         let (message, tree) = self.build(default)?;
@@ -314,17 +342,16 @@ where
         // Write the commit before touching any ref, so its id — which
         // determines the entity's name — is known first.
         let commit = store.write_commit(&message, tree, None)?;
-        let name = RefSegment::new(&commit.to_string()[..8]).expect("hex is a valid ref segment");
-        let reference = kind.reference(&name);
+        let reference = kind.reference(&entity_name(commit));
 
         match store.refs().apply(RefEdit::Create {
             name: reference.clone(),
             new: commit,
         }) {
-            Ok(()) => Ok((name, commit)),
+            Ok(()) => Ok(commit),
             Err(ApplyError::LostRace { .. }) => {
                 match store.refs().read(&reference).map_err(Error::backend)? {
-                    Some(existing) if existing == commit => Ok((name, commit)),
+                    Some(existing) if existing == commit => Ok(commit),
                     _ => Err(Error::NameTaken { name: reference }),
                 }
             }

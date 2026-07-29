@@ -19,12 +19,12 @@ mod store;
 
 pub use encoding::{Dynamic, Encoding, Typed};
 pub use error::{Error, Subtree};
-pub use kind::{Kind, KindSchema, Put};
+pub use kind::{Kind, KindSchema, Put, entity_name};
 pub use provenance::SchemaLabel;
 pub use store::{Layout, RepoStore, Store};
 
 pub use facet_git_tree::{ObjectId, Schema, schema_of};
 pub use gix_refstore::{
     ApplyError, Committer, Expectation, GixRefStore, InvalidRefName, MemoryRefStore, RefEdit,
-    RefName, RefPrefix, RefSegment, RefStore,
+    RefName, RefPath, RefPrefix, RefSegment, RefStore,
 };
