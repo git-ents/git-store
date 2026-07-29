@@ -28,3 +28,7 @@ required-features = ["value"]
 [[test]]
 name = "schema_write"
 required-features = ["value"]
+
+[[test]]
+name = "migration_apply"
+required-features = ["value"]

@@ -111,10 +111,7 @@ fn with_vec_schema() -> anyhow::Result<()> {
             re("WithVec"),
             vec![(
                 "WithVec",
-                Schema::Struct(fields(vec![(
-                    "items",
-                    Schema::List(Box::new(Schema::I64))
-                )]))
+                Schema::Struct(fields(vec![("items", Schema::List(Box::new(Schema::I64)))]))
             )]
         )
     );
@@ -343,10 +340,7 @@ fn name_collision_disambiguated() -> anyhow::Result<()> {
             vec![
                 (
                     "Both",
-                    Schema::Struct(fields(vec![
-                        ("first", re("Dup")),
-                        ("second", re("Dup_2"))
-                    ]))
+                    Schema::Struct(fields(vec![("first", re("Dup")), ("second", re("Dup_2"))]))
                 ),
                 ("Dup", Schema::Struct(fields(vec![("x", Schema::I32)]))),
                 ("Dup_2", Schema::Struct(fields(vec![("y", Schema::U8)]))),

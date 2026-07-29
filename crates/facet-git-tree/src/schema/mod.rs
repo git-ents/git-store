@@ -24,6 +24,7 @@ use facet::{ConstTypeId, Def, Facet, ScalarType, Shape};
 use crate::RawTree;
 use crate::de::{MAX_DEPTH, collapse_shape};
 use crate::error::SchemaError;
+use crate::migration::{Hints, Target, attr};
 use crate::ser::is_byte_seq;
 
 /// A complete, self-contained schema document.
@@ -174,6 +175,12 @@ pub fn schema_of<T: for<'a> Facet<'a>>() -> Result<SchemaDoc, SchemaError> {
     SchemaDoc::from_shape(<T as Facet>::SHAPE)
 }
 
+/// [`schema_of`] together with the rename hints `T`'s
+/// `#[facet(migrate::renamed_from = …)]` attributes declare.
+pub fn schema_and_hints_of<T: for<'a> Facet<'a>>() -> Result<(SchemaDoc, Hints), SchemaError> {
+    SchemaDoc::from_shape_with_hints(<T as Facet>::SHAPE)
+}
+
 impl SchemaDoc {
     /// Generate the [`SchemaDoc`] describing how values of `shape` are
     /// encoded.
@@ -186,23 +193,36 @@ impl SchemaDoc {
     /// assigned deterministically in pre-order, so the same shape always
     /// yields an identical — and identically-encoded — document.
     pub fn from_shape(shape: &'static Shape) -> Result<Self, SchemaError> {
+        Self::from_shape_with_limit(shape, MAX_DEPTH).map(|(doc, _hints)| doc)
+    }
+
+    /// [`from_shape`](Self::from_shape), additionally returning the rename
+    /// [`Hints`] collected from `#[facet(migrate::renamed_from = …)]`
+    /// attributes on named struct fields and struct enum variant fields.
+    pub fn from_shape_with_hints(shape: &'static Shape) -> Result<(Self, Hints), SchemaError> {
         Self::from_shape_with_limit(shape, MAX_DEPTH)
     }
 
     /// [`from_shape`](Self::from_shape) with a custom nesting bound in place
-    /// of [`MAX_DEPTH`].
+    /// of [`MAX_DEPTH`], also returning the collected [`Hints`].
     ///
     /// Exists so tests can exercise the depth guard without a pathologically
     /// deep type (whose `SHAPE` evaluation is prohibitively expensive to
     /// compile); not part of the public API.
     #[doc(hidden)]
-    pub fn from_shape_with_limit(shape: &'static Shape, limit: usize) -> Result<Self, SchemaError> {
+    pub fn from_shape_with_limit(
+        shape: &'static Shape,
+        limit: usize,
+    ) -> Result<(Self, Hints), SchemaError> {
         let mut walker = Walker::new(limit);
         let root = walker.node(shape, 0)?;
-        Ok(SchemaDoc {
-            root,
-            defs: walker.defs,
-        })
+        Ok((
+            SchemaDoc {
+                root,
+                defs: walker.defs,
+            },
+            walker.hints,
+        ))
     }
 }
 
@@ -218,6 +238,9 @@ struct Walker {
     claimed: HashMap<&'static str, usize>,
     /// The nesting bound `node` enforces — [`MAX_DEPTH`] outside of tests.
     limit: usize,
+    /// Rename hints collected from named-field structs' and struct enum
+    /// variants' fields as they are visited.
+    hints: Hints,
 }
 
 impl Walker {
@@ -227,6 +250,7 @@ impl Walker {
             names: HashMap::new(),
             claimed: HashMap::new(),
             limit,
+            hints: Hints::default(),
         }
     }
 
@@ -275,14 +299,17 @@ impl Walker {
             if matches!(st.kind, facet::StructKind::Tuple) {
                 return Ok(Schema::Tuple(self.field_schemas(st.fields, depth + 1)?));
             }
-            return self.define(shape, |walker| match st.kind {
+            return self.define(shape, |walker, name| match st.kind {
                 facet::StructKind::Unit => Ok(Schema::Unit),
                 facet::StructKind::TupleStruct => {
                     Ok(Schema::Tuple(walker.field_schemas(st.fields, depth + 1)?))
                 }
-                _ => Ok(Schema::Struct(
-                    walker.named_field_schemas(st.fields, depth + 1)?,
-                )),
+                _ => {
+                    walker.record_rename_hints(&Target::Def(name.to_owned()), st.fields);
+                    Ok(Schema::Struct(
+                        walker.named_field_schemas(st.fields, depth + 1)?,
+                    ))
+                }
             });
         }
 
@@ -309,7 +336,7 @@ impl Walker {
         // Enum → a named user type in `defs`, with each variant's payload
         // classified exactly as the encoder classifies it.
         if let facet::Type::User(facet::UserType::Enum(et)) = shape.ty {
-            return self.define(shape, |walker| {
+            return self.define(shape, |walker, def_name| {
                 let mut variants = BTreeMap::new();
                 for variant in et.variants {
                     let positional = matches!(variant.data.kind, facet::StructKind::TupleStruct);
@@ -323,6 +350,13 @@ impl Walker {
                     } else if positional {
                         VariantKind::Tuple(walker.field_schemas(variant.data.fields, depth + 1)?)
                     } else {
+                        walker.record_rename_hints(
+                            &Target::Variant {
+                                def: def_name.to_owned(),
+                                variant: variant.name.to_owned(),
+                            },
+                            variant.data.fields,
+                        );
                         VariantKind::Struct(
                             walker.named_field_schemas(variant.data.fields, depth + 1)?,
                         )
@@ -364,11 +398,12 @@ impl Walker {
     /// (`struct Node { children: Vec<Node> }`) resolves its own occurrences to
     /// the already-assigned `Ref` instead of recursing forever. Distinct types
     /// sharing an identifier get `_2`, `_3`, … suffixes in pre-order, keeping
-    /// name assignment deterministic.
+    /// name assignment deterministic. `body` receives the assigned name, so it
+    /// can address its own fields as migration [`Target`]s.
     fn define(
         &mut self,
         shape: &'static Shape,
-        body: impl FnOnce(&mut Self) -> Result<Schema, SchemaError>,
+        body: impl FnOnce(&mut Self, &str) -> Result<Schema, SchemaError>,
     ) -> Result<Schema, SchemaError> {
         if let Some(name) = self.names.get(&shape.id) {
             return Ok(Schema::Ref(name.clone()));
@@ -381,9 +416,23 @@ impl Walker {
             format!("{}_{claimed}", shape.type_identifier)
         };
         self.names.insert(shape.id, name.clone());
-        let schema = body(self)?;
+        let schema = body(self, &name)?;
         self.defs.insert(name.clone(), schema);
         Ok(Schema::Ref(name))
+    }
+
+    /// Record each of `fields`' `#[facet(migrate::renamed_from = …)]` hint,
+    /// if any, against `target`.
+    ///
+    /// Only meaningful for named fields (named-field structs and struct enum
+    /// variants); positional fields have no name for a rename to target, so
+    /// callers must not invoke this for them.
+    fn record_rename_hints(&mut self, target: &Target, fields: &'static [facet::Field]) {
+        for field in fields {
+            if let Some(from) = attr::renamed_from(field) {
+                self.hints.record_rename(target.clone(), from, field.name);
+            }
+        }
     }
 }
 

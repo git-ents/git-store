@@ -12,6 +12,7 @@
 mod de;
 mod error;
 mod marker;
+pub mod migration;
 mod raw_tree;
 pub mod schema;
 mod ser;
@@ -23,15 +24,20 @@ pub use gix_object::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 
 pub use de::{check_key, deserialize, deserialize_into};
 pub use error::{
-    DeserializeError, KeyError, SchemaError, SchemaPinError, SchemaReadError, SchemaWriteError,
-    SerializeError,
+    DeserializeError, KeyError, MigrationError, MigrationPinError, SchemaError, SchemaPinError,
+    SchemaReadError, SchemaWriteError, SerializeError,
 };
+#[cfg(feature = "value")]
+pub use migration::apply::{Edge, apply, apply_chain};
+pub use migration::derive::{Derivation, Divergence, Incomplete, Side};
+pub use migration::pin::MigrationSchema;
+pub use migration::{Change, Constant, Hints, Migration, Op, Target};
 pub use raw_tree::RawTree;
+pub use schema::pin::SchemaSchema;
 #[cfg(feature = "value")]
 pub use schema::read::{deserialize_value_with_schema, validate_with_schema};
 #[cfg(feature = "value")]
 pub use schema::write::serialize_value_with_schema;
-pub use schema::pin::SchemaSchema;
-pub use schema::{Schema, SchemaDoc, VariantKind, schema_of};
+pub use schema::{Schema, SchemaDoc, VariantKind, schema_and_hints_of, schema_of};
 pub use ser::{serialize, serialize_into, serialize_peek, serialize_peek_into};
 pub use store::ObjectStore;

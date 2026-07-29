@@ -271,7 +271,8 @@ pub enum SchemaPinError {
     /// which generations this build recognizes.
     #[error(
         "schema tree {tree} was written against schema-schema {pinned}, which this build does \
-         not recognize; it speaks {}", crate::schema::pin::known_generations()
+         not recognize; it speaks {}",
+        crate::schema::pin::known_generations()
     )]
     Unrecognized {
         /// The schema tree carrying the unrecognized pin.
@@ -290,6 +291,44 @@ pub enum SchemaPinError {
     #[error(transparent)]
     Serialize(#[from] SerializeError),
     /// Reading the pin entry, or the document itself, failed exactly as an
+    /// ordinary typed deserialize would.
+    #[error(transparent)]
+    Deserialize(#[from] DeserializeError),
+}
+
+/// An error produced by the migration-schema pin
+/// ([`Migration::write_pinned`](crate::Migration::write_pinned) and
+/// [`Migration::read_pinned`](crate::Migration::read_pinned)/[`read_pin`](crate::Migration::read_pin)).
+///
+/// The migration tower is separate from the schema-schema tower, so this is a
+/// separate error: a build may speak one generation of `SchemaDoc` and a
+/// different generation of `Migration`.
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationPinError {
+    /// The migration pins a migration-schema this build does not speak.
+    ///
+    /// Refusing here is what stops an unrecognized operator from being
+    /// silently skipped, which would not fail the read — it would produce a
+    /// value that looks conformant and is not.
+    #[error(
+        "migration tree {tree} was written against migration-schema {pinned}, which this build \
+         does not recognize; it speaks {}",
+        crate::migration::pin::known_generations()
+    )]
+    Unrecognized {
+        /// The migration tree carrying the unrecognized pin.
+        tree: ObjectId,
+        /// The pinned migration-schema tree id.
+        pinned: ObjectId,
+    },
+    /// The migration carries no `schema` pin entry, and is not itself a known
+    /// migration-schema root.
+    #[error("migration tree {0} carries no migration-schema pin and is not itself a known root")]
+    Unpinned(ObjectId),
+    /// Writing the migration, or the migration-schema tree it pins, failed.
+    #[error(transparent)]
+    Serialize(#[from] SerializeError),
+    /// Reading the pin entry, or the migration itself, failed exactly as an
     /// ordinary typed deserialize would.
     #[error(transparent)]
     Deserialize(#[from] DeserializeError),
@@ -457,6 +496,62 @@ pub enum SchemaWriteError {
     /// `Ref` resolution — counts against the limit, a `Ref`-to-`Ref` cycle in
     /// the schema fails here rather than recursing unboundedly.
     #[error("at {path}: maximum nesting depth ({depth}) exceeded while serializing")]
+    MaxDepth {
+        /// The location reached when the limit tripped.
+        path: String,
+        /// The limit that was exceeded.
+        depth: usize,
+    },
+}
+
+/// An error produced by read-time migration application
+/// (`apply` and `apply_chain`, available with the `value` feature).
+///
+/// The migration-walk mirror of [`SchemaReadError`]/[`SchemaWriteError`]: it
+/// walks an already-read `facet_value::Value` guided by the source
+/// `SchemaDoc`, so every variant names the `path` at which the value
+/// diverged from what that document describes.
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationError {
+    /// The value does not match the source schema at `path`.
+    #[error("at {path}: expected {expected}, found {found}")]
+    Mismatch {
+        /// The location within the value.
+        path: String,
+        /// The kind the schema node accepts.
+        expected: &'static str,
+        /// The value's actual runtime kind.
+        found: &'static str,
+    },
+    /// A fixed-length sequence's element count does not match the source
+    /// schema.
+    ///
+    /// Refused rather than truncated: an upcast that silently dropped
+    /// elements would produce a value that conforms to the target schema and
+    /// is not the value that was stored.
+    #[error("at {path}: expected {expected} elements, found {found}")]
+    LengthMismatch {
+        /// The location within the value.
+        path: String,
+        /// The element count the source schema requires.
+        expected: usize,
+        /// The element count the value holds.
+        found: usize,
+    },
+    /// A `Schema::Ref` names a definition absent from the source document.
+    #[error("at {path}: schema ref {name:?} has no definition in the source document")]
+    UnknownRef {
+        /// The location within the value.
+        path: String,
+        /// The undefined reference name.
+        name: String,
+    },
+    /// Recursion exceeded the maximum supported nesting depth.
+    ///
+    /// Mirrors [`DeserializeError::MaxDepth`]: since every hop — including
+    /// `Ref` resolution — counts against the limit, a `Ref`-to-`Ref` cycle in
+    /// the source schema fails here rather than recursing unboundedly.
+    #[error("at {path}: maximum nesting depth ({depth}) exceeded while applying a migration")]
     MaxDepth {
         /// The location reached when the limit tripped.
         path: String,

@@ -547,6 +547,168 @@ Publishing a schema under a ref — e.g. `refs/schema/issue` — is a convention
 A schema is published by serializing its `SchemaDoc` through this crate and pointing the ref at the resulting tree, or at a commit wrapping that tree for history and signing — the higher layer's choice.
 ====
 
+=== Migration
+
+[role="requirement", id="migration.no-rewrite"]
+.Migration is Read-Time Upcast
+--
+A schema migration MUST be applied when a value is read, and MUST NOT rewrite the stored value.
+
+Attestations bind to object hashes.
+Rewriting a stored value to conform to a newer schema changes its tree hash, and thereby silently voids every claim already made about it.
+No operation defined by this section may produce a new stored value tree from an old one: application takes a value already read against the old schema and returns a value conforming to the new one, touching no object store and writing no object.
+
+Migration is deliberately one-directional.
+New readers read old data; old readers reading new data is not a case this format has, so reverse lenses are out of scope and MUST NOT be inferred from the operators defined below.
+--
+
+[role="requirement", id="migration.representation"]
+.Migration Representation
+--
+A migration MUST be data — an ordinary `Facet` value stored through this crate's own encoding, self-hosted exactly as link:#schema.representation[a schema document] is.
+It MUST NOT be, or contain, a function pointer, a closure, or any other Rust-only escape hatch: the canonical artifact has to be interpretable by a consumer that is not Rust and is verifying a claim.
+
+The migration types are defined as follows.
+
+[source,rust]
+----
+pub struct Migration {
+    pub ops: Vec<Op>,
+}
+
+pub struct Op {
+    pub at: Target,
+    pub change: Change,
+}
+
+#[repr(u8)]
+pub enum Target {
+    Def(String),
+    Variant { def: String, variant: String },
+}
+
+#[repr(u8)]
+pub enum Change {
+    Rename { from: String, to: String },
+    Add { field: String, default: Constant },
+    Remove { field: String },
+    Wrap { field: String },
+}
+
+#[repr(u8)]
+pub enum Constant {
+    Null,
+    Bool(bool),
+    Integer(i64),
+    Float(f64),
+    Text(String),
+    List(Vec<Constant>),
+    Object(BTreeMap<String, Constant>),
+}
+----
+
+A migration document describes exactly one schema edge.
+It does NOT carry its two endpoint documents: an edge is identified by where it is stored — the plan of record is the schema commit's own tree, keyed by the parent→child edge of `refs/schema/<kind>`'s commit chain — so embedding the endpoints would duplicate trees the reader already has in hand.
+
+`Constant` is the closed JSON data model, so an added field's default is interpretable by a consumer with no Rust type available.
+`Integer` is 64-bit; a default outside that range is out of scope and MUST be treated as a new type plus a backfill, not a migration.
+--
+
+[role="requirement", id="migration.vocabulary"]
+.Lens Vocabulary
+--
+The vocabulary MUST remain minimal.
+Every operator is semantics that every consumer, in every language, must implement forever; a change that does not fit the operators below is a new type plus a backfill, not a migration.
+
+The operators are exactly four:
+
+`Rename { from, to }`:: the target's field `to` holds what the source's field `from` held.
+`Add { field, default }`:: the target has a field the source lacks; every upcast value takes `default`.
+`Remove { field }`:: the source has a field the target lacks; the upcast drops it.
+`Wrap { field }`:: the target's field schema is `Optional` of the source's.
+
+`Wrap` is the identity on a dynamic value.
+link:#deserialization.schema-driven[Schema-driven deserialization] reads `Optional` as `null` or as the inner value directly, so `Some(x)` and `x` are the same value.
+The operator exists regardless, for two reasons: it records the *encoding* change — a `some` tree entry appears — for a consumer working at the tree altitude rather than the value altitude, and without it the most common schema evolution after add, remove, and rename would be unclassifiable by link:#migration.derivation[derivation].
+
+The inverse of `Wrap` is deliberately absent: a stored `None` has no image under an unwrap, so `Optional<T>` → `T` is not a migration.
+
+Adding an enum variant requires no operator: no stored value can hold a variant the source schema never defined, so the edge is a pure widening.
+Removing an enum variant has no operator, and MUST be reported as unclassifiable: values holding it have no image.
+--
+
+[role="requirement", id="migration.addressing"]
+.Definition-Scoped Addressing
+--
+An operation MUST address a *definition*, never a root-relative path into the value.
+
+`Target::Def(name)` names an entry in the source document's `defs` table; `Target::Variant { def, variant }` names a struct variant of an enum definition.
+Every named user type is a definition (link:#schema.generation[schema generation]), so every named field an operator can address is reachable this way.
+
+Root-relative paths are rejected because they cannot express a recursive type: `struct Node { children: Vec<Node>, label: String }` renaming `label` needs the change to apply at every depth, and the set of paths reaching those occurrences is unbounded.
+A definition scope also applies once to a type used at several positions, which is what the change actually means.
+
+The consequence is that a migration MUST be applied by walking the value guided by its source schema document, applying each target's operations wherever the walk resolves that definition.
+--
+
+[role="requirement", id="migration.derivation"]
+.Derivation
+--
+Derivation over two schema documents MUST produce either a complete migration or a typed report of what it could not classify, and MUST make the two outcomes distinct in the type system so a caller cannot accidentally treat a partial derivation as complete.
+
+Derivation MUST be deterministic: the same document pair and the same authoring hints always yield an identical migration, and therefore a stable object id.
+Definitions, fields, and variants are compared in sorted order, and operations are emitted in the phase order `Rename`, `Remove`, `Wrap`, `Add`, so that every phase after the first addresses target-side names.
+
+Because struct and enum nodes are name-keyed (link:#schema.representation[schema representation]), added and removed fields fall out of a key-set comparison.
+What a diff cannot tell is whether a `{remove: a, add: b}` pair is a rename or two unrelated changes, and what constant an added field should take.
+Those are authoring facts and MUST be supplied by the author, either as a hint passed to derivation or, for renames, declared on the type as `#[facet(migrate::renamed_from = "old_name")]` and compiled into the document.
+
+An added field whose target schema is `Optional` MUST default to `Null` without authoring: absence is that schema's canonical inhabitant.
+Every other added field without a supplied default MUST be reported as unclassifiable rather than given an invented value.
+--
+
+[role="requirement", id="migration.application"]
+.Application
+--
+Application MUST take a value read against the source document and return a value conforming to the target schema, per link:#migration.no-rewrite[read-time upcast].
+
+Operations at a target apply in document order, each a total transformation of that node, so conflicting operations are well-defined rather than an error.
+`Rename` and `Remove` on a field the value does not carry MUST be no-ops, matching the leniency link:#deserialization.schema-driven[schema-driven deserialization] already applies to a missing struct field.
+`Add` MUST insert the constant, overwriting any member already present.
+
+Children MUST be upcast before their parent's operations run, so that operations address source-side field names exactly as they were derived.
+
+Recursion depth MUST be bounded by the same maximum-depth limit that bounds deserialization, and every hop MUST count against it — including `Ref` resolution.
+--
+
+[role="requirement", id="migration.composition"]
+.Composition
+--
+A chain of edges A→B→C MUST be applicable by applying each edge in series, in order.
+
+Edges are applied, not composed into a single document.
+Each edge's operations are scoped by the definition names of its own source document, and two documents in a chain need not agree on those names, so composing the documents would require a name reconciliation that applying in series does not need.
+Concatenating two edges' operation lists is therefore NOT a valid composition and MUST NOT be relied upon.
+--
+
+[role="requirement", id="migration.pin"]
+.Migration-Schema Pin
+--
+Every stored migration MUST carry, at the fixed top-level tree entry name `schema`, a reference to the tree of the migration-schema generation it was written against, under exactly the construction link:#schema.representation.pin[the schema-schema pin] defines: a storage-layer splice, read by one `ls-tree` entry lookup, checked before the document is deserialized, with absence legitimate only for a recognized root generation.
+
+The migration tower MUST be separate from the schema-schema tower.
+The two documents evolve independently, and adding a `Change` variant must not invalidate every stored schema document.
+The genesis tree of this format version is `2804eb09c0825a75f388beb064bbc80666f5aebb`.
+
+The check is load-bearing in a way the schema case is not: a reader that silently ignored an operator it did not recognize would not fail, it would produce a *wrong* value — one that looks conformant and is not.
+--
+
+[NOTE]
+====
+Where a migration lives is owned by higher layers, exactly as link:#schema.representation[schema publication] is.
+`facet-git-tree` provides the pure layer: types, derivation, application, and composition, all as functions over schema documents and values, with no notion of refs or commits.
+====
+
 === Structural Comparison
 
 [role="requirement", id="structural.comparison.equality"]

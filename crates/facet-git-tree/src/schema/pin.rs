@@ -12,7 +12,7 @@
 use gix_object::{Find, Write};
 
 use crate::de::find_tree_entries;
-use crate::error::{SchemaPinError, SerializeError};
+use crate::error::{DeserializeError, SchemaPinError, SerializeError};
 use crate::schema::{SchemaDoc, schema_of};
 use crate::ser::serialize_into;
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
@@ -40,7 +40,7 @@ impl SchemaSchema {
     /// `genesis_constant_is_real` in `tests/schema_self_host.rs`, which pins
     /// it against the actual serialization.
     pub const GENESIS: SchemaSchema = SchemaSchema {
-        tree: decode_genesis(GENESIS_HEX),
+        tree: decode_oid(GENESIS_HEX),
         parent: None,
     };
 
@@ -73,11 +73,14 @@ const GENESIS_HEX: &str = "ac6765ad5cb7f41804706777260a43751eb2db41";
 
 /// Decode a 40-character lowercase-hex SHA-1 literal at compile time, so a
 /// malformed constant is a compile error rather than a silent runtime bug.
-const fn decode_genesis(hex: &str) -> ObjectId {
+///
+/// `pub(crate)`: shared with `migration::pin`, which pins its own tower's
+/// genesis the same way.
+pub(crate) const fn decode_oid(hex: &str) -> ObjectId {
     let bytes = hex.as_bytes();
     assert!(
         bytes.len() == 40,
-        "genesis schema-schema id must be exactly 40 hex characters"
+        "genesis id must be exactly 40 hex characters"
     );
     let mut out = [0u8; 20];
     let mut i = 0;
@@ -89,11 +92,11 @@ const fn decode_genesis(hex: &str) -> ObjectId {
 }
 
 /// One hex digit's value, as a `const fn` (no `unsafe`, no dependency).
-const fn hex_nibble(b: u8) -> u8 {
+pub(crate) const fn hex_nibble(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
         b'a'..=b'f' => b - b'a' + 10,
-        _ => panic!("invalid hex digit in genesis schema-schema id"),
+        _ => panic!("invalid hex digit in genesis id"),
     }
 }
 
@@ -106,11 +109,16 @@ fn schema_schema_doc() -> SchemaDoc {
 
 /// Add the [`SchemaSchema::ENTRY`] entry naming `pin` to the already-written
 /// tree `doc`.
-fn splice_pin<S: Write + Find + ?Sized>(
-    doc: ObjectId,
-    pin: &ObjectId,
-    store: &S,
-) -> Result<ObjectId, SchemaPinError> {
+///
+/// Shared with `migration::pin`, whose entry name (`MigrationSchema::ENTRY`)
+/// is the same literal `"schema"`; generic over the error so each tower keeps
+/// its own, rather than one collapsing into the other at a call site that
+/// would have to name conditions this function cannot produce.
+pub(crate) fn splice_pin<S, E>(doc: ObjectId, pin: &ObjectId, store: &S) -> Result<ObjectId, E>
+where
+    S: Write + Find + ?Sized,
+    E: From<SerializeError> + From<DeserializeError>,
+{
     let mut entries: Vec<TreeEntry> = find_tree_entries(&doc, store)?
         .into_iter()
         .map(|(name, oid, kind)| TreeEntry {
@@ -128,7 +136,7 @@ fn splice_pin<S: Write + Find + ?Sized>(
     store
         .write(&gix_object::Tree { entries })
         .map_err(SerializeError::Backend)
-        .map_err(SchemaPinError::from)
+        .map_err(E::from)
 }
 
 /// Write the current generation's own tree into `store`, so a pin to it

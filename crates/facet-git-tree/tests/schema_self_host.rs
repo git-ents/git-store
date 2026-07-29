@@ -331,7 +331,12 @@ fn write_pinned_ls_tree_shape_matches_the_type_declaration() -> anyhow::Result<(
 
 /// Recursively collect every blob leaf under `root` as `(slash-joined path,
 /// content)` pairs, `git ls-tree -r` style.
-fn walk_blobs(store: &ObjectStore, root: &ObjectId, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
+fn walk_blobs(
+    store: &ObjectStore,
+    root: &ObjectId,
+    prefix: &str,
+    out: &mut Vec<(String, Vec<u8>)>,
+) {
     for entry in store.get_tree(root).expect("tree present") {
         let name = String::from_utf8_lossy(&entry.filename);
         let path = format!("{prefix}/{name}");
