@@ -85,24 +85,41 @@ where
 
     /// The current value at `name`, or `None` when absent.
     pub fn get(&self, name: &RefPath) -> Result<Option<E::Value>, Error> {
+        Ok(self.get_entry(name)?.map(|entry| entry.value))
+    }
+
+    /// The value as of one data commit, read entirely out of that commit's
+    /// own tree.
+    pub fn get_at(&self, commit: ObjectId) -> Result<E::Value, Error> {
+        Ok(self.get_entry_at(commit)?.value)
+    }
+
+    /// The current value at `name` together with the commit it came from, or
+    /// `None` when absent.
+    pub fn get_entry(&self, name: &RefPath) -> Result<Option<Entry<E::Value>>, Error> {
         match self
             .store
             .refs()
             .read(&self.reference(name))
             .map_err(Error::backend)?
         {
-            Some(tip) => Ok(Some(self.get_at(tip)?)),
+            Some(tip) => Ok(Some(self.get_entry_at(tip)?)),
             None => Ok(None),
         }
     }
 
-    /// The value as of one data commit, read entirely out of that commit's
-    /// own tree.
-    pub fn get_at(&self, commit: ObjectId) -> Result<E::Value, Error> {
-        let root = self.store.commit_tree(commit)?;
+    /// [`get_entry`](Self::get_entry) for one data commit directly, read
+    /// entirely out of that commit's own tree.
+    pub fn get_entry_at(&self, commit: ObjectId) -> Result<Entry<E::Value>, Error> {
+        let (root, message) = self.store.commit_tree_and_summary(commit)?;
         let (value_tree, schema_tree) = self.store.split(root, commit)?;
         let doc = Schema::read_pinned(&schema_tree, self.store.objects())?;
-        E::read(&value_tree, &doc, self.store.objects())
+        let value = E::read(&value_tree, &doc, self.store.objects())?;
+        Ok(Entry {
+            value,
+            commit,
+            message,
+        })
     }
 
     /// The current value at `name`, upcast to this kind's current schema.
@@ -117,24 +134,40 @@ where
     /// Nothing is written: the stored value keeps its tree hash, and with it
     /// every attestation made about it.
     pub fn get_migrated(&self, name: &RefPath) -> Result<Option<Value>, Error> {
+        Ok(self.get_entry_migrated(name)?.map(|entry| entry.value))
+    }
+
+    /// [`get_migrated`](Self::get_migrated) for one data commit.
+    pub fn get_at_migrated(&self, commit: ObjectId) -> Result<Value, Error> {
+        Ok(self.get_entry_at_migrated(commit)?.value)
+    }
+
+    /// [`get_migrated`](Self::get_migrated), together with the commit the
+    /// value was read from.
+    pub fn get_entry_migrated(&self, name: &RefPath) -> Result<Option<Entry<Value>>, Error> {
         match self
             .store
             .refs()
             .read(&self.reference(name))
             .map_err(Error::backend)?
         {
-            Some(tip) => Ok(Some(self.get_at_migrated(tip)?)),
+            Some(tip) => Ok(Some(self.get_entry_at_migrated(tip)?)),
             None => Ok(None),
         }
     }
 
-    /// [`get_migrated`](Self::get_migrated) for one data commit.
-    pub fn get_at_migrated(&self, commit: ObjectId) -> Result<Value, Error> {
-        let root = self.store.commit_tree(commit)?;
+    /// [`get_entry_migrated`](Self::get_entry_migrated) for one data commit.
+    pub fn get_entry_at_migrated(&self, commit: ObjectId) -> Result<Entry<Value>, Error> {
+        let (root, message) = self.store.commit_tree_and_summary(commit)?;
         let (value_tree, schema_tree) = self.store.split(root, commit)?;
         let doc = Schema::read_pinned(&schema_tree, self.store.objects())?;
         let value = deserialize_value_with_schema(&value_tree, &doc, self.store.objects())?;
-        self.schema().upcast(&value, &schema_tree)
+        let value = self.schema().upcast(&value, &schema_tree)?;
+        Ok(Entry {
+            value,
+            commit,
+            message,
+        })
     }
 
     /// An entity's commits, tip-first along first parents; empty when absent.
@@ -204,6 +237,18 @@ where
     pub fn publish(&self) -> Result<ObjectId, Error> {
         self.schema().put(&schema_of::<T>()?)
     }
+}
+
+/// A value read alongside the commit it came from, sparing the caller from
+/// decoding that commit itself.
+pub struct Entry<V> {
+    /// The decoded value.
+    pub value: V,
+    /// The commit the value was read from.
+    pub commit: ObjectId,
+    /// That commit's summary — its message's first logical line, per
+    /// [`gix::objs::CommitRef::message_summary`].
+    pub message: String,
 }
 
 /// A kind's schema ref.

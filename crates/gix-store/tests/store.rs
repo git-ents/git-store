@@ -12,8 +12,8 @@ use facet_git_tree::{
 use facet_value::value;
 use gix_refstore::RefEdit;
 use gix_store::{
-    Committer, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix, RefSegment, RefStore,
-    Store, Subtree, entity_name, entity_name_under,
+    Committer, Entry, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix, RefSegment,
+    RefStore, Store, Subtree, entity_name, entity_name_under,
 };
 
 fn seg(s: &str) -> RefSegment {
@@ -674,6 +674,57 @@ fn put_message_sets_the_commit_summary_and_keeps_the_schema_trailer() {
         message,
         format!("bump the counter\n\nSchema: {schema_commit}\n")
     );
+}
+
+/// [`gix_store::Kind::get_entry`]/[`gix_store::Kind::get_entry_at`]: the
+/// returned [`Entry`] names the exact commit the value came from — the same
+/// one [`gix_store::Kind::history`] reports as the tip — and carries that
+/// commit's summary, both for a default message and for one set through
+/// [`gix_store::kind::Put::message`].
+#[test]
+fn get_entry_carries_the_commit_and_message_the_value_was_written_with() {
+    let store = store();
+    store
+        .dynamic(seg("counter"))
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+
+    let first = store
+        .dynamic(seg("counter"))
+        .put(&entity("c"), &value!({ "n": 1 }))
+        .unwrap();
+    let second = store
+        .dynamic(seg("counter"))
+        .write(&value!({ "n": 2 }))
+        .message("bump the counter")
+        .at(&entity("c"))
+        .unwrap();
+
+    let Entry {
+        value,
+        commit,
+        message,
+    } = store
+        .dynamic(seg("counter"))
+        .get_entry(&entity("c"))
+        .unwrap()
+        .expect("entity was written");
+    assert_eq!(value, value!({ "n": 2 }));
+    assert_eq!(commit, second);
+    assert_eq!(message, "bump the counter");
+    assert_eq!(
+        store.dynamic(seg("counter")).history(&entity("c")).unwrap()[0],
+        commit,
+        "get_entry's commit must be the same tip history() reports"
+    );
+
+    // The earlier commit reads back through get_entry_at with its own
+    // default-summary message, distinct from the tip's.
+    let earlier = store.dynamic(seg("counter")).get_entry_at(first).unwrap();
+    assert_eq!(earlier.value, value!({ "n": 1 }));
+    assert_eq!(earlier.commit, first);
+    assert_eq!(earlier.message, "store counter/c");
 }
 
 /// [`gix_store::kind::Put::anonymous`] derives an entity's name from its own

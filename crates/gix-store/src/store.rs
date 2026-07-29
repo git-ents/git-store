@@ -114,6 +114,15 @@ where
         self.with_commit(id, |c| Ok(c.tree()))
     }
 
+    /// A commit's tree and message summary, decoded from a single commit
+    /// read.
+    pub(crate) fn commit_tree_and_summary(
+        &self,
+        id: ObjectId,
+    ) -> Result<(ObjectId, String), Error> {
+        self.with_commit(id, |c| Ok((c.tree(), c.message_summary().to_string())))
+    }
+
     /// A written tree's entries, as the mutable form a splice appends to.
     pub(crate) fn tree_entries(
         &self,
