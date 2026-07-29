@@ -15,16 +15,17 @@ use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input, Select};
 use facet_git_tree::{Schema, SchemaDoc, VariantKind};
 use facet_value::{VArray, VObject, Value};
-use gix_store::Store;
 
-use crate::{is_scalar_schema, resolve};
+use crate::{DynKind, is_scalar_schema, resolve};
 
 /// Build the entity value for `kind`, prompting for each leaf its schema names.
-pub fn value_for_kind(store: &Store, kind: &str) -> Result<Value> {
-    let doc = store
-        .schema(kind)?
-        .with_context(|| format!("no schema published for kind {kind:?}"))?;
-    build_value(&doc.root, &doc, kind, prompter().as_mut())
+pub fn value_for_kind(kind: &DynKind<'_, '_>) -> Result<Value> {
+    let name = kind.name().as_str();
+    let doc = kind
+        .schema()
+        .get()?
+        .with_context(|| format!("no schema published for kind {name:?}"))?;
+    build_value(&doc.root, &doc, name, prompter().as_mut())
 }
 
 /// Build a schema document by prompting for the root type. `defs` stays empty:

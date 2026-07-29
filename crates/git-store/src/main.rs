@@ -18,7 +18,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use facet_git_tree::{Schema, SchemaDoc, VariantKind};
 use facet_value::{Value, from_value};
-use gix_store::{ObjectId, Store};
+use gix_store::{Dynamic, GixRefStore, Kind, ObjectId, RefSegment, RepoStore};
+
+/// A handle on one kind, over the CLI's own repo-backed store.
+pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, GixRefStore<'r>, &'r gix::OdbHandle>;
 
 #[derive(Parser)]
 #[command(
@@ -103,10 +106,11 @@ enum SchemaCommand {
 
 fn main() -> Result<()> {
     // Install signal handlers before any lock is taken, so an interrupted
-    // write cleans up its per-ref lock file (a gix_tempfile) instead of
-    // leaving a stale one that wedges the ref. grace_count 0 → the first
-    // SIGINT/SIGTERM cleans up and exits. (A SIGKILL or power loss can still
-    // orphan a lock — nothing short of pid-aware lock breaking covers that.)
+    // write cleans up gix-refstore's per-ref lock file (a gix_tempfile under
+    // `<git-dir>/gix-refstore-locks/`) instead of leaving a stale one that
+    // wedges the ref. grace_count 0 → the first SIGINT/SIGTERM cleans up and
+    // exits. (A SIGKILL or power loss can still orphan a lock — nothing short
+    // of pid-aware lock breaking covers that.)
     //
     // SAFETY: the interrupt callback runs in a signal handler and does nothing
     // — no allocation, no locks — as required.
@@ -117,7 +121,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let repo = gix::discover(".").context("not inside a git repository")?;
-    let store = Store::open(&repo);
+    let store = RepoStore::open(&repo);
 
     match cli.command {
         // Bare `git store` lists kinds — a read-only default, like `git remote`.
@@ -125,29 +129,38 @@ fn main() -> Result<()> {
         Some(Command::Put(args)) => put(&store, args)?,
         Some(Command::Get { kind, name }) => {
             let (name, rev) = split_name_rev(&name);
+            let handle = store.dynamic(segment("kind", &kind)?);
+            let name_seg = segment("name", name)?;
             let value = match rev {
                 Some(rev) => {
-                    let oid = resolve_at(&repo, &kind, name, rev)?;
+                    let oid = resolve_at(&repo, &handle, &name_seg, rev)?;
                     // Only read a commit that is actually a version of this
                     // entity, so a stray oid can't return an unrelated value.
-                    if !store.history(&kind, name)?.contains(&oid) {
+                    if !handle.history(&name_seg)?.contains(&oid) {
                         bail!("{rev} is not a version of {kind}/{name}");
                     }
-                    store.retrieve_at(oid)?
+                    handle.get_at(oid)?
                 }
-                None => store
-                    .retrieve(&kind, name)?
+                None => handle
+                    .get(&name_seg)?
                     .with_context(|| format!("no entity {kind}/{name}"))?,
             };
             println!("{}", to_json(&value)?);
         }
         Some(Command::List { kind }) => print_lines(match &kind {
-            Some(kind) => store.list(kind)?,
+            Some(kind) => store.dynamic(segment("kind", kind)?).list()?,
             None => store.kinds()?,
         }),
-        Some(Command::Log { kind, name }) => print_log(&repo, store.history(&kind, &name)?)?,
+        Some(Command::Log { kind, name }) => {
+            let name_seg = segment("name", &name)?;
+            print_log(
+                &repo,
+                store.dynamic(segment("kind", &kind)?).history(&name_seg)?,
+            )?
+        }
         Some(Command::Rm { kind, name }) => {
-            if !store.delete(&kind, &name)? {
+            let name_seg = segment("name", &name)?;
+            if !store.dynamic(segment("kind", &kind)?).remove(&name_seg)? {
                 bail!("no entity {kind}/{name}");
             }
         }
@@ -157,40 +170,53 @@ fn main() -> Result<()> {
                 file,
                 interactive,
             } => {
+                let handle = store.dynamic(segment("kind", &kind)?);
                 let doc = if interactive {
                     interactive::build_schema()?
                 } else {
                     schema_doc_from_json(&read_source(file.as_ref())?)?
                 };
-                println!("{}", store.put_schema(&kind, &doc)?);
+                println!("{}", handle.schema().put(&doc)?);
             }
             SchemaCommand::Get { kind } => {
                 let doc = store
-                    .schema(&kind)?
+                    .dynamic(segment("kind", &kind)?)
+                    .schema()
+                    .get()?
                     .with_context(|| format!("no schema published for kind {kind:?}"))?;
                 println!("{}", to_json(&doc)?);
             }
             SchemaCommand::Show { kind } => {
                 let kinds = match kind {
-                    Some(kind) => vec![kind],
+                    Some(kind) => vec![segment("kind", &kind)?],
                     None => store.kinds()?,
                 };
-                for kind in kinds {
-                    if let Some(doc) = store.schema(&kind)? {
-                        print_type(&kind, &doc);
+                for seg in kinds {
+                    let handle = store.dynamic(seg);
+                    if let Some(doc) = handle.schema().get()? {
+                        print_type(handle.name().as_str(), &doc);
                     }
                 }
             }
             SchemaCommand::List => print_lines(store.kinds()?),
-            SchemaCommand::Log { kind } => print_log(&repo, store.schema_history(&kind)?)?,
+            SchemaCommand::Log { kind } => print_log(
+                &repo,
+                store.dynamic(segment("kind", &kind)?).schema().history()?,
+            )?,
         },
     }
     Ok(())
 }
 
+/// Validate a CLI argument as a [`RefSegment`], with context naming which
+/// argument it was.
+fn segment(what: &str, value: &str) -> Result<RefSegment> {
+    RefSegment::new(value).with_context(|| format!("invalid {what} {value:?}"))
+}
+
 /// The store action: gather JSON (file, stdin, or the editor), then commit it
 /// forward under the kind at the chosen name.
-fn put(store: &Store, args: PutArgs) -> Result<()> {
+fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
     let PutArgs {
         kind,
         name,
@@ -200,9 +226,11 @@ fn put(store: &Store, args: PutArgs) -> Result<()> {
         interactive,
     } = args;
     let name = name.as_deref().unwrap_or(&kind);
+    let name_seg = segment("name", name)?;
+    let handle = store.dynamic(segment("kind", &kind)?);
 
     let value = if interactive {
-        interactive::value_for_kind(store, &kind)?
+        interactive::value_for_kind(&handle)?
     } else {
         // Content source, in order: an explicit `-F <file>`, piped stdin, or —
         // at a terminal with neither — the editor. This mirrors `git notes add`.
@@ -217,12 +245,16 @@ fn put(store: &Store, args: PutArgs) -> Result<()> {
         let json = match base {
             Some(content) if !edit => content,
             Some(content) => edit_in_editor(&content)?,
-            None => edit_in_editor(&schema_skeleton(store, &kind)?)?,
+            None => edit_in_editor(&schema_skeleton(&handle)?)?,
         };
         facet_json::from_str(&json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?
     };
 
-    println!("{}", store.store(&kind, name, &value, message.as_deref())?);
+    let mut write = handle.write(&value);
+    if let Some(summary) = message {
+        write = write.message(summary);
+    }
+    println!("{}", write.at(&name_seg)?);
     Ok(())
 }
 
@@ -253,9 +285,14 @@ fn split_name_rev(token: &str) -> (&str, Option<&str>) {
 /// Resolve a revision to a commit id. A leading revision operator (`~`, `^`,
 /// `@`) is relative to the entity's ref; anything else stands alone (an oid or
 /// a full ref).
-fn resolve_at(repo: &gix::Repository, kind: &str, name: &str, rev: &str) -> Result<ObjectId> {
+fn resolve_at(
+    repo: &gix::Repository,
+    kind: &DynKind<'_, '_>,
+    name: &RefSegment,
+    rev: &str,
+) -> Result<ObjectId> {
     let spec = if rev.starts_with(['~', '^', '@']) {
-        format!("refs/store/{kind}/{name}{rev}")
+        format!("{}{rev}", kind.reference(name))
     } else {
         rev.to_owned()
     };
@@ -293,12 +330,12 @@ fn read_source(file: Option<&PathBuf>) -> Result<String> {
     }
 }
 
-/// A pretty schema-seeded skeleton for `kind`, or an error when the kind has
+/// A pretty schema-seeded skeleton for a kind, or an error when the kind has
 /// no published schema (nothing to compose against).
-fn schema_skeleton(store: &Store, kind: &str) -> Result<String> {
-    match store.schema(kind)? {
+fn schema_skeleton(kind: &DynKind<'_, '_>) -> Result<String> {
+    match kind.schema().get()? {
         Some(doc) => Ok(pretty_skeleton(&doc)),
-        None => bail!("no schema published for kind {kind:?}"),
+        None => bail!("no schema published for kind {:?}", kind.name().as_str()),
     }
 }
 
@@ -327,7 +364,7 @@ fn edit_in_editor(seed: &str) -> Result<String> {
 }
 
 /// Print one item per line.
-fn print_lines(items: Vec<String>) {
+fn print_lines(items: Vec<RefSegment>) {
     for item in items {
         println!("{item}");
     }

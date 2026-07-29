@@ -1,36 +1,80 @@
 //! The single error type for every [`Store`](crate::Store) operation.
 
+use std::fmt;
+
 use facet_git_tree::ObjectId;
+use gix_refstore::{RefName, RefSegment};
+
+/// Which half of a data commit's `{schema/, value/}` split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subtree {
+    /// The `value/` entry: the encoded entity.
+    Value,
+    /// The `schema/` entry: the schema it was validated against.
+    Schema,
+}
+
+impl Subtree {
+    /// The tree entry name: `"value"` or `"schema"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Subtree::Value => "value",
+            Subtree::Schema => "schema",
+        }
+    }
+}
+
+impl fmt::Display for Subtree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// An error from a [`Store`](crate::Store) operation.
-///
-/// The `facet-git-tree` boundary errors are kept distinct — a value that
-/// parses but does not conform reports the schema path — while the many small
-/// `gix` error types are collapsed into [`Error::Git`], which keeps the
-/// offending error as its source.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// No schema is published for the kind, so nothing can be stored under it.
-    #[error("no schema published for kind {kind:?}; run `git store schema put {kind}`")]
+    #[error("no schema published for kind \"{kind}\"; run `git store schema put {kind}`")]
     NoSchema {
-        /// The kind with no `refs/schema/<kind>`.
-        kind: String,
+        /// The kind with no published schema.
+        kind: RefSegment,
     },
-    /// A `<kind>` or `<name>` is not usable as a Git ref-name component.
-    #[error("invalid {what} {value:?}: {reason}")]
-    InvalidName {
-        /// Which component was rejected (`"kind"` or `"name"`).
-        what: &'static str,
-        /// The offending value.
-        value: String,
-        /// Why it was rejected.
-        reason: &'static str,
+    /// A data commit's tree is not the `{schema/, value/}` split a write
+    /// produces.
+    #[error(
+        "commit {commit} is not subtree-bound: its tree has [{found}], expected `schema` and \
+         `value` — it predates subtree schema binding and must be re-stored"
+    )]
+    NotSubtreeBound {
+        /// The data commit whose tree was not the expected split.
+        commit: ObjectId,
+        /// The entry names actually found, comma-separated, for diagnosis.
+        found: String,
     },
-    /// A data commit has no `Schema:` trailer, so its provenance — which
-    /// schema commit it was validated against at write time — cannot be
-    /// recovered. Not a read failure: the trailer is provenance only, and
-    /// [`Store::retrieve_at`](crate::Store::retrieve_at) reads the schema from
-    /// the commit's own `schema/` subtree without consulting it.
+    /// A data commit's `value/` or `schema/` entry names an object that is
+    /// not present in this repository.
+    #[error("commit {commit} names a {subtree} subtree {oid} that is not present")]
+    SubtreeMissing {
+        /// Which half of the split is absent.
+        subtree: Subtree,
+        /// The absent object.
+        oid: ObjectId,
+        /// The data commit naming it.
+        commit: ObjectId,
+    },
+    /// An object a read needed is not present.
+    #[error("object {oid} is not present")]
+    MissingObject {
+        /// The absent object.
+        oid: ObjectId,
+    },
+    /// An object a read needed is present but is not a commit.
+    #[error("object {oid} is not a commit")]
+    NotACommit {
+        /// The object of the wrong kind.
+        oid: ObjectId,
+    },
+    /// A data commit has no `Schema:` trailer.
     #[error("commit {commit} is missing its Schema: trailer")]
     MissingTrailer {
         /// The commit that lacked the trailer.
@@ -44,83 +88,47 @@ pub enum Error {
         /// The trailer text that failed to parse.
         text: String,
     },
-    /// A data commit's tree is not the `{schema/, value/}` split that
-    /// [`Store::store`](crate::Store::store) writes to keep the schema
-    /// reachable from the data commit itself.
-    ///
-    /// Overwhelmingly this means the commit predates subtree schema binding,
-    /// when the commit's tree *was* the value and the schema was named only by
-    /// a `Schema:` trailer. Such a commit must be re-stored to be readable.
-    /// It also covers a commit written by something other than this crate.
-    #[error(
-        "commit {commit} is not subtree-bound: its tree has [{found}], expected `schema` and \
-         `value` — it predates subtree schema binding and must be re-stored"
-    )]
-    NotSubtreeBound {
-        /// The data commit whose tree was not the expected split.
-        commit: ObjectId,
-        /// The entry names actually found, comma-separated, for diagnosis.
-        found: String,
+    /// An anonymous entity's derived name collided with a live ref that does
+    /// not already hold the commit just written.
+    #[error("{name} already exists and points elsewhere")]
+    NameTaken {
+        /// The ref that was already taken.
+        name: RefName,
     },
-    /// A data commit's `value/` or `schema/` entry names an object that is not
-    /// present in this repository.
-    ///
-    /// The entry is there, so the commit *is* subtree-bound; the object it
-    /// points at is absent. That means an incomplete transfer — a filtered or
-    /// partial clone with no live promisor, a hand-built bundle, or a damaged
-    /// object store. Surfaced instead of letting the lookup collapse through
-    /// [`Error::Git`], which would name only a bare oid.
-    ///
-    /// Only the subtree root is checked. Corruption deeper inside an otherwise
-    /// present subtree still surfaces as [`Error::Git`].
-    #[error("commit {commit} names a {subtree} subtree {oid} that is not present")]
-    SchemaObjectMissing {
-        /// Which half of the split: `"value"` or `"schema"`.
-        subtree: &'static str,
-        /// The absent object.
-        oid: ObjectId,
-        /// The data commit naming it.
-        commit: ObjectId,
-    },
-    /// A write lost its compare-and-swap race too many times in a row.
-    #[error("gave up updating {refname} after {attempts} contended attempts")]
-    CasExhausted {
-        /// The ref that stayed contended.
-        refname: String,
-        /// How many attempts were made before giving up.
-        attempts: u32,
-    },
-    /// Typed serialization of a [`SchemaDoc`](facet_git_tree::SchemaDoc) failed.
+    /// A schema could not be derived from a Rust type.
+    #[error(transparent)]
+    Schema(#[from] facet_git_tree::SchemaError),
+    /// Typed serialization of a value failed.
     #[error(transparent)]
     Serialize(#[from] facet_git_tree::SerializeError),
+    /// Typed deserialization of a value failed.
+    #[error(transparent)]
+    Deserialize(#[from] facet_git_tree::DeserializeError),
     /// Schema-directed serialization of a value failed — the value did not
     /// conform to its schema, with the offending path in the message.
     #[error(transparent)]
     SchemaWrite(#[from] facet_git_tree::SchemaWriteError),
-    /// Typed deserialization of a stored `SchemaDoc` failed.
-    #[error(transparent)]
-    Deserialize(#[from] facet_git_tree::DeserializeError),
-    /// The schema-schema pin failed: a document was pinned to (or, on
-    /// publish, would overwrite a tip pinned to) a schema-schema this binary
-    /// does not recognize, or a document carries no pin and is not itself a
-    /// known root — see
-    /// [`SchemaDoc::read_pinned`](facet_git_tree::SchemaDoc::read_pinned).
-    #[error(transparent)]
-    SchemaPin(#[from] facet_git_tree::SchemaPinError),
     /// Schema-directed deserialization of a stored value failed.
     #[error(transparent)]
     SchemaRead(#[from] facet_git_tree::SchemaReadError),
-    /// Any underlying `gix` failure — object, reference, or commit.
+    /// The schema-schema pin failed: a document was pinned to (or, on
+    /// publish, would overwrite a tip pinned to) a schema-schema this binary
+    /// does not recognize, or a document carries no pin and is not itself a
+    /// known root.
     #[error(transparent)]
-    Git(Box<dyn std::error::Error + Send + Sync + 'static>),
+    SchemaPin(#[from] facet_git_tree::SchemaPinError),
+    /// A backend failure from the ref store or object store.
+    #[error(transparent)]
+    Backend(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 impl Error {
-    /// Collapse a `gix` error into [`Error::Git`], preserving it as the source.
-    pub(crate) fn git<E>(err: E) -> Self
+    /// Collapse a backend error into [`Error::Backend`], preserving it as the
+    /// source.
+    pub(crate) fn backend<E>(err: E) -> Self
     where
         E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
     {
-        Error::Git(err.into())
+        Error::Backend(err.into())
     }
 }

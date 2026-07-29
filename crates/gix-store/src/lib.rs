@@ -1,23 +1,29 @@
 //! Store *anything* in Git as a real tree the stock plumbing can read.
 //!
-//! A kind is defined by publishing a [`SchemaDoc`] to `refs/schema/<kind>`;
-//! entities of that kind live as commit chains at `refs/store/<kind>/<name>`.
-//! Each data commit's tree is a two-way split, `{schema/, value/}`: `value/`
-//! is the schema-directed encoding [`facet-git-tree`](facet_git_tree)
-//! produces — not a blob of JSON, but one Git tree entry per field — and
-//! `schema/` is the very tree `refs/schema/<kind>` points at, so the schema a
-//! value was written against is reachable from the value's own commit and
-//! travels with it through any fetch. Every write is a commit; history is the
-//! audit trail. See the crate `README` for the `git ls-tree`/`git log` demo.
-//!
-//! [`Store`] is oid-in/oid-out over a `gix` repository; JSON belongs only at a
-//! CLI boundary, never here.
+//! A kind is a published [`SchemaDoc`]; its entities are commit chains whose
+//! tree is a `{value/, schema/}` split, so the schema an entity was written
+//! against travels with it through any fetch. [`Store`] is generic over a
+//! [`RefStore`] and a `gix_object` `Find`/`Write` object database, with
+//! [`RepoStore`] as the specialization over a real `gix::Repository`.
+//! [`Store::kind`] hands out a [`Kind`] typed to a `Facet`-derived Rust type;
+//! [`Store::dynamic`] hands out one that reads and writes
+//! [`facet_value::Value`] under the kind's published schema instead.
 #![forbid(unsafe_code)]
 
+mod encoding;
 mod error;
-mod refname;
+mod kind;
+mod provenance;
 mod store;
 
-pub use error::Error;
+pub use encoding::{Dynamic, Encoding, Typed};
+pub use error::{Error, Subtree};
+pub use kind::{Kind, KindSchema, Put};
+pub use provenance::SchemaLabel;
+pub use store::{Layout, RepoStore, Store};
+
 pub use facet_git_tree::{ObjectId, SchemaDoc, schema_of};
-pub use store::Store;
+pub use gix_refstore::{
+    ApplyError, Committer, Expectation, GixRefStore, InvalidRefName, MemoryRefStore, RefEdit,
+    RefName, RefPrefix, RefSegment, RefStore,
+};

@@ -1189,6 +1189,7 @@ dependencies = [
  "facet-git-tree",
  "facet-value",
  "gix",
+ "gix-refstore",
  "tempfile",
  "test-support",
  "thiserror",

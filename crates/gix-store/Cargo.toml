@@ -5,12 +5,13 @@ edition = "2024"
 readme = "README.md"
 
 [dependencies]
+facet = { version = "0.50.0-rc.0", features = ["reflect"] }
 facet-git-tree = { path = "../facet-git-tree", features = ["value"] }
 facet-value = "0.50.0-rc.5"
 gix = { version = "0.85.0", default-features = false, features = ["sha1", "zlib-rs"] }
+gix-refstore = { path = "../gix-refstore" }
 thiserror = "2"
 
 [dev-dependencies]
-facet = { version = "0.50.0-rc.0", features = ["reflect"] }
 tempfile = "3"
 test-support = { path = "../test-support" }

@@ -75,16 +75,19 @@ Here, every field is its own object, addressed by content:
 
 See [`crates/git-store`](crates/git-store) for the full demo, including the schema's own history.
 
-## The three crates
+## The four crates
 
-This repository builds `git-store` in three layers, each usable on its own — read the one that matches what you're trying to do:
+This repository builds `git-store` in layers, each usable on its own — read the one that matches what you're trying to do:
 
 - [`facet-git-tree`](crates/facet-git-tree) — the serialization core.
   Encodes any [`facet`](https://facet.rs) type, or a dynamic `facet_value::Value`, into a Git tree and back.
   Oid-in/oid-out, with no concept of a repository or a ref.
   Start here if you want the tree encoding on its own, with no opinions about how it's stored.
+- [`gix-refstore`](crates/gix-refstore) — compare-and-swap storage for Git refs.
+  Validated ref-name types and one atomic edit primitive, with a `gix` backend and an in-memory one.
+  Start here if you want the ref half without the schema half.
 - [`gix-store`](crates/gix-store) — the library.
-  Layers self-hosted schemas and ref conventions (`refs/store/<kind>/<name>`, `refs/schema/<kind>`) on top of `facet-git-tree`, using `gix` to talk to a repository.
+  Layers self-hosted schemas and ref conventions (`refs/store/<kind>/<name>`, `refs/schema/<kind>`) on top of `facet-git-tree`, over any `gix-refstore` backend and any `gix` object database.
   Start here if you're embedding storage in a Rust program.
 - [`git-store`](crates/git-store) — the CLI shown above, built on `gix-store`.
   Start here if you just want `git store put`/`get` at a terminal.

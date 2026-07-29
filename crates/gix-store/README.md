@@ -1,55 +1,77 @@
 # gix-store
 
-The library behind [`git-store`](../git-store): store anything in a `gix`
+The library behind [`git-store`](../git-store): store anything in a Git
 repository as a real Git tree, keyed by a self-hosted schema. Oid-in,
 oid-out — JSON belongs at a CLI boundary, never here.
 
 ```rust
-use gix_store::{Store, schema_of};
+use gix_store::{RefSegment, Store, schema_of};
 use facet_value::value;
+
+#[derive(facet::Facet)]
+struct Recipe { title: String, serves: u32 }
 
 let repo = gix::discover(".")?;
 let store = Store::open(&repo);
+let recipes = store.kind::<Recipe>(RefSegment::new("recipe")?);
 
 // A kind is defined by publishing its schema to refs/schema/<kind>.
-# #[derive(facet::Facet)]
-# struct Recipe { title: String, serves: u32 }
-store.put_schema("recipe", &schema_of::<Recipe>()?)?;
+recipes.publish()?;
 
 // Entities live at refs/store/<kind>/<name>; every write is a commit.
-store.store("recipe", "carbonara", &value!({ "title": "Carbonara", "serves": 4 }), None)?;
-let got = store.retrieve("recipe", "carbonara")?;   // Some(Value)
+recipes.put(&RefSegment::new("carbonara")?, &Recipe { title: "Carbonara".into(), serves: 4 })?;
+let got: Option<Recipe> = recipes.get(&RefSegment::new("carbonara")?)?;
+
+// The same refs, read and written as dynamic values instead.
+let dynamic = store.dynamic(RefSegment::new("recipe")?);
+dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serves": 2 }))?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ## How it works
 
+- **Typed and dynamic are one code path.** A `Kind` handle fixes the kind and
+  its [`Encoding`] at construction, so the kind's validity is a fact of the
+  type rather than a string checked on every call. `Typed<T>` encodes a
+  `Facet`-derived Rust type natively; `Dynamic` encodes a
+  [`facet_value::Value`] against the kind's published schema. Everything above
+  the encoding — refs, commits, schema binding — is shared, and the two
+  encodings are byte-identical, so the two handles interoperate over the same
+  refs.
 - **Schemas are self-hosted.** A [`SchemaDoc`] is an ordinary `Facet` value
   stored through the same tree encoding as everything else, committed to
-  `refs/schema/<kind>`. Its history is the kind's evolution audit.
-- **Entities are schema-directed.** `store` encodes a
-  [`facet_value::Value`] with `serialize_value_with_schema` — encoding *is*
-  validation, so a nonconforming value fails with the offending path instead of
-  writing a lossy tree. The result is byte-identical to the typed encoding.
+  `refs/schema/<kind>`. Its history is the kind's evolution audit. Each stored
+  schema pins the generation of the schema-schema it was written against, so a
+  document this binary does not speak is refused rather than misread.
+- **Encoding is validation.** A value that does not conform to its kind's
+  schema fails with the offending path instead of writing a lossy tree.
 - **Reads never guess, and never depend on a second ref.** Every data commit's
   tree is a two-entry root, `{value/, schema/}`: the value under `value/`, and
   the tree of the exact schema it was validated against under `schema/`.
-  `retrieve`/`retrieve_at` read both straight out of the one commit, so they
-  recover full fidelity — numbers as numbers, enums as tagged objects — and
-  old versions stay readable after a kind evolves *and* after a `git fetch`,
-  `git push`, or mirror that moves only the data ref. (A `Schema:`
-  trailer is still written, naming the same schema commit for `git log`, but
-  it is provenance only — nothing reads it back to resolve the schema.)
-- **Writes are serialized, not lossy.** Each ref update takes a per-ref lock
-  (under `<git-dir>/gix-store-locks/`, kept separate from git's own
-  `<ref>.lock`) so concurrent writers — threads *or* processes — produce a
-  linear history with no lost updates, then commits forward over the current
-  tip.
+  `get`/`get_at` read both straight out of the one commit, so old versions stay
+  readable after a kind evolves *and* after a `git fetch`, `git push`, or
+  mirror that moves only the data ref. (A `Schema:` trailer is still written,
+  naming the same schema commit for `git log`, but it is provenance only —
+  `Store::provenance` returns it as a label, and nothing reads it back to
+  resolve a schema.)
+- **Writes compare and swap.** Each write reads the ref, writes its commit
+  object, and applies a [`RefEdit`] conditional on the value it read; a lost
+  race is retried, never resolved by overwriting. Concurrent writers — threads
+  *or* processes — therefore produce a linear history with no lost updates.
+
+## Backends
+
+`Store` is generic over a [`gix_refstore::RefStore`] for refs and a
+`gix_object::Find`/`Write` object database for objects.
+`Store::open(&repo)` is the specialization over a real repository;
+`Store::new(MemoryRefStore::new(), ObjectStore::default())` is the same store
+with no filesystem behind it, which is what most of this crate's own tests use.
 
 ## Scope
 
 `gix-store` is the untrusted-single-writer-friendly demo primitive: one entity,
-one ref, serialized forward. Signing, gate policy, event sinks, and multi-ref
+one ref, committed forward. Signing, gate policy, event sinks, and multi-ref
 atomic transactions are out of scope by design.
 
 [`SchemaDoc`]: facet_git_tree::SchemaDoc
+[`RefEdit`]: gix_refstore::RefEdit
