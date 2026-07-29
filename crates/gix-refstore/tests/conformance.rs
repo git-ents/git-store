@@ -322,6 +322,12 @@ fn committer_signature_is_usable<S: RefStore + Committer>(
     assert!(!signature.email.is_empty());
 }
 
+fn author_signature_is_usable<S: RefStore + Committer>(store: &S, _oid: impl Fn(u32) -> ObjectId) {
+    let author = store.author().expect("author");
+    assert!(!author.name.is_empty());
+    assert!(!author.email.is_empty());
+}
+
 macro_rules! conformance_tests {
     ($($name:ident),+ $(,)?) => {
         mod memory {
@@ -361,4 +367,27 @@ conformance_tests! {
     prefixed_respects_segment_boundary,
     prefixed_empty_when_nothing_under_prefix,
     committer_signature_is_usable,
+    author_signature_is_usable,
+}
+
+/// `author.*` and `committer.*` are separate git configuration, so a backend
+/// that reads a repository must not collapse them onto one identity.
+#[test]
+fn repo_author_is_read_separately_from_committer() {
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().expect("create tempdir");
+    test_support::init_repo(dir.path());
+    let repo = gix::open(dir.path()).expect("open repo");
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(repo.git_dir().join("config"))
+        .expect("open config");
+    writeln!(config, "[author]\n\tname = Ada\n\temail = ada@example.com").expect("write config");
+    drop(config);
+
+    let repo = gix::open(dir.path()).expect("reopen repo");
+    let store = GixRefStore::new(&repo);
+    assert_eq!(store.author().expect("author").name, "Ada");
+    assert_eq!(store.signature().expect("signature").name, "Test");
 }

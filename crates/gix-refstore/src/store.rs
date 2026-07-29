@@ -61,4 +61,13 @@ pub trait Committer {
 
     /// The committer signature to stamp on objects written now.
     fn signature(&self) -> Result<Signature, Self::Error>;
+
+    /// The author signature to stamp on objects written now.
+    ///
+    /// Defaults to [`Committer::signature`]; git resolves the two from
+    /// separate configuration, so a backend that can tell them apart
+    /// overrides this.
+    fn author(&self) -> Result<Signature, Self::Error> {
+        self.signature()
+    }
 }

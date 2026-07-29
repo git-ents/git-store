@@ -245,12 +245,11 @@ where
         tree: ObjectId,
         parent: Option<ObjectId>,
     ) -> Result<ObjectId, Error> {
-        let signature = self.refs.signature().map_err(Error::backend)?;
         let commit = gix::objs::Commit {
             tree,
             parents: parent.into_iter().collect(),
-            author: signature.clone(),
-            committer: signature,
+            author: self.refs.author().map_err(Error::backend)?,
+            committer: self.refs.signature().map_err(Error::backend)?,
             encoding: None,
             message: message.into(),
             extra_headers: Vec::new(),

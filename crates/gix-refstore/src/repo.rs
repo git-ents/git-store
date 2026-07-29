@@ -68,6 +68,10 @@ pub enum GixError {
     /// write cannot be attributed.
     #[error("no committer identity configured; set user.name and user.email")]
     NoCommitter,
+    /// No `user.name`/`user.email` (or `author.*`) is configured, so a
+    /// write cannot be attributed.
+    #[error("no author identity configured; set user.name and user.email")]
+    NoAuthor,
     /// Any other `gix` failure, kept as the source.
     #[error(transparent)]
     Git(Box<dyn std::error::Error + Send + Sync + 'static>),
@@ -215,6 +219,14 @@ impl Committer for GixRefStore<'_> {
             Some(Ok(sig)) => sig.to_owned().map_err(GixError::git),
             Some(Err(err)) => Err(GixError::git(err)),
             None => Err(GixError::NoCommitter),
+        }
+    }
+
+    fn author(&self) -> Result<Signature, Self::Error> {
+        match self.repo.author() {
+            Some(Ok(sig)) => sig.to_owned().map_err(GixError::git),
+            Some(Err(err)) => Err(GixError::git(err)),
+            None => Err(GixError::NoAuthor),
         }
     }
 }
