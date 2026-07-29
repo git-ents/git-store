@@ -175,6 +175,42 @@ where
         self.store.ref_history(&self.reference(name))
     }
 
+    /// Commit `rebuild`'s result forward at `name`, retried with a fresh
+    /// [`get_entry`](Self::get_entry) whenever the compare-and-swap loses a
+    /// race — so `rebuild` always sees the entry it actually commits over
+    /// (`None` when `name` is unoccupied), never one read before a
+    /// concurrent write landed.
+    pub fn update(
+        &self,
+        name: &RefPath,
+        rebuild: impl Fn(Option<&Entry<E::Value>>) -> (String, E::Value),
+    ) -> Result<ObjectId, Error> {
+        let reference = self.reference(name);
+        loop {
+            let current = self.get_entry(name)?;
+            let (summary, value) = rebuild(current.as_ref());
+            let (message, tree) = commit_body(self, &value, summary)?;
+            let parent = current.as_ref().map(|entry| entry.commit);
+            let commit = self.store.write_commit(&message, tree, parent)?;
+            let edit = match parent {
+                Some(expected) => RefEdit::Update {
+                    name: reference.clone(),
+                    expected,
+                    new: commit,
+                },
+                None => RefEdit::Create {
+                    name: reference.clone(),
+                    new: commit,
+                },
+            };
+            match self.store.refs().apply(edit) {
+                Ok(()) => return Ok(commit),
+                Err(ApplyError::LostRace { .. }) => continue,
+                Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
+            }
+        }
+    }
+
     /// The entity names published under this kind, ascending. Nesting is
     /// preserved: an entity named `<a>/<b>` lists as that path, not as `<a>`.
     pub fn list(&self) -> Result<Vec<RefPath>, Error> {
@@ -378,6 +414,11 @@ where
             .commit_forward(&kind.reference(name), &message, tree)
     }
 
+    fn build(self, default_summary: impl FnOnce() -> String) -> Result<(String, ObjectId), Error> {
+        let summary = self.message.unwrap_or_else(default_summary);
+        commit_body(self.kind, self.value, summary)
+    }
+
     /// Commit the value at a fresh name: the commit's own id, in full.
     ///
     /// The returned id *is* the name, recoverable with [`entity_name`], so an
@@ -407,29 +448,43 @@ where
         let commit = store.write_commit(&message, tree, None)?;
         let reference = kind.reference(&name(commit));
 
-        match store.refs().apply(RefEdit::Create {
-            name: reference.clone(),
-            new: commit,
-        }) {
-            Ok(()) => Ok(commit),
-            Err(ApplyError::LostRace { .. }) => {
-                match store.refs().read(&reference).map_err(Error::backend)? {
-                    Some(existing) if existing == commit => Ok(commit),
-                    _ => Err(Error::NameTaken { name: reference }),
+        loop {
+            match store.refs().apply(RefEdit::Create {
+                name: reference.clone(),
+                new: commit,
+            }) {
+                Ok(()) => return Ok(commit),
+                Err(ApplyError::LostRace { .. }) => {
+                    match store.refs().read(&reference).map_err(Error::backend)? {
+                        Some(existing) if existing == commit => return Ok(commit),
+                        // The name is still unoccupied, so the loss was
+                        // transient backend contention, not a genuine
+                        // collision: retry the same create.
+                        None => continue,
+                        Some(_) => return Err(Error::NameTaken { name: reference }),
+                    }
                 }
+                Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
             }
-            Err(ApplyError::Backend(err)) => Err(Error::backend(err)),
         }
     }
+}
 
-    fn build(self, default_summary: impl FnOnce() -> String) -> Result<(String, ObjectId), Error> {
-        let store = self.kind.store;
-        let (schema_commit, doc) = self.kind.current_schema()?;
-        let value_tree = E::write(self.value, &doc, store.objects())?;
-        let schema_tree = store.commit_tree(schema_commit)?;
-        let tree = store.bind_schema(value_tree, schema_tree)?;
-        let summary = self.message.unwrap_or_else(default_summary);
-        let message = format!("{summary}\n\nSchema: {schema_commit}\n");
-        Ok((message, tree))
-    }
+/// The tree and commit message a value builds down to, under `kind`'s
+/// current schema — shared by `Put`'s builders and [`Kind::update`].
+fn commit_body<E: Encoding, R, O>(
+    kind: &Kind<'_, E, R, O>,
+    value: &E::Value,
+    summary: String,
+) -> Result<(String, ObjectId), Error>
+where
+    R: RefStore + Committer,
+    O: Find + Write,
+{
+    let (schema_commit, doc) = kind.current_schema()?;
+    let value_tree = E::write(value, &doc, kind.store.objects())?;
+    let schema_tree = kind.store.commit_tree(schema_commit)?;
+    let tree = kind.store.bind_schema(value_tree, schema_tree)?;
+    let message = format!("{summary}\n\nSchema: {schema_commit}\n");
+    Ok((message, tree))
 }

@@ -4,6 +4,10 @@
 //! `git fetch`, cross-thread concurrency, `git ls-tree`-shaped plumbing
 //! assertions) lives in `tests/repository.rs` instead.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::convert::Infallible;
+
 use facet::Facet;
 use facet_git_tree::{
     Constant, DeserializeError, GitObject, Hints, ObjectStore, SchemaPinError, Target, TreeEntry,
@@ -12,8 +16,8 @@ use facet_git_tree::{
 use facet_value::value;
 use gix_refstore::RefEdit;
 use gix_store::{
-    Committer, Entry, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix, RefSegment,
-    RefStore, Store, Subtree, entity_name, entity_name_under,
+    ApplyError, Committer, Entry, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix,
+    RefSegment, RefStore, Store, Subtree, entity_name, entity_name_under,
 };
 
 fn seg(s: &str) -> RefSegment {
@@ -799,6 +803,158 @@ fn anonymous_under_names_an_entity_by_group_and_whole_commit_id() {
     let name = entity_name_under(&group, commit);
     assert_eq!(name.to_string(), format!("batch-1/{commit}"));
     assert_eq!(store.dynamic(seg("counter")).list().unwrap(), vec![name]);
+}
+
+// --- fault-injecting RefStore: retry paths ---
+
+/// A scripted failure for [`FlakyRefStore::apply`].
+enum Injection {
+    /// Land this edit for real first, so the caller's own edit then fails
+    /// against a genuine precondition mismatch on the backend — simulates a
+    /// concurrent writer that actually won the race.
+    Concurrent(RefEdit),
+    /// Fail immediately with nothing written — contention indistinguishable
+    /// from a real race by the caller, but the backend never changes.
+    Phantom,
+}
+
+/// Wraps a [`MemoryRefStore`], scripting its first `apply` calls to fail —
+/// exercises retry paths without a real concurrent writer.
+struct FlakyRefStore {
+    inner: MemoryRefStore,
+    injections: RefCell<VecDeque<Injection>>,
+}
+
+impl FlakyRefStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryRefStore::new(),
+            injections: RefCell::new(VecDeque::new()),
+        }
+    }
+
+    fn push_concurrent(&self, edit: RefEdit) {
+        self.injections
+            .borrow_mut()
+            .push_back(Injection::Concurrent(edit));
+    }
+
+    fn push_phantom(&self) {
+        self.injections.borrow_mut().push_back(Injection::Phantom);
+    }
+}
+
+impl RefStore for FlakyRefStore {
+    type Error = Infallible;
+
+    fn read(&self, name: &RefName) -> Result<Option<ObjectId>, Self::Error> {
+        self.inner.read(name)
+    }
+
+    fn prefixed(&self, prefix: &RefPrefix) -> Result<Vec<(RefName, ObjectId)>, Self::Error> {
+        self.inner.prefixed(prefix)
+    }
+
+    fn apply(&self, edit: RefEdit) -> Result<(), ApplyError<Self::Error>> {
+        match self.injections.borrow_mut().pop_front() {
+            Some(Injection::Concurrent(winner)) => {
+                self.inner
+                    .apply(winner)
+                    .expect("injected concurrent edit applies cleanly");
+                self.inner.apply(edit)
+            }
+            Some(Injection::Phantom) => Err(ApplyError::LostRace {
+                name: edit.name().clone(),
+                expected: edit.expectation(),
+            }),
+            None => self.inner.apply(edit),
+        }
+    }
+}
+
+impl Committer for FlakyRefStore {
+    type Error = Infallible;
+
+    fn signature(&self) -> Result<gix::actor::Signature, Self::Error> {
+        self.inner.signature()
+    }
+}
+
+fn flaky_store() -> Store<FlakyRefStore, ObjectStore> {
+    Store::new(FlakyRefStore::new(), ObjectStore::default())
+}
+
+/// [`Kind::update`]'s whole reason to exist: `rebuild` must see the entry
+/// its own compare-and-swap actually lands over, not the one read before a
+/// concurrent write landed — so forwarding state off the current value
+/// (a running total, here) survives a real mid-write race intact.
+#[test]
+fn update_rebuilds_from_the_entry_the_retry_actually_commits_over() {
+    let store = flaky_store();
+    let counter = store.kind::<Counter>(seg("counter"));
+    counter.publish().unwrap();
+
+    let original = counter.put(&entity("c"), &Counter { n: 1 }).unwrap();
+
+    // Build a legitimately schema-bound competing commit, parented on the
+    // same tip, without ever letting it touch the "c" ref directly.
+    let scratch = entity("scratch");
+    store
+        .refs()
+        .apply(RefEdit::Create {
+            name: counter.reference(&scratch),
+            new: original,
+        })
+        .unwrap();
+    let winner = counter.write(&Counter { n: 50 }).at(&scratch).unwrap();
+
+    store.refs().push_concurrent(RefEdit::Update {
+        name: counter.reference(&entity("c")),
+        expected: original,
+        new: winner,
+    });
+
+    let commit = counter
+        .update(&entity("c"), |current| {
+            let n = current.map_or(0, |entry| entry.value.n);
+            (format!("bump to {}", n + 1), Counter { n: n + 1 })
+        })
+        .unwrap();
+
+    assert_eq!(
+        counter.get_at(commit).unwrap(),
+        Counter { n: 51 },
+        "rebuilt off the race winner's n=50, not the stale n=1 read before the race"
+    );
+    assert_eq!(
+        counter.history(&entity("c")).unwrap(),
+        vec![commit, winner, original]
+    );
+}
+
+/// A [`Put::anonymous`] whose first `Create` loses to spurious backend
+/// contention — nothing actually landed — retries the very same create
+/// rather than reporting [`Error::NameTaken`]: the name is still free, so
+/// there is nothing to have collided with.
+#[test]
+fn anonymous_retries_to_success_on_pure_contention() {
+    let store = flaky_store();
+    store
+        .dynamic(seg("counter"))
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+    store.refs().push_phantom();
+
+    let commit = store
+        .dynamic(seg("counter"))
+        .write(&value!({ "n": 1 }))
+        .anonymous()
+        .unwrap();
+    assert_eq!(
+        store.dynamic(seg("counter")).get_at(commit).unwrap(),
+        value!({ "n": 1 })
+    );
 }
 
 // --- schema-schema pin ---
