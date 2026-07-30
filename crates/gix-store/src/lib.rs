@@ -8,6 +8,8 @@
 //! [`Store::kind`] hands out a [`Kind`] typed to a `Facet`-derived Rust type;
 //! [`Store::dynamic`] hands out one that reads and writes
 //! [`facet_value::Value`] under the kind's published schema instead.
+//! [`Store::with_signer`] covers every commit the store writes with a
+//! [`Signer`]'s opaque bytes, which the store carries and never interprets.
 #![forbid(unsafe_code)]
 
 mod document;
@@ -28,5 +30,5 @@ pub use store::{Layout, RepoStore, Store};
 pub use facet_git_tree::{ObjectId, Schema, schema_of};
 pub use gix_refstore::{
     ApplyError, Committer, Expectation, GixRefStore, InvalidRefName, MemoryRefStore, RefEdit,
-    RefName, RefPath, RefPrefix, RefSegment, RefStore,
+    RefName, RefPath, RefPrefix, RefSegment, RefStore, SignatureBytes, Signer,
 };

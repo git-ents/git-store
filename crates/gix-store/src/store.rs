@@ -2,9 +2,10 @@
 
 use facet::Facet;
 use facet_git_tree::ObjectId;
-use gix::objs::{Find, Write};
+use gix::objs::{Find, Write, WriteTo};
 use gix_refstore::{
-    ApplyError, Committer, GixRefStore, RefEdit, RefName, RefPrefix, RefSegment, RefStore,
+    ApplyError, Committer, ErasedSigner, GixRefStore, RefEdit, RefName, RefPrefix, RefSegment,
+    RefStore, SignatureBytes, Signer,
 };
 
 use crate::encoding::{Dynamic, Encoding, Typed};
@@ -47,7 +48,15 @@ pub struct Store<R, O> {
     refs: R,
     objects: O,
     layout: Layout,
+    signer: Option<Box<dyn ErasedSigner>>,
 }
+
+/// The extra commit header a signed write's bytes land in.
+///
+/// Lowercase hex, because a header value may hold neither a newline nor a NUL;
+/// that transcoding is framing, not interpretation — the store reads back
+/// exactly the bytes the [`Signer`] produced and asks nothing else of them.
+const SIGNATURE_HEADER: &str = "signature";
 
 impl<R, O> Store<R, O>
 where
@@ -65,7 +74,58 @@ where
             refs,
             objects,
             layout,
+            signer: None,
         }
+    }
+
+    /// Cover every commit this store writes with `signer`'s bytes.
+    ///
+    /// A store without one writes unsigned commits, which is the default: a
+    /// signer is configured once here rather than passed at every write, so
+    /// nothing on the write path changes shape when one is present.
+    ///
+    /// ```no_run
+    /// # use gix_refstore::{MemoryRefStore, SignatureBytes, Signer};
+    /// # use gix_store::Store;
+    /// struct Machine;
+    ///
+    /// impl Signer for Machine {
+    ///     type Error = std::io::Error;
+    ///
+    ///     fn sign(&self, bytes: &[u8]) -> Result<SignatureBytes, Self::Error> {
+    ///         Ok(SignatureBytes::from(bytes.to_vec()))
+    ///     }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let objects = gix::open(".")?.objects.clone();
+    /// let store = Store::new(MemoryRefStore::new(), objects).with_signer(Machine);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_signer(mut self, signer: impl Signer + 'static) -> Self {
+        self.signer = Some(Box::new(signer));
+        self
+    }
+
+    /// The signature bytes `commit` carries, or `None` when it is unsigned.
+    ///
+    /// Verbatim: the store performs no verification, and never has an opinion
+    /// on what the bytes mean — that is attest's business.
+    pub fn signature(&self, commit: ObjectId) -> Result<Option<SignatureBytes>, Error> {
+        self.with_commit(commit, |c| {
+            let Some((_, value)) = c
+                .extra_headers
+                .iter()
+                .find(|(name, _)| *name == SIGNATURE_HEADER)
+            else {
+                return Ok(None);
+            };
+            unhex(value).map(Some).ok_or(Error::InvalidSignatureHeader {
+                commit,
+                text: value.to_string(),
+            })
+        })
     }
 
     /// The ref store backing this store.
@@ -254,7 +314,7 @@ where
         tree: ObjectId,
         parent: Option<ObjectId>,
     ) -> Result<ObjectId, Error> {
-        let commit = gix::objs::Commit {
+        let mut commit = gix::objs::Commit {
             tree,
             parents: parent.into_iter().collect(),
             author: self.refs.author().map_err(Error::backend)?,
@@ -263,6 +323,17 @@ where
             message: message.into(),
             extra_headers: Vec::new(),
         };
+        // The signature covers the commit as it stands without one, exactly as
+        // git's own object signing does: the header cannot be inside the bytes
+        // it attests to.
+        if let Some(signer) = &self.signer {
+            let mut bytes = Vec::new();
+            commit.write_to(&mut bytes).map_err(Error::backend)?;
+            let signature = signer.sign_erased(&bytes).map_err(Error::Signer)?;
+            commit
+                .extra_headers
+                .push((SIGNATURE_HEADER.into(), hex(signature.as_bytes()).into()));
+        }
         self.objects.write(&commit).map_err(Error::backend)
     }
 
@@ -358,6 +429,22 @@ where
             }),
         }
     }
+}
+
+/// Lowercase hex of `bytes`, the form a commit header can hold.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The bytes a [`hex`] string names, or `None` when it is not one.
+fn unhex(text: &gix::bstr::BStr) -> Option<SignatureBytes> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    text.chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect::<Option<Vec<u8>>>()
+        .map(SignatureBytes::from)
 }
 
 /// Every ref name directly under `prefix` that is a single valid

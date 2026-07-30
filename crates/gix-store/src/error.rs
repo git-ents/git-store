@@ -143,6 +143,22 @@ pub enum Error {
         /// The schema commit lacking a `migration` entry.
         commit: ObjectId,
     },
+    /// The configured [`Signer`](gix_refstore::Signer) could not produce
+    /// signature bytes, so nothing was written.
+    #[error("signing the commit failed")]
+    Signer(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+    /// A commit's signature header is not the hex framing a signed write
+    /// produces, so the bytes it covers cannot be recovered.
+    ///
+    /// Not a verdict on the signature — the store never forms one — only that
+    /// the header does not name any byte string at all.
+    #[error("commit {commit} has an invalid signature header {text:?}")]
+    InvalidSignatureHeader {
+        /// The commit carrying the malformed header.
+        commit: ObjectId,
+        /// The header text that could not be decoded.
+        text: String,
+    },
     /// A backend failure from the ref store or object store.
     #[error(transparent)]
     Backend(Box<dyn std::error::Error + Send + Sync + 'static>),

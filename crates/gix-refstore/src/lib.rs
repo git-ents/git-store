@@ -4,8 +4,10 @@
 //! concurrent writers — so a caller depends on the trait rather than being
 //! welded to `gix::Repository`. [`Committer`] carries the identity to stamp
 //! on writes, kept separate since a store's refs and a repository's
-//! configured identity are independent concerns. [`MemoryRefStore`] is a
-//! `BTreeMap`-backed implementation of both, for tests.
+//! configured identity are independent concerns, and [`Signer`] carries the
+//! opaque signature bytes a write may be covered by — bytes this crate moves
+//! and never interprets. [`MemoryRefStore`] is a `BTreeMap`-backed
+//! implementation of both store traits, for tests.
 //!
 //! # Example
 //!
@@ -40,6 +42,7 @@ mod edit;
 mod memory;
 mod name;
 mod repo;
+mod signer;
 mod store;
 
 pub use edit::{Expectation, RefEdit};
@@ -48,4 +51,5 @@ pub use gix_hash::ObjectId;
 pub use memory::MemoryRefStore;
 pub use name::{InvalidRefName, RefName, RefPath, RefPrefix, RefSegment, Violation};
 pub use repo::{GixError, GixRefStore};
+pub use signer::{ErasedSigner, SignatureBytes, Signer};
 pub use store::{ApplyError, Committer, RefStore};
