@@ -10,6 +10,7 @@
 //! [`facet_value::Value`] under the kind's published schema instead.
 #![forbid(unsafe_code)]
 
+mod document;
 mod encoding;
 mod error;
 mod kind;
@@ -17,6 +18,7 @@ mod migrate;
 mod provenance;
 mod store;
 
+pub use document::{DocumentBuilder, DocumentError};
 pub use encoding::{Dynamic, Encoding, Typed};
 pub use error::{Error, Subtree};
 pub use kind::{Entry, Kind, KindSchema, Put, entity_name, entity_name_under};

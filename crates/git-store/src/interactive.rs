@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input, Select};
 use facet_git_tree::{Node, Schema, StructField, VariantKind};
 use facet_value::{VArray, VObject, Value};
+use gix_store::DocumentBuilder;
 
 use crate::{DynKind, is_scalar_schema, resolve};
 
@@ -179,12 +180,7 @@ fn build_value(schema: &Node, doc: &Schema, label: &str, ask: &mut dyn Ask) -> R
         Node::USize => return ask_scalar::<usize>(ask, label, "usize"),
         Node::F32 => return ask_scalar::<f32>(ask, label, "f32"),
         Node::F64 => return ask_scalar::<f64>(ask, label, "f64"),
-        Node::Struct(fields) => build_struct(
-            fields.iter().map(|(n, f)| (n, &f.node, f.has_default)),
-            doc,
-            label,
-            ask,
-        )?,
+        Node::Struct(_) => build_struct(schema, doc, label, ask)?,
         Node::Tuple(elems) => {
             let mut arr = VArray::new();
             for (i, elem) in elems.iter().enumerate() {
@@ -243,26 +239,41 @@ where
     }
 }
 
-/// Prompt for a struct's field values, shared by [`Node::Struct`] (fields
-/// carry a default marker) and a struct enum variant's payload (bare
-/// [`Node`] fields, `has_default` always `false`).
+/// Prompt for a [`Node::Struct`]'s field values, via the library's
+/// [`DocumentBuilder`].
 ///
 /// A field whose `has_default` is set is skipped, and therefore left out of
 /// the built object, if the user declines to set it — the interactive
 /// counterpart of the schema-directed writer's own omission of such a field.
-fn build_struct<'a>(
-    fields: impl IntoIterator<Item = (&'a String, &'a Node, bool)>,
+fn build_struct(schema: &Node, doc: &Schema, label: &str, ask: &mut dyn Ask) -> Result<Value> {
+    let mut builder = DocumentBuilder::for_node(schema, doc)?;
+    let fields: Vec<(String, Node, bool)> = builder
+        .fields()
+        .map(|(name, node, has_default)| (name.to_owned(), node.clone(), has_default))
+        .collect();
+    for (name, node, has_default) in fields {
+        let flabel = field(label, &name);
+        if has_default && !ask.confirm(&format!("set {flabel}? (default otherwise)"), false)? {
+            continue;
+        }
+        let value = build_value(&node, doc, &flabel, ask)?;
+        builder.set(&name, value)?;
+    }
+    Ok(builder.build()?)
+}
+
+/// Prompt for a struct enum variant's payload fields. Unlike [`Node::Struct`]
+/// these carry no [`StructField::has_default`] marker, so every field is
+/// asked for and inserted unconditionally.
+fn build_variant_fields(
+    fields: &BTreeMap<String, Node>,
     doc: &Schema,
     label: &str,
     ask: &mut dyn Ask,
 ) -> Result<Value> {
     let mut obj = VObject::new();
-    for (name, schema, has_default) in fields {
-        let flabel = field(label, name);
-        if has_default && !ask.confirm(&format!("set {flabel}? (default otherwise)"), false)? {
-            continue;
-        }
-        let value = build_value(schema, doc, &flabel, ask)?;
+    for (name, schema) in fields {
+        let value = build_value(schema, doc, &field(label, name), ask)?;
         obj.insert(name.as_str(), value);
     }
     Ok(obj.into())
@@ -319,12 +330,7 @@ fn build_enum(
             }
             arr.into()
         }
-        VariantKind::Struct(fields) => build_struct(
-            fields.iter().map(|(n, node)| (n, node, false)),
-            doc,
-            &vlabel,
-            ask,
-        )?,
+        VariantKind::Struct(fields) => build_variant_fields(fields, doc, &vlabel, ask)?,
     };
     let mut obj = VObject::new();
     obj.insert(name, payload);
