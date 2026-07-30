@@ -7,7 +7,10 @@
 //! configured identity are independent concerns, and [`Signer`] carries the
 //! opaque signature bytes a write may be covered by — bytes this crate moves
 //! and never interprets. [`MemoryRefStore`] is a `BTreeMap`-backed
-//! implementation of both store traits, for tests.
+//! implementation of both store traits, for tests. [`AsOfRefStore`] is a
+//! read-only decorator over any [`RefStore`] that answers as though a fixed
+//! set of refs held different values, for evaluating something against a
+//! repository as of before a ref moved without mutating it to find out.
 //!
 //! # Example
 //!
@@ -38,6 +41,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod as_of;
 mod edit;
 mod memory;
 mod name;
@@ -45,6 +49,7 @@ mod repo;
 mod signer;
 mod store;
 
+pub use as_of::{AsOfError, AsOfRefStore};
 pub use edit::{Expectation, RefEdit};
 pub use gix::actor::Signature;
 pub use gix_hash::ObjectId;
