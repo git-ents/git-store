@@ -31,7 +31,7 @@ use gix_object::Write;
 
 use crate::de::MAX_DEPTH;
 use crate::error::{SchemaWriteError, SerializeError};
-use crate::schema::{Node, Schema, VariantKind};
+use crate::schema::{FieldNode, Node, Schema, VariantKind};
 use crate::ser::{float_text, serialize_node, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
 
@@ -324,13 +324,14 @@ fn write_node<W: Write + ?Sized>(
 /// struct enum variants.
 ///
 /// A key the schema does not define is rejected, since the read path never
-/// emits one. A field the schema defines but the object omits is rejected
-/// too: the read path requires a tree entry for every field a schema names,
-/// `Optional` included, so writing one short would produce a tree that can
-/// never read back.
-fn write_named_tree<W: Write + ?Sized>(
+/// emits one. A field the schema defines but the object omits is rejected too
+/// — the read path requires a tree entry for every field a schema names, so
+/// writing one short would produce a tree that can never read back — unless
+/// [`FieldNode::has_default`] is set for it, in which case the field's entry
+/// is simply left out.
+fn write_named_tree<W: Write + ?Sized, T: FieldNode>(
     value: &Value,
-    fields: &BTreeMap<String, Node>,
+    fields: &BTreeMap<String, T>,
     doc: &Schema,
     store: &W,
     path: &Path,
@@ -346,25 +347,31 @@ fn write_named_tree<W: Write + ?Sized>(
         }
     }
     let mut entries = Vec::with_capacity(fields.len());
-    for (name, schema) in fields {
+    for (name, field) in fields {
         // A `Schema` is data — `git store schema put` ingests one from
         // hand-authored JSON — so a field name is untrusted input here, unlike
         // a `#[derive(Facet)]` name which is always a Rust identifier. Without
         // this, a field named exactly `crate::marker::MARKER_KEY` would encode
         // to the very tree that means "empty", and read back as empty.
         check_key(name).map_err(SerializeError::from)?;
-        let fv = obj
-            .get(name.as_str())
-            .ok_or_else(|| SchemaWriteError::MissingField {
-                path: path.show(),
-                field: name.clone(),
-            })?;
-        let (oid, kind) = write_node(fv, schema, doc, store, &path.field(name), depth + 1)?;
-        entries.push(TreeEntry {
-            mode: EntryMode::from(kind),
-            filename: name.as_str().into(),
-            oid,
-        });
+        match obj.get(name.as_str()) {
+            Some(fv) => {
+                let (oid, kind) =
+                    write_node(fv, field.node(), doc, store, &path.field(name), depth + 1)?;
+                entries.push(TreeEntry {
+                    mode: EntryMode::from(kind),
+                    filename: name.as_str().into(),
+                    oid,
+                });
+            }
+            None if field.has_default() => {}
+            None => {
+                return Err(SchemaWriteError::MissingField {
+                    path: path.show(),
+                    field: name.clone(),
+                });
+            }
+        }
     }
     entries.sort();
     tree(store, entries)

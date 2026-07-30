@@ -53,6 +53,16 @@ impl MigrationSchema {
     /// Changing this id is a semver-major break; see
     /// `genesis_constant_is_real` in `tests/migration_pin.rs`, which pins it
     /// against the actual serialization.
+    ///
+    /// Updated for the field-level default-presence marker: `Migration`'s own
+    /// shape does not reference `Node`, but this generation's tree also
+    /// splices the [`codec`] fixture shared with the schema-schema tower, and
+    /// that fixture's *schema* half (`schema_of::<codec::Fixture>()`) does —
+    /// `Fixture` is itself a named struct, so its `Node::Struct` now carries
+    /// `StructField` too, moving the shared `codec` tree id and therefore
+    /// this one, exactly as the doc comment on [`codec`] says a shape-only
+    /// change elsewhere in the schema-schema can. No prior generation existed
+    /// to chain from, so the constant is replaced in place.
     pub const GENESIS: MigrationSchema = MigrationSchema {
         tree: decode_oid(GENESIS_HEX),
         parent: None,
@@ -83,7 +93,7 @@ impl MigrationSchema {
 
 /// Hex text for [`MigrationSchema::GENESIS`]'s tree id, kept as a named
 /// constant so it stays human-checkable against the golden-oid test.
-const GENESIS_HEX: &str = "0afeeeb9f8e78c485199757eea274bb1d0e8a8db";
+const GENESIS_HEX: &str = "f7f20e16f50e0363863d6322abe6c49a24706711";
 
 /// The current generation's own migration-schema document —
 /// `schema_of::<Migration>()`, unconditionally describable since it is this

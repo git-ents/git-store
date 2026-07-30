@@ -13,7 +13,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input, Select};
-use facet_git_tree::{Node, Schema, VariantKind};
+use facet_git_tree::{Node, Schema, StructField, VariantKind};
 use facet_value::{VArray, VObject, Value};
 
 use crate::{DynKind, is_scalar_schema, resolve};
@@ -179,7 +179,12 @@ fn build_value(schema: &Node, doc: &Schema, label: &str, ask: &mut dyn Ask) -> R
         Node::USize => return ask_scalar::<usize>(ask, label, "usize"),
         Node::F32 => return ask_scalar::<f32>(ask, label, "f32"),
         Node::F64 => return ask_scalar::<f64>(ask, label, "f64"),
-        Node::Struct(fields) => build_struct(fields, doc, label, ask)?,
+        Node::Struct(fields) => build_struct(
+            fields.iter().map(|(n, f)| (n, &f.node, f.has_default)),
+            doc,
+            label,
+            ask,
+        )?,
         Node::Tuple(elems) => {
             let mut arr = VArray::new();
             for (i, elem) in elems.iter().enumerate() {
@@ -238,15 +243,26 @@ where
     }
 }
 
-fn build_struct(
-    fields: &BTreeMap<String, Node>,
+/// Prompt for a struct's field values, shared by [`Node::Struct`] (fields
+/// carry a default marker) and a struct enum variant's payload (bare
+/// [`Node`] fields, `has_default` always `false`).
+///
+/// A field whose `has_default` is set is skipped, and therefore left out of
+/// the built object, if the user declines to set it — the interactive
+/// counterpart of the schema-directed writer's own omission of such a field.
+fn build_struct<'a>(
+    fields: impl IntoIterator<Item = (&'a String, &'a Node, bool)>,
     doc: &Schema,
     label: &str,
     ask: &mut dyn Ask,
 ) -> Result<Value> {
     let mut obj = VObject::new();
-    for (name, schema) in fields {
-        let value = build_value(schema, doc, &field(label, name), ask)?;
+    for (name, schema, has_default) in fields {
+        let flabel = field(label, name);
+        if has_default && !ask.confirm(&format!("set {flabel}? (default otherwise)"), false)? {
+            continue;
+        }
+        let value = build_value(schema, doc, &flabel, ask)?;
         obj.insert(name.as_str(), value);
     }
     Ok(obj.into())
@@ -303,7 +319,12 @@ fn build_enum(
             }
             arr.into()
         }
-        VariantKind::Struct(fields) => build_struct(fields, doc, &vlabel, ask)?,
+        VariantKind::Struct(fields) => build_struct(
+            fields.iter().map(|(n, node)| (n, node, false)),
+            doc,
+            &vlabel,
+            ask,
+        )?,
     };
     let mut obj = VObject::new();
     obj.insert(name, payload);
@@ -346,7 +367,7 @@ fn build_schema_node(ask: &mut dyn Ask, what: &str) -> Result<Node> {
         "float" => width(ask, &["f64", "f32"], &[Node::F64, Node::F32])?,
         "char" => Node::Char,
         "bytes" => Node::Bytes,
-        "struct" => Node::Struct(collect_fields(ask)?),
+        "struct" => Node::Struct(collect_struct_fields(ask)?),
         "enum" => enum_schema(ask)?,
         "list" => Node::List(Box::new(build_schema_node(ask, "element type")?)),
         "optional" => Node::Optional(Box::new(build_schema_node(ask, "inner type")?)),
@@ -364,14 +385,28 @@ fn width(ask: &mut dyn Ask, names: &[&str], schemas: &[Node]) -> Result<Node> {
     Ok(schemas[ask.select("width", names, 0)?].clone())
 }
 
-/// Named fields for a struct or struct enum variant, gathered until the user
-/// declines to add another (an empty set is a valid unit-like struct).
+/// Named fields for a struct enum variant, gathered until the user declines
+/// to add another (an empty set is a valid unit-like variant).
 fn collect_fields(ask: &mut dyn Ask) -> Result<BTreeMap<String, Node>> {
     let mut fields = BTreeMap::new();
     while ask.confirm("add a field?", fields.is_empty())? {
         let name = nonempty(ask, "field name")?;
         let schema = build_schema_node(ask, "field type")?;
         fields.insert(name, schema);
+    }
+    Ok(fields)
+}
+
+/// Named fields for a [`Node::Struct`], gathered the same way as
+/// [`collect_fields`] but additionally asking whether each carries a default
+/// (`StructField::has_default`).
+fn collect_struct_fields(ask: &mut dyn Ask) -> Result<BTreeMap<String, StructField>> {
+    let mut fields = BTreeMap::new();
+    while ask.confirm("add a field?", fields.is_empty())? {
+        let name = nonempty(ask, "field name")?;
+        let node = build_schema_node(ask, "field type")?;
+        let has_default = ask.confirm("does this field have a default?", false)?;
+        fields.insert(name, StructField { node, has_default });
     }
     Ok(fields)
 }

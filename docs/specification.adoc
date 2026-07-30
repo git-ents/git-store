@@ -322,7 +322,7 @@ Every blob referenced in the table below is a leaf blob per link:#serialization.
 | `Bytes` holding the blob's content verbatim.
 
 | `Struct`
-| an `Object` with one member per field; every field the schema names MUST have a tree entry, `Optional` included, otherwise the read MUST fail.
+| an `Object` with one member per non-omitted field; every field the schema names MUST have a tree entry, `Optional` included, otherwise the read MUST fail — unless the field's `has_default` is set, in which case a missing entry MUST be left out of the `Object` rather than failing or inventing a value.
 
 | `Tuple`, `List`
 | an `Array` of the elements, ordered by numeric index per link:#serialization.design.trees.ordering[entry name ordering].
@@ -380,7 +380,7 @@ pub enum Node {
     U8, U16, U32, U64, U128, USize,
     F32, F64,
     Bytes,
-    Struct(BTreeMap<String, Node>),
+    Struct(BTreeMap<String, StructField>),
     Tuple(Vec<Node>),
     List(Box<Node>),
     Array { elem: Box<Node>, len: usize },
@@ -390,6 +390,11 @@ pub enum Node {
     RawTree,
     Dynamic,
     Ref(String),
+}
+
+pub struct StructField {
+    pub node: Node,
+    pub has_default: bool,
 }
 
 #[repr(u8)]
@@ -403,6 +408,8 @@ pub enum VariantKind {
 
 A struct node's fields and an enum node's variants MUST be keyed by name, so the name IS the tree entry name under link:#serialization.design.trees.collections[the scalar-key map layout] — no ordinal indirection, and no special case in the encoder: the schema types are ordinary `Facet` values walked by the same generic encoding, which is what this requirement's self-hosting claim already demands.
 
+A `Node::Struct` field is a `StructField`, not a bare `Node`: `has_default` marks a field a write MAY leave without a tree entry, per link:#serialization.schema-directed[schema-directed serialization]'s `Struct` row, and a read finds such an omitted entry simply absent rather than failing, per link:#deserialization.schema-driven[schema-driven deserialization]'s. A struct enum variant's fields (`VariantKind::Struct`) carry no such marker and stay bare `Node`s.
+
 Field and variant declaration order is consequently NOT recorded and MUST NOT be relied upon.
 It is not load-bearing anywhere in the encoding — struct values encode name-keyed and enum variants tag by name — so nothing a reader does depends on it.
 
@@ -412,10 +419,13 @@ A schema tree therefore reads like a type declaration, as `git ls-tree -r` of a 
 
 [source]
 ----
-defs/Issue/Struct/id                     -> "String\n"
-defs/Issue/Struct/labels/List            -> "String\n"
-defs/Issue/Struct/parent/Optional        -> "String\n"
-root/Ref                                 -> "Issue\n"
+defs/Issue/Struct/id/has_default              -> "false\n"
+defs/Issue/Struct/id/node                     -> "String\n"
+defs/Issue/Struct/labels/has_default          -> "false\n"
+defs/Issue/Struct/labels/node/List            -> "String\n"
+defs/Issue/Struct/parent/has_default          -> "false\n"
+defs/Issue/Struct/parent/node/Optional        -> "String\n"
+root/Ref                                      -> "Issue\n"
 ----
 --
 
@@ -435,7 +445,7 @@ The fixture's schema alone binds only the shape language `Node`/`VariantKind` de
 The recursion bottoms out at a root generation, whose tree is written with no pin spliced in.
 Absence of a `schema` entry therefore means "this is the root of the tower", and is legitimate ONLY when the tree's own object id is one the reader recognizes as a root generation.
 A reader MUST reject an unpinned tree whose own id it does not recognize as a root: that is a truncated or hand-written document, not the bottom.
-A reader MUST carry the recognized generations as compiled-in constants; the genesis tree of this format version is `b82f18bc0b9f8c5d389d0ca161480365d72b08d6`.
+A reader MUST carry the recognized generations as compiled-in constants; the genesis tree of this format version is `5896cb1c8ff662027c9a54232a5364a5072b60c1`.
 
 Generation N's own tree MUST pin generation N−1 under its own `schema` entry.
 Ancestry through those entries is what restores the ordering a version number gave and a bare object id does not; there is one generation today, so the chain has length zero, but the format reserves the shape.
@@ -470,6 +480,8 @@ A unit *enum variant* does NOT resolve to `Node::Unit`, despite the name similar
 
 That reasoning is about a *fixed path*, and does not extend to a unit struct reached through a varying one. A `Vec` of unit structs encodes every element as an empty tree, so its length — a genuine, varying property of the value — contributes no blob to `git ls-tree -r` and no line to `git diff`; likewise `Option<UnitStruct>` renders `Some` as an empty tree, visible only as the disappearance of the `None` marker. These remain unmarked, and so remain invisible to blob-oriented tooling, which is the same defect this marker exists to remove — narrowed, not eliminated.
 ====
+
+A plain (non-variant) named struct's fields MUST carry `StructField::has_default` set from the underlying `facet_core::Field::has_default()` — true exactly when the field's declaration carries `#[facet(default)]` or `#[facet(default = expr)]`. The marker records only that a default exists, never the default value itself: the value may be computed at write time (a current timestamp, for instance), so baking a snapshot into a published schema would let a stale schema silently misrepresent what a fresh write actually produces. A struct enum variant's fields carry no such marker.
 
 Named user types — structs and enums — MUST be deduplicated into the document's `defs` table and referenced by `Node::Ref(name)`.
 Names MUST be assigned deterministically: the key is the type's `type_identifier`, and when distinct types share an identifier, later occurrences in pre-order traversal of the shape are disambiguated with `_2`, `_3`, … suffixes.
@@ -510,7 +522,7 @@ The accepted set MUST be exactly the image of link:#deserialization.schema-drive
 | `Bytes`, encoded verbatim; or a `String`, encoded as its UTF-8 bytes.
 
 | `Struct`
-| an `Object` whose keys are all defined fields; every field the schema names MUST be present in the object, and a key the schema does not define MUST be an error.
+| an `Object` whose keys are all defined fields; every field the schema names MUST be present in the object and its entry written, unless the field's `has_default` is set, in which case the writer MAY omit both the key and the entry; a key the schema does not define MUST be an error.
 
 | `Tuple`, `Array { elem, len }`
 | an `Array` of the exact required length, encoded as an link:#serialization.design.trees.ordering[ordinal-named] tree; a length mismatch MUST be an error.
@@ -701,7 +713,7 @@ Every stored migration MUST carry, at the fixed top-level tree entry name `schem
 The migration tower MUST be separate from the schema-schema tower.
 The two documents evolve independently, and adding a `Change` variant must not invalidate every stored schema document.
 A migration-schema generation's tree MUST carry a `codec` entry under exactly the same construction the schema-schema tower's does (link:#schema.representation.pin[the schema-schema pin]) — the identical fixture, spliced under the identical name, so the two towers share one content-addressed `codec` object regardless of which one writes it first.
-The genesis tree of this format version is `0afeeeb9f8e78c485199757eea274bb1d0e8a8db`.
+The genesis tree of this format version is `f7f20e16f50e0363863d6322abe6c49a24706711`.
 
 The check is load-bearing in a way the schema case is not: a reader that silently ignored an operator it did not recognize would not fail, it would produce a *wrong* value — one that looks conformant and is not.
 --

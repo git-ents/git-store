@@ -97,7 +97,9 @@ pub enum Node {
     Bytes,
     /// A named-field struct: a tree with one entry per field, keyed by field
     /// name — the map key *is* the tree entry name (`schema.representation`).
-    Struct(BTreeMap<String, Node>),
+    /// A field whose [`StructField::has_default`] is set may have no entry
+    /// at all: a write may omit it, and a read finds it simply absent.
+    Struct(BTreeMap<String, StructField>),
     /// A tuple or tuple struct: a tree with ordinal-named entries.
     Tuple(Vec<Node>),
     /// A variable-length sequence (`Vec<T>`, `[T]`): an ordinal-named tree.
@@ -151,6 +153,54 @@ pub enum VariantKind {
     Tuple(Vec<Node>),
     /// A struct variant: a name-keyed tree.
     Struct(BTreeMap<String, Node>),
+}
+
+/// One field of a [`Node::Struct`]: its own schema, plus whether a write may
+/// leave it unset because `T`'s `facet_core::Field` supplies a default.
+///
+/// Struct enum variant fields ([`VariantKind::Struct`]) carry no such marker
+/// and stay bare [`Node`]s: `facet`'s per-field default metadata is read only
+/// where [`schema_of`] walks a named struct's own fields, not a variant's.
+#[derive(Debug, Clone, PartialEq, Facet)]
+pub struct StructField {
+    /// The field's own schema.
+    pub node: Node,
+    /// Whether a write may omit this field's tree entry, per
+    /// `facet_core::Field::has_default()`. A schema-driven read finds an
+    /// omitted defaulted field simply absent from the result — a schema
+    /// carries no snapshot of the default *value*, since one (`created_at`
+    /// wanting `now_nanos()`) can be computed only at write time. A typed
+    /// read is unaffected: it recovers `T`'s real default through `facet`'s
+    /// own reflection machinery, independent of this marker.
+    pub has_default: bool,
+}
+
+/// A [`Node::Struct`] field, or a struct enum variant's plain [`Node`] field:
+/// one implementation lets the read, write, and migration walks handle both
+/// without duplicating themselves.
+pub(crate) trait FieldNode {
+    /// The field's own schema.
+    fn node(&self) -> &Node;
+    /// Whether the field's tree entry may be absent.
+    fn has_default(&self) -> bool;
+}
+
+impl FieldNode for Node {
+    fn node(&self) -> &Node {
+        self
+    }
+    fn has_default(&self) -> bool {
+        false
+    }
+}
+
+impl FieldNode for StructField {
+    fn node(&self) -> &Node {
+        &self.node
+    }
+    fn has_default(&self) -> bool {
+        self.has_default
+    }
 }
 
 /// Generate the [`Schema`] describing how `T` is encoded.
@@ -308,7 +358,7 @@ impl Walker {
                 _ => {
                     walker.record_rename_hints(&Target::Def(name.to_owned()), st.fields);
                     Ok(Node::Struct(
-                        walker.named_field_schemas(st.fields, depth + 1)?,
+                        walker.struct_field_schemas(st.fields, depth + 1)?,
                     ))
                 }
             });
@@ -389,6 +439,28 @@ impl Walker {
         fields
             .iter()
             .map(|f| Ok((f.name.to_owned(), self.node(f.shape(), depth)?)))
+            .collect()
+    }
+
+    /// The schemas of a plain (non-variant) struct's fields, keyed by field
+    /// name, each carrying [`Field::has_default()`](facet::Field::has_default)
+    /// as its [`StructField::has_default`] marker.
+    fn struct_field_schemas(
+        &mut self,
+        fields: &'static [facet::Field],
+        depth: usize,
+    ) -> Result<BTreeMap<String, StructField>, SchemaError> {
+        fields
+            .iter()
+            .map(|f| {
+                Ok((
+                    f.name.to_owned(),
+                    StructField {
+                        node: self.node(f.shape(), depth)?,
+                        has_default: f.has_default(),
+                    },
+                ))
+            })
             .collect()
     }
 

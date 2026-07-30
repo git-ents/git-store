@@ -21,7 +21,7 @@ use facet_value::{VArray, VNumber, VObject, Value};
 use crate::de::MAX_DEPTH;
 use crate::error::MigrationError;
 use crate::migration::{Change, Constant, Migration, Target};
-use crate::schema::{Node, Schema, VariantKind};
+use crate::schema::{FieldNode, Node, Schema, VariantKind};
 
 /// Upcast a value read against `from` into one conforming to the schema on
 /// the far side of `migration`.
@@ -199,19 +199,28 @@ fn walk(
 }
 
 /// Migrate a name-keyed object field by field, skipping fields absent from
-/// the value — the same leniency `schema::read`'s `read_struct` applies.
-fn walk_struct(
+/// the value: application walks an already-read value, not a tree, so a
+/// field's absence there (a defaulted field the source writer omitted, or one
+/// a prior edge already dropped) is not rechecked against the source schema.
+fn walk_struct<T: FieldNode>(
     obj: &VObject,
-    fields: &BTreeMap<String, Node>,
+    fields: &BTreeMap<String, T>,
     doc: &Schema,
     migration: &Migration,
     path: &Path,
     depth: usize,
 ) -> Result<VObject, MigrationError> {
     let mut result = VObject::new();
-    for (name, schema) in fields {
+    for (name, field) in fields {
         if let Some(v) = obj.get(name.as_str()) {
-            let migrated = walk(v, schema, doc, migration, &path.field(name), depth + 1)?;
+            let migrated = walk(
+                v,
+                field.node(),
+                doc,
+                migration,
+                &path.field(name),
+                depth + 1,
+            )?;
             result.insert(name.clone(), migrated);
         }
     }

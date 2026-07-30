@@ -44,6 +44,14 @@ impl SchemaSchema {
     /// Changing this id is a semver-major break; see
     /// `genesis_constant_is_real` in `tests/schema_self_host.rs`, which pins
     /// it against the actual serialization.
+    ///
+    /// Updated for the field-level default-presence marker: `Node::Struct`'s
+    /// field map now holds `StructField { node, has_default }` in place of a
+    /// bare `Node`, changing `Schema`'s own encoded shape and therefore this
+    /// id. This format has never released a schema-schema generation before,
+    /// and nothing outside this repo family stores a document against one, so
+    /// the constant is replaced in place rather than chained as a new
+    /// generation off the old one.
     pub const GENESIS: SchemaSchema = SchemaSchema {
         tree: decode_oid(GENESIS_HEX),
         parent: None,
@@ -74,7 +82,7 @@ impl SchemaSchema {
 
 /// Hex text for [`SchemaSchema::GENESIS`]'s tree id, kept as a named constant
 /// so it stays human-checkable against the golden-oid test.
-const GENESIS_HEX: &str = "b82f18bc0b9f8c5d389d0ca161480365d72b08d6";
+const GENESIS_HEX: &str = "5896cb1c8ff662027c9a54232a5364a5072b60c1";
 
 /// Decode a 40-character lowercase-hex SHA-1 literal at compile time, so a
 /// malformed constant is a compile error rather than a silent runtime bug.

@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use facet_git_tree::{
     DeserializeError, EntryKind, Node, ObjectId, ObjectStore, Schema, SchemaPinError, SchemaSchema,
-    deserialize, schema_of, serialize, serialize_into,
+    StructField, deserialize, schema_of, serialize, serialize_into,
 };
 use gix_object::Write as _;
 
@@ -86,11 +86,17 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 /// the bare document (`root`/`defs`, no `version` entry). The pin is a
 /// storage-layer splice [`Schema::write_pinned`] adds on top, covered
 /// separately by `genesis_constant_is_real`.
+///
+/// Updated again for the field-level default-presence marker:
+/// `Node::Struct`'s field map now holds `StructField { node, has_default }`
+/// instead of a bare `Node`, so each field's own entry is a small tree
+/// (`node`, `has_default`) rather than the field's schema directly, moving
+/// every struct field's encoding and therefore this root id.
 #[test]
 fn person_schema_golden_oid() -> anyhow::Result<()> {
     let doc = schema_of::<Person>()?;
     let (root, _store) = serialize(&doc)?;
-    assert_eq!(root.to_string(), "1d84b81de5fd6b23b48a9035c5008fd55a64e4bc");
+    assert_eq!(root.to_string(), "a4899ab4d0899c481bd38c0f2056b95eaa92e289");
     Ok(())
 }
 
@@ -110,7 +116,13 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
         let mut defs = BTreeMap::new();
         defs.insert(
             "Recipe".to_string(),
-            Node::Struct(BTreeMap::from([("servings".to_string(), servings_schema)])),
+            Node::Struct(BTreeMap::from([(
+                "servings".to_string(),
+                StructField {
+                    node: servings_schema,
+                    has_default: false,
+                },
+            )])),
         );
         Schema {
             root: Node::Ref("Recipe".into()),
@@ -125,13 +137,16 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
         "changing the field's schema must change the document's root id"
     );
 
-    // Walk the same path in both trees: defs → Recipe → Struct → servings —
-    // the field is now name-keyed rather than living under an ordinal.
+    // Walk the same path in both trees: defs → Recipe → Struct → servings →
+    // node — the field is name-keyed rather than living under an ordinal, and
+    // `servings` is itself a `StructField` tree (`node`, `has_default`) since
+    // the default-presence marker was added.
     let walk = |store: &facet_git_tree::ObjectStore, root: &facet_git_tree::ObjectId| {
         let defs = find_entry(store, root, "defs");
         let recipe = find_entry(store, &defs.oid, "Recipe");
         let struct_ = find_entry(store, &recipe.oid, "Struct");
-        find_entry(store, &struct_.oid, "servings")
+        let servings = find_entry(store, &struct_.oid, "servings");
+        find_entry(store, &servings.oid, "node")
     };
     let before_schema = walk(&before_store, &before_root);
     let after_schema = walk(&after_store, &after_root);
@@ -322,9 +337,27 @@ fn write_pinned_ls_tree_shape_matches_the_type_declaration() -> anyhow::Result<(
     assert_eq!(
         leaves,
         vec![
-            ("defs/Person/Struct/active".to_owned(), b"Bool\n".to_vec()),
-            ("defs/Person/Struct/age".to_owned(), b"U32\n".to_vec()),
-            ("defs/Person/Struct/name".to_owned(), b"String\n".to_vec()),
+            (
+                "defs/Person/Struct/active/has_default".to_owned(),
+                b"false\n".to_vec()
+            ),
+            (
+                "defs/Person/Struct/active/node".to_owned(),
+                b"Bool\n".to_vec()
+            ),
+            (
+                "defs/Person/Struct/age/has_default".to_owned(),
+                b"false\n".to_vec()
+            ),
+            ("defs/Person/Struct/age/node".to_owned(), b"U32\n".to_vec()),
+            (
+                "defs/Person/Struct/name/has_default".to_owned(),
+                b"false\n".to_vec()
+            ),
+            (
+                "defs/Person/Struct/name/node".to_owned(),
+                b"String\n".to_vec()
+            ),
             ("root/Ref".to_owned(), b"Person\n".to_vec()),
         ]
     );

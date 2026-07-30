@@ -16,14 +16,14 @@ use std::sync::Arc;
 use facet::Facet;
 use facet_git_tree::{
     DeserializeError, EntryKind, EntryMode, Node, ObjectId, ObjectStore, RawTree, Schema,
-    SchemaReadError, TreeEntry, deserialize, deserialize_value_with_schema, schema_of, serialize,
-    serialize_into, validate_with_schema,
+    SchemaReadError, StructField, TreeEntry, deserialize, deserialize_value_with_schema, schema_of,
+    serialize, serialize_into, serialize_value_with_schema, validate_with_schema,
 };
 use facet_value::{VNumber, Value, value};
 use gix_object::{Kind, Write as _};
 
 mod common;
-use common::{Event, Person, Point, TreeNode, WithMap, WithOptional};
+use common::{Event, Person, Point, TreeNode, WithDefault, WithMap, WithOptional};
 
 // --- faithful scalars ---
 
@@ -370,12 +370,59 @@ fn struct_read_requires_every_schema_field() -> anyhow::Result<()> {
     let Some(Node::Struct(fields)) = doc.defs.get_mut("Point") else {
         panic!("Point is a struct definition");
     };
-    fields.insert("z".into(), Node::F64);
+    fields.insert(
+        "z".into(),
+        StructField {
+            node: Node::F64,
+            has_default: false,
+        },
+    );
 
     let err = validate_with_schema(&root, &doc, &store).unwrap_err();
     assert!(
         matches!(&err, SchemaReadError::MissingField { field } if field == "z"),
         "expected MissingField, got {err:?}"
+    );
+    Ok(())
+}
+
+/// A field marked `has_default` whose tree entry is absent reads as simply
+/// missing from the result object: a schema-only read has no default *value*
+/// to invent, only the marker that one exists elsewhere.
+#[test]
+fn omitted_defaulted_field_is_absent_from_the_read_value() -> anyhow::Result<()> {
+    let doc = schema_of::<WithDefault>()?;
+    let store = ObjectStore::default();
+    let root = serialize_value_with_schema(&value!({ "label": "x" }), &doc, &store)?;
+
+    let v = deserialize_value_with_schema(&root, &doc, &store)?;
+    assert_eq!(v, value!({ "label": "x" }));
+    assert!(
+        v.as_object().unwrap().get("count").is_none(),
+        "an omitted defaulted field must be absent from the read object, not null: got {v:?}"
+    );
+    Ok(())
+}
+
+/// The `Dynamic`/`Typed<T>` asymmetry this crate accepts for an omitted
+/// defaulted field: the schema-driven read above has no default value to
+/// invent, but a typed read of the very same tree recovers `T`'s real
+/// default — `facet`'s own reflection machinery (`Partial::build`) fills an
+/// unset field from `Field::default` when the tree has no entry for it,
+/// independent of anything this crate's schema module does.
+#[test]
+fn typed_read_recovers_the_real_default_the_dynamic_read_cannot() -> anyhow::Result<()> {
+    let doc = schema_of::<WithDefault>()?;
+    let store = ObjectStore::default();
+    let root = serialize_value_with_schema(&value!({ "label": "x" }), &doc, &store)?;
+
+    let typed: WithDefault = deserialize(&root, &store)?;
+    assert_eq!(
+        typed,
+        WithDefault {
+            label: "x".into(),
+            count: 0,
+        }
     );
     Ok(())
 }

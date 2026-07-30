@@ -386,6 +386,19 @@ fn pretty_skeleton(doc: &Schema) -> String {
     }
 }
 
+/// A compact placeholder JSON object snippet for a struct's fields, shared by
+/// [`Node::Struct`] (fields carry [`StructField`]) and a struct enum
+/// variant's payload (bare [`Node`] fields).
+fn skeleton_fields<'a>(
+    fields: impl Iterator<Item = (&'a String, &'a Node)>,
+    doc: &Schema,
+) -> String {
+    let body: Vec<_> = fields
+        .map(|(name, schema)| format!("{name:?}:{}", skeleton(schema, doc)))
+        .collect();
+    format!("{{{}}}", body.join(","))
+}
+
 /// A compact placeholder JSON snippet matching `schema`.
 fn skeleton(schema: &Node, doc: &Schema) -> String {
     match resolve(schema, doc) {
@@ -394,13 +407,7 @@ fn skeleton(schema: &Node, doc: &Schema) -> String {
         Node::F32 | Node::F64 => "0.0".into(),
         Node::I8 | Node::I16 | Node::I32 | Node::I64 | Node::I128 | Node::ISize => "0".into(),
         Node::U8 | Node::U16 | Node::U32 | Node::U64 | Node::U128 | Node::USize => "0".into(),
-        Node::Struct(fields) => {
-            let body: Vec<_> = fields
-                .iter()
-                .map(|(name, schema)| format!("{name:?}:{}", skeleton(schema, doc)))
-                .collect();
-            format!("{{{}}}", body.join(","))
-        }
+        Node::Struct(fields) => skeleton_fields(fields.iter().map(|(n, f)| (n, &f.node)), doc),
         Node::Tuple(elems) => {
             let body: Vec<_> = elems.iter().map(|s| skeleton(s, doc)).collect();
             format!("[{}]", body.join(","))
@@ -423,7 +430,7 @@ fn skeleton(schema: &Node, doc: &Schema) -> String {
                         let body: Vec<_> = elems.iter().map(|s| skeleton(s, doc)).collect();
                         format!("[{}]", body.join(","))
                     }
-                    VariantKind::Struct(fields) => skeleton(&Node::Struct(fields.clone()), doc),
+                    VariantKind::Struct(fields) => skeleton_fields(fields.iter(), doc),
                 };
                 format!("{{{name:?}:{payload}}}")
             }
@@ -453,8 +460,9 @@ fn print_type(kind: &str, doc: &Schema) {
     println!("{kind}");
     match resolve(&doc.root, doc) {
         Node::Struct(fields) => {
-            for (name, schema) in fields {
-                println!("  {name}: {}", label(schema));
+            for (name, field) in fields {
+                let default = if field.has_default { " = default" } else { "" };
+                println!("  {name}: {}{default}", label(&field.node));
             }
         }
         other => println!("  {}", label(other)),

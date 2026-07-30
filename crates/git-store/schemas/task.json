@@ -12,13 +12,15 @@
     },
     "Task": {
       "Struct": {
-        "summary": "String",
-        "done": "Bool",
+        "summary": { "node": "String", "has_default": false },
+        "done": { "node": "Bool", "has_default": false },
         "priority": {
-          "Ref": "Priority"
+          "node": { "Ref": "Priority" },
+          "has_default": false
         },
         "tags": {
-          "List": "String"
+          "node": { "List": "String" },
+          "has_default": false
         }
       }
     }

@@ -5,13 +5,15 @@
   "defs": {
     "Recipe": {
       "Struct": {
-        "title": "String",
-        "serves": "U32",
+        "title": { "node": "String", "has_default": false },
+        "serves": { "node": "U32", "has_default": false },
         "ingredients": {
-          "List": "String"
+          "node": { "List": "String" },
+          "has_default": false
         },
         "steps": {
-          "List": "String"
+          "node": { "List": "String" },
+          "has_default": false
         }
       }
     }

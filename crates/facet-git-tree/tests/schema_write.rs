@@ -14,7 +14,7 @@ use std::fmt::Debug;
 
 use facet::Facet;
 use facet_git_tree::{
-    EntryKind, Node, ObjectStore, RawTree, Schema, SchemaWriteError, VariantKind,
+    EntryKind, Node, ObjectStore, RawTree, Schema, SchemaWriteError, StructField, VariantKind,
     deserialize_value_with_schema, schema_of, serialize, serialize_into,
     serialize_value_with_schema,
 };
@@ -31,9 +31,16 @@ fn typed_root<T: for<'a> Facet<'a>>(value: &T) -> facet_git_tree::ObjectId {
     serialize(value).expect("typed serialize").0
 }
 
-/// A single-field [`Node::Struct`] body, for tests that only need one field.
-fn one_field(name: &str, schema: Node) -> BTreeMap<String, Node> {
-    BTreeMap::from([(name.to_owned(), schema)])
+/// A single-field, non-defaulted [`Node::Struct`] body, for tests that only
+/// need one field.
+fn one_field(name: &str, schema: Node) -> BTreeMap<String, StructField> {
+    BTreeMap::from([(
+        name.to_owned(),
+        StructField {
+            node: schema,
+            has_default: false,
+        },
+    )])
 }
 
 /// Every value the schema-driven *read* can produce must re-encode to the exact

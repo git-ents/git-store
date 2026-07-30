@@ -62,6 +62,15 @@ pub struct WithOptional {
     pub maybe: Option<i32>,
 }
 
+/// A field-level default (`StructField::has_default`), for the schema
+/// generation and default-omission suites.
+#[derive(Debug, Facet, PartialEq)]
+pub struct WithDefault {
+    pub label: String,
+    #[facet(default)]
+    pub count: u32,
+}
+
 /// A typed struct carrying a dynamic [`facet_value::Value`] field, for the
 /// dynamic-value suites.
 #[derive(Debug, Facet, PartialEq)]

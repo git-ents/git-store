@@ -14,7 +14,8 @@ use std::collections::BTreeMap;
 
 use facet::Facet;
 use facet_git_tree::{
-    Change, Constant, Hints, Migration, Node, Op, Schema, Target, schema_and_hints_of, schema_of,
+    Change, Constant, Hints, Migration, Node, Op, Schema, StructField, Target, schema_and_hints_of,
+    schema_of,
 };
 
 mod common;
@@ -168,9 +169,27 @@ fn no_attributes_yields_empty_hints_and_unchanged_schema() -> anyhow::Result<()>
         defs: BTreeMap::from([(
             "Person".into(),
             Node::Struct(BTreeMap::from([
-                ("name".into(), Node::String),
-                ("age".into(), Node::U32),
-                ("active".into(), Node::Bool),
+                (
+                    "name".into(),
+                    StructField {
+                        node: Node::String,
+                        has_default: false,
+                    },
+                ),
+                (
+                    "age".into(),
+                    StructField {
+                        node: Node::U32,
+                        has_default: false,
+                    },
+                ),
+                (
+                    "active".into(),
+                    StructField {
+                        node: Node::Bool,
+                        has_default: false,
+                    },
+                ),
             ])),
         )]),
     };

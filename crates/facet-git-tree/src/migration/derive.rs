@@ -13,7 +13,7 @@ use facet::Facet;
 
 use crate::error::SchemaError;
 use crate::migration::{Change, Constant, Hints, Migration, Op, Target};
-use crate::schema::{Node, Schema, VariantKind};
+use crate::schema::{FieldNode, Node, Schema, VariantKind};
 
 /// The outcome of [`derive`].
 #[derive(Debug, Clone, PartialEq)]
@@ -267,10 +267,14 @@ fn classify_retype(
 /// `Rename`, `Remove`, `Wrap`, `Add` order — `Rename` first so later phases
 /// address target-side names, and a `Wrap` on a renamed field therefore names
 /// the *target* field.
-fn diff_fields(
+///
+/// Compares each field's [`FieldNode::node`] only: [`StructField::has_default`]
+/// (`crate::schema::StructField`) governs write-time omission, not the
+/// on-disk shape a migration edge transforms, so it is not diffed here.
+fn diff_fields<T: FieldNode>(
     at: &Target,
-    a: &BTreeMap<String, Node>,
-    b: &BTreeMap<String, Node>,
+    a: &BTreeMap<String, T>,
+    b: &BTreeMap<String, T>,
     hints: &Hints,
     ops: &mut Vec<Op>,
     unclassified: &mut Vec<Divergence>,
@@ -292,8 +296,11 @@ fn diff_fields(
             .map(str::to_owned)
         {
             removed.remove(&src);
-            let from_schema = a.get(&src).expect("a removed field is present in `a`");
-            let to_schema = &b[field];
+            let from_schema = a
+                .get(&src)
+                .expect("a removed field is present in `a`")
+                .node();
+            let to_schema = b[field].node();
             renames.push((src, field.clone()));
             if from_schema != to_schema {
                 classify_retype(at, field, from_schema, to_schema, &mut wraps, unclassified);
@@ -303,7 +310,7 @@ fn diff_fields(
 
         if let Some(default) = hints.default_of(at, field) {
             adds.push((field.clone(), default.clone()));
-        } else if matches!(&b[field], Node::Optional(_)) {
+        } else if matches!(b[field].node(), Node::Optional(_)) {
             adds.push((field.clone(), Constant::Null));
         } else {
             unclassified.push(Divergence::Undefaulted {
@@ -314,7 +321,7 @@ fn diff_fields(
     }
 
     for field in &common {
-        let (fa, fb) = (&a[field], &b[field]);
+        let (fa, fb) = (a[field].node(), b[field].node());
         if fa != fb {
             classify_retype(at, field, fa, fb, &mut wraps, unclassified);
         }

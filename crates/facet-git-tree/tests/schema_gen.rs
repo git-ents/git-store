@@ -14,16 +14,34 @@
 use std::collections::BTreeMap;
 
 use facet::Facet;
-use facet_git_tree::{Node, RawTree, Schema, SchemaError, VariantKind, schema_of};
+use facet_git_tree::{Node, RawTree, Schema, SchemaError, StructField, VariantKind, schema_of};
 
 mod common;
 use common::{
-    Event, Nested, Person, Point, TreeNode, WithArray, WithMap, WithOptional, WithValue, WithVec,
+    Event, Nested, Person, Point, TreeNode, WithArray, WithDefault, WithMap, WithOptional,
+    WithValue, WithVec,
 };
 
 // --- helpers ---
 
-fn fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, Node> {
+/// [`Node::Struct`] fields, all non-defaulted — the common case in this file.
+fn fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, StructField> {
+    pairs
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k.into(),
+                StructField {
+                    node: v,
+                    has_default: false,
+                },
+            )
+        })
+        .collect()
+}
+
+/// A struct enum variant's fields, which carry no default marker.
+fn variant_fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, Node> {
     pairs.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
@@ -71,6 +89,38 @@ fn person_schema() -> anyhow::Result<()> {
                     ("name", Node::String),
                     ("age", Node::U32),
                     ("active", Node::Bool),
+                ]))
+            )]
+        )
+    );
+    Ok(())
+}
+
+/// `#[facet(default)]` on a field sets `StructField::has_default`, the
+/// field-level default-presence marker; every other field's marker is unset.
+#[test]
+fn defaulted_field_schema_marks_has_default() -> anyhow::Result<()> {
+    assert_eq!(
+        schema_of::<WithDefault>()?,
+        doc(
+            re("WithDefault"),
+            vec![(
+                "WithDefault",
+                Node::Struct(BTreeMap::from([
+                    (
+                        "label".to_owned(),
+                        StructField {
+                            node: Node::String,
+                            has_default: false,
+                        }
+                    ),
+                    (
+                        "count".to_owned(),
+                        StructField {
+                            node: Node::U32,
+                            has_default: true,
+                        }
+                    ),
                 ]))
             )]
         )
@@ -235,7 +285,7 @@ fn enum_schema() -> anyhow::Result<()> {
                     ("Move", VariantKind::Tuple(vec![Node::I32, Node::I32])),
                     (
                         "Login",
-                        VariantKind::Struct(fields(vec![
+                        VariantKind::Struct(variant_fields(vec![
                             ("user", Node::String),
                             ("ok", Node::Bool),
                         ]))

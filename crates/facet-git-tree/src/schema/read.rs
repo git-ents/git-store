@@ -19,7 +19,7 @@ use crate::de::{
     find_tree_entries, map_pair_entries, sort_by_ordinal, validate_option_entries,
 };
 use crate::error::{DeserializeError, SchemaReadError};
-use crate::schema::{Node, Schema, VariantKind};
+use crate::schema::{FieldNode, Node, Schema, VariantKind};
 use crate::{EntryKind, ObjectId};
 
 /// Deserialize the tree at `root` into a full-fidelity [`Value`], guided by
@@ -280,28 +280,37 @@ fn read_node<F: Find + ?Sized>(
 }
 
 /// Read a name-keyed tree as a [`VObject`], requiring the tree's entries and
-/// the schema's fields to correspond exactly.
+/// the schema's fields to correspond exactly — except a field whose
+/// [`FieldNode::has_default`] is set, whose entry may be absent: the result
+/// simply omits it, since a schema-only read has no default *value* to
+/// invent, only the marker that one exists elsewhere.
 ///
-/// Strictness is what makes this function usable as a conformance check
-/// ([`validate_with_schema`]): under the previous leniency a tree sharing no
-/// field name at all with the schema read as an empty object rather than an
-/// error, so every tree conformed to every struct schema.
-fn read_struct<F: Find + ?Sized>(
+/// Strictness (for every other field) is what makes this function usable as
+/// a conformance check ([`validate_with_schema`]): under the previous
+/// leniency a tree sharing no field name at all with the schema read as an
+/// empty object rather than an error, so every tree conformed to every
+/// struct schema.
+fn read_struct<F: Find + ?Sized, T: FieldNode>(
     entries: &Entries,
-    fields: &BTreeMap<String, Node>,
+    fields: &BTreeMap<String, T>,
     doc: &Schema,
     store: &F,
     depth: usize,
 ) -> Result<VObject, SchemaReadError> {
     let mut object = VObject::new();
-    for (name, schema) in fields {
-        let (_, child_oid, _) = entries.iter().find(|(n, _, _)| n == name).ok_or_else(|| {
-            SchemaReadError::MissingField {
-                field: name.clone(),
+    for (name, field) in fields {
+        match entries.iter().find(|(n, _, _)| n == name) {
+            Some((_, child_oid, _)) => {
+                let v = read_node(child_oid, field.node(), doc, store, depth + 1)?;
+                object.insert(name.clone(), v);
             }
-        })?;
-        let v = read_node(child_oid, schema, doc, store, depth + 1)?;
-        object.insert(name.clone(), v);
+            None if field.has_default() => {}
+            None => {
+                return Err(SchemaReadError::MissingField {
+                    field: name.clone(),
+                });
+            }
+        }
     }
     if let Some((entry, _, _)) = entries.iter().find(|(n, _, _)| !fields.contains_key(n)) {
         return Err(SchemaReadError::UnexpectedEntry {

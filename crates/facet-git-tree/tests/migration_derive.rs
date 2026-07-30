@@ -26,13 +26,30 @@ use std::collections::BTreeMap;
 use facet::Facet;
 use facet_git_tree::migration::derive::{derive, derive_to};
 use facet_git_tree::{
-    Change, Constant, Derivation, Divergence, Hints, Migration, Node, Op, Schema, Side, Target,
-    VariantKind, schema_of, serialize,
+    Change, Constant, Derivation, Divergence, Hints, Migration, Node, Op, Schema, Side,
+    StructField, Target, VariantKind, schema_of, serialize,
 };
 
 // --- helpers (mirroring tests/schema_gen.rs) ---
 
-fn fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, Node> {
+/// [`Node::Struct`] fields, all non-defaulted.
+fn fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, StructField> {
+    pairs
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k.into(),
+                StructField {
+                    node: v,
+                    has_default: false,
+                },
+            )
+        })
+        .collect()
+}
+
+/// A struct enum variant's fields, which carry no default marker.
+fn variant_fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, Node> {
     pairs.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
@@ -343,14 +360,14 @@ fn struct_variant_field_change_is_addressed_by_variant_target() {
         "E",
         Node::Enum(variants(vec![(
             "V",
-            VariantKind::Struct(fields(vec![("x", Node::I32)])),
+            VariantKind::Struct(variant_fields(vec![("x", Node::I32)])),
         )])),
     );
     let to = def(
         "E",
         Node::Enum(variants(vec![(
             "V",
-            VariantKind::Struct(fields(vec![("x", Node::I32), ("y", Node::String)])),
+            VariantKind::Struct(variant_fields(vec![("x", Node::I32), ("y", Node::String)])),
         )])),
     );
     let hints = Hints::new().defaulted(

@@ -143,8 +143,10 @@ fn interactive_schema_builds_kind_from_prompts() {
     let path = dir.path();
 
     // Root struct with a string, a u64 (default width), and a bool field.
-    // Each field is gated by an "add a field?" confirm; a final `n` ends them.
-    let answers = "struct\ny\ntitle\nstring\ny\nserves\nuint\nu64\ny\ndone\nbool\nn\n";
+    // Each field is gated by an "add a field?" confirm, followed by its type
+    // and then a "does this field have a default?" confirm (`n` for all
+    // three here); a final `n` ends the field loop.
+    let answers = "struct\ny\ntitle\nstring\nn\ny\nserves\nuint\nu64\nn\ny\ndone\nbool\nn\nn\n";
     let (_, err, ok) = run(path, Some(answers), &["schema", "put", "task", "-i"]);
     assert!(ok, "interactive schema put failed: {err}");
 
@@ -191,8 +193,8 @@ fn hand_authored_schema_json_publishes_with_no_version_key() {
         "defs": {
             "Book": {
                 "Struct": {
-                    "title": "String",
-                    "year": "U16"
+                    "title": { "node": "String", "has_default": false },
+                    "year": { "node": "U16", "has_default": false }
                 }
             }
         }

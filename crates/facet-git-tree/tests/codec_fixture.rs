@@ -67,7 +67,7 @@ fn walk_node(node: &Node, nodes: &mut HashSet<String>, kinds: &mut HashSet<Strin
         Node::Bytes => "Bytes",
         Node::Struct(fields) => {
             for field in fields.values() {
-                walk_node(field, nodes, kinds);
+                walk_node(&field.node, nodes, kinds);
             }
             "Struct"
         }

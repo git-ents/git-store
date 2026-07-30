@@ -5,10 +5,10 @@
   "defs": {
     "Book": {
       "Struct": {
-        "title": "String",
-        "author": "String",
-        "year": "U16",
-        "read": "Bool"
+        "title": { "node": "String", "has_default": false },
+        "author": { "node": "String", "has_default": false },
+        "year": { "node": "U16", "has_default": false },
+        "read": { "node": "Bool", "has_default": false }
       }
     }
   }
