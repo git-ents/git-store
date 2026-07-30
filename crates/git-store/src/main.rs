@@ -2,12 +2,21 @@
 //! in Git as a real tree. JSON lives only here, at the CLI boundary; the
 //! [`Store`] underneath is oid-in/oid-out.
 //!
-//! Bare `git store` lists kinds. Writing is an explicit `git store put <kind>
-//! [<name>]`, taking content from `-F <file>`, stdin, `$EDITOR`, or — with
-//! `-i` — an interactive prompt walking the kind's schema; reading is `git
-//! store get <kind> <name>`, where `<name>` may carry a git revision
-//! (`<name>~1`, `<name>@{date}`) to read a past version. Everything else —
-//! `list`, `log`, `rm`, and the `schema` subgroup — mirrors git porcelain.
+//! Bare `git store` lists kinds. Writing is `git store put <schema> <value>`,
+//! which compiles `<value>` under `<schema>` into the `{value/, schema/}`
+//! tree and prints its hash — the document's identity — without advancing
+//! any ref; reading is `git store get <tree-ish>`, which decodes any tree of
+//! that shape back to JSON; `git store check <tree-ish> <schema>` validates a
+//! bare value tree against a schema without decoding it. `<value>` may be
+//! omitted, taking content from `-F <file>`, stdin, `$EDITOR`, or — with
+//! `-i` — an interactive prompt walking the schema.
+//!
+//! Named, ref-addressed, versioned entities — the pre-S1 shape of this CLI
+//! — remain reachable: `list`, `log`, `rm`, and the `schema` subgroup mirror
+//! git porcelain over them, and any entity ref (`refs/store/<kind>/<name>`)
+//! is itself a valid `<tree-ish>` for `get`/`check`. `put`/`get` also accept
+//! their old two-argument forms as a hidden compatibility path (see
+//! [`PutArgs`] and [`Command::Get`]).
 
 mod interactive;
 
@@ -16,7 +25,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use facet_git_tree::{Node, Schema, VariantKind};
+use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
 use facet_value::{Value, from_value};
 use gix_store::{Dynamic, GixRefStore, Kind, ObjectId, RefPath, RefSegment, RepoStore};
 
@@ -36,13 +45,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Store an entity. Content comes from `-F <file>`, stdin, or `$EDITOR`
-    /// (at a terminal with neither); prints the commit id.
+    /// Compile a value under a schema; prints the document's tree hash.
+    /// Content for `<value>` comes from the positional argument itself
+    /// (parsed as JSON) when given, else from `-F <file>`, stdin, or
+    /// `$EDITOR`.
+    ///
+    /// Hidden compatibility: when a second argument is given and does *not*
+    /// parse as JSON, it is taken as the old `put <kind> <name>` form —
+    /// committing forward at `refs/store/<kind>/<name>` and printing the
+    /// commit id instead.
     Put(PutArgs),
-    /// Read an entity back as JSON. Append a revision to read a past version:
-    /// `carbonara~1`, `carbonara@{yesterday}`, or `carbonara@<oid>` (the `@`
-    /// separates any revision from the name; see `log`).
-    Get { kind: String, name: String },
+    /// Decode a document back to JSON from any tree-ish of the
+    /// `{value/, schema/}` shape `put` compiles — a bare tree hash, or any
+    /// commit/ref whose tree has that shape.
+    ///
+    /// Hidden compatibility: `get <kind> <name>` (two arguments) is the old
+    /// ref-addressed form; `<name>` may carry a revision suffix
+    /// (`carbonara~1`, `carbonara@{yesterday}`, `carbonara@<oid>`).
+    Get {
+        #[arg(num_args = 1..=2, value_name = "TREE-ISH")]
+        args: Vec<String>,
+    },
+    /// Check whether a tree-ish's value conforms to a schema, without
+    /// decoding it. Exits non-zero, with a diagnostic, when it does not.
+    Check { tree_ish: String, schema: String },
     /// List kinds, or the entity names within a kind.
     #[command(visible_alias = "ls")]
     List { kind: Option<String> },
@@ -60,22 +86,23 @@ enum Command {
 /// Arguments for `put`.
 #[derive(clap::Args)]
 struct PutArgs {
-    /// The kind: a schema published at `refs/schema/<kind>`.
-    kind: String,
-    /// Entity name → `refs/store/<kind>/<name>`. Defaults to the kind, one
-    /// canonical entity per kind.
-    name: Option<String>,
+    /// The schema: a schema published at `refs/schema/<schema>`.
+    schema: String,
+    /// An inline JSON value, or — for the hidden old form — an entity name.
+    value: Option<String>,
     /// JSON file to store; stdin or `$EDITOR` is used when omitted.
     #[arg(short = 'F', long = "file", value_name = "FILE")]
     file: Option<PathBuf>,
-    /// Commit message for this version (a `Schema:` trailer is always added).
+    /// Commit message for the hidden old (named) form (a `Schema:` trailer is
+    /// always added). Has no effect on a pure compile.
     #[arg(short = 'm', long = "message", value_name = "MSG")]
     message: Option<String>,
     /// Edit the content in `$VISUAL`/`$EDITOR` before storing.
     #[arg(short = 'e', long = "edit")]
     edit: bool,
     /// Build the value by prompting for each field the schema names, instead
-    /// of taking JSON from a file, stdin, or the editor.
+    /// of taking JSON from the positional argument, a file, stdin, or the
+    /// editor.
     #[arg(short = 'i', long = "interactive", conflicts_with_all = ["file", "edit"])]
     interactive: bool,
 }
@@ -127,25 +154,53 @@ fn main() -> Result<()> {
         // Bare `git store` lists kinds — a read-only default, like `git remote`.
         None => print_lines(store.kinds()?),
         Some(Command::Put(args)) => put(&store, args)?,
-        Some(Command::Get { kind, name }) => {
-            let (name, rev) = split_name_rev(&name);
-            let handle = store.dynamic(segment("kind", &kind)?);
-            let name_seg = entity(name)?;
-            let value = match rev {
-                Some(rev) => {
-                    let oid = resolve_at(&repo, &handle, &name_seg, rev)?;
-                    // Only read a commit that is actually a version of this
-                    // entity, so a stray oid can't return an unrelated value.
-                    if !handle.history(&name_seg)?.contains(&oid) {
-                        bail!("{rev} is not a version of {kind}/{name}");
+        Some(Command::Get { args }) => match <[String; 1]>::try_from(args) {
+            // `get <tree-ish>`: decode any tree of the `{value/, schema/}`
+            // shape directly, whatever it was reached through.
+            Ok([tree_ish]) => {
+                let tree = resolve_tree(&repo, &tree_ish)?;
+                // `decode` reads entirely out of `tree`'s own embedded
+                // schema, so which kind this handle is opened on is
+                // irrelevant — any placeholder name will do.
+                let value = document_handle(&store)
+                    .decode(tree)
+                    .with_context(|| format!("{tree_ish} is not a document"))?;
+                println!("{}", to_json(&value)?);
+            }
+            // Hidden old form: `get <kind> <name>`.
+            Err(args) => {
+                let [kind, name] = <[String; 2]>::try_from(args)
+                    .expect("clap enforces 1..=2 positional arguments");
+                let (name, rev) = split_name_rev(&name);
+                let handle = store.dynamic(segment("kind", &kind)?);
+                let name_seg = entity(name)?;
+                let value = match rev {
+                    Some(rev) => {
+                        let oid = resolve_at(&repo, &handle, &name_seg, rev)?;
+                        // Only read a commit that is actually a version of
+                        // this entity, so a stray oid can't return an
+                        // unrelated value.
+                        if !handle.history(&name_seg)?.contains(&oid) {
+                            bail!("{rev} is not a version of {kind}/{name}");
+                        }
+                        handle.get_at(oid)?
                     }
-                    handle.get_at(oid)?
-                }
-                None => handle
-                    .get(&name_seg)?
-                    .with_context(|| format!("no entity {kind}/{name}"))?,
-            };
-            println!("{}", to_json(&value)?);
+                    None => handle
+                        .get(&name_seg)?
+                        .with_context(|| format!("no entity {kind}/{name}"))?,
+                };
+                println!("{}", to_json(&value)?);
+            }
+        },
+        Some(Command::Check { tree_ish, schema }) => {
+            let tree = resolve_tree(&repo, &tree_ish)?;
+            let doc = store
+                .dynamic(segment("schema", &schema)?)
+                .schema()
+                .get()?
+                .with_context(|| format!("no schema published for {schema:?}"))?;
+            validate_with_schema(&tree, &doc, store.objects())
+                .with_context(|| format!("{tree_ish} does not conform to {schema:?}"))?;
         }
         Some(Command::List { kind: Some(kind) }) => {
             print_lines(store.dynamic(segment("kind", &kind)?).list()?)
@@ -220,42 +275,113 @@ fn entity(value: &str) -> Result<RefPath> {
     RefPath::new(value).with_context(|| format!("invalid name {value:?}"))
 }
 
-/// The store action: gather JSON (file, stdin, or the editor), then commit it
-/// forward under the kind at the chosen name.
+/// A [`Dynamic`] handle whose kind name is irrelevant — only [`Kind::decode`]
+/// and [`Kind::compile`] read/write independent of it, since a document's
+/// schema travels inline with it rather than through a kind's own ref.
+fn document_handle<'s, 'r>(store: &'s RepoStore<'r>) -> DynKind<'s, 'r> {
+    store.dynamic(RefSegment::new("_").expect("\"_\" is a valid ref segment"))
+}
+
+/// Resolve `spec` to a tree: any revision syntax `rev-parse` accepts
+/// (`<oid>`, a ref, `<rev>~1`, `<rev>:<path>`, …) resolved to an object,
+/// then peeled down to a tree — a no-op when it already is one.
+fn resolve_tree(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
+    let id = repo
+        .rev_parse_single(spec)
+        .with_context(|| format!("cannot resolve {spec:?}"))?;
+    let tree = id
+        .object()
+        .with_context(|| format!("cannot resolve {spec:?}"))?
+        .peel_to_kind(gix::objs::Kind::Tree)
+        .with_context(|| format!("{spec:?} is not a tree-ish"))?;
+    Ok(tree.id)
+}
+
+/// Gather JSON content the same way for either `put` form: an explicit
+/// `-F <file>`, piped stdin, or — at a terminal with neither — the editor,
+/// seeded from `kind`'s schema. Mirrors `git notes add`.
+fn gathered_json(handle: &DynKind<'_, '_>, file: &Option<PathBuf>, edit: bool) -> Result<String> {
+    let base = if let Some(path) = file {
+        Some(read_file(path)?)
+    } else if !std::io::stdin().is_terminal() {
+        Some(read_stdin()?)
+    } else {
+        None
+    };
+    match base {
+        Some(content) if !edit => Ok(content),
+        Some(content) => edit_in_editor(&content),
+        None => edit_in_editor(&schema_skeleton(handle)?),
+    }
+}
+
+/// `put`: compile `<value>` under `<schema>`, printing the document's tree
+/// hash — a pure operation, advancing no ref.
+///
+/// The hidden old form (`value` present but not valid JSON) instead commits
+/// forward at `refs/store/<schema>/<value>`, printing the commit id — the
+/// pre-S1 named-entity write path.
 fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
     let PutArgs {
-        kind,
-        name,
+        schema,
+        value,
         file,
         message,
         edit,
         interactive,
     } = args;
-    let name = name.as_deref().unwrap_or(&kind);
-    let name_seg = entity(name)?;
-    let handle = store.dynamic(segment("kind", &kind)?);
 
+    match &value {
+        Some(text) if !interactive && !edit && file.is_none() => {
+            match facet_json::from_str::<Value>(text) {
+                Ok(value) => {
+                    let handle = store.dynamic(segment("schema", &schema)?);
+                    println!("{}", handle.compile(&value)?);
+                }
+                // Not JSON: the hidden old `put <kind> <name>` form.
+                Err(_) => put_named(store, schema, text, file, message, edit, interactive)?,
+            }
+            return Ok(());
+        }
+        // A second argument alongside `-F`/`-i` can only be the old form's
+        // entity name — an inline value has nowhere else to come from.
+        Some(name) => {
+            put_named(store, schema, name, file, message, edit, interactive)?;
+            return Ok(());
+        }
+        None => {}
+    }
+
+    let handle = store.dynamic(segment("schema", &schema)?);
     let value = if interactive {
         interactive::value_for_kind(&handle)?
     } else {
-        // Content source, in order: an explicit `-F <file>`, piped stdin, or —
-        // at a terminal with neither — the editor. This mirrors `git notes add`.
-        let base = if let Some(path) = &file {
-            Some(read_file(path)?)
-        } else if !std::io::stdin().is_terminal() {
-            Some(read_stdin()?)
-        } else {
-            None
-        };
-
-        let json = match base {
-            Some(content) if !edit => content,
-            Some(content) => edit_in_editor(&content)?,
-            None => edit_in_editor(&schema_skeleton(&handle)?)?,
-        };
+        let json = gathered_json(&handle, &file, edit)?;
         facet_json::from_str(&json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?
     };
+    println!("{}", handle.compile(&value)?);
+    Ok(())
+}
 
+/// The hidden old `put <kind> <name>` form: commit the gathered value forward
+/// at `refs/store/<kind>/<name>`, printing the commit id.
+fn put_named(
+    store: &RepoStore<'_>,
+    kind: String,
+    name: &str,
+    file: Option<PathBuf>,
+    message: Option<String>,
+    edit: bool,
+    interactive: bool,
+) -> Result<()> {
+    let name_seg = entity(name)?;
+    let handle = store.dynamic(segment("kind", &kind)?);
+    let value = if interactive {
+        interactive::value_for_kind(&handle)?
+    } else {
+        let json = gathered_json(&handle, &file, edit)?;
+        facet_json::from_str(&json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?
+    };
     let mut write = handle.write(&value);
     if let Some(summary) = message {
         write = write.message(summary);

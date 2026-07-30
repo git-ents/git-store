@@ -270,3 +270,111 @@ fn entity_names_may_nest() {
         "refs/store/recipe/italian/carbonara"
     );
 }
+
+/// The S1 CLI shape: `put <schema> <value>` compiles a document and prints
+/// its tree hash — no ref is touched — and `get <tree-ish>` decodes it back,
+/// addressed purely by that hash.
+#[test]
+fn put_prints_a_tree_hash_and_get_decodes_it_back() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "schema put failed: {err}");
+
+    let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil","fry"]}"#;
+    let (out, err, ok) = run(path, None, &["put", "recipe", recipe]);
+    assert!(ok, "put failed: {err}");
+    let hash = out.trim();
+    assert_eq!(hash.len(), 40, "expected a hex object id, got {hash:?}");
+
+    // Nothing was written to any ref: `list` still reports no entities.
+    let (out, _, ok) = run(path, None, &["ls", "recipe"]);
+    assert!(ok);
+    assert_eq!(out.trim(), "");
+
+    let (out, err, ok) = run(path, None, &["get", hash]);
+    assert!(ok, "get failed: {err}");
+    assert!(out.contains("\"serves\": 4"), "get output: {out}");
+    assert!(
+        out.contains("\"title\": \"Carbonara\""),
+        "get output: {out}"
+    );
+
+    // Compiling byte-identical content twice is idempotent: same hash.
+    let (out2, err, ok) = run(path, None, &["put", "recipe", recipe]);
+    assert!(ok, "second put failed: {err}");
+    assert_eq!(out2.trim(), hash, "compiling the same value twice diverged");
+}
+
+/// `put <schema>` with no inline value still gathers content from stdin (or
+/// `-F`/`$EDITOR`), exactly as the old form did, but stays a pure compile.
+#[test]
+fn put_without_an_inline_value_still_reads_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "schema put failed: {err}");
+
+    let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
+    let (out, err, ok) = run(path, Some(recipe), &["put", "recipe"]);
+    assert!(ok, "put failed: {err}");
+    let hash = out.trim();
+
+    let (out, err, ok) = run(path, None, &["get", hash]);
+    assert!(ok, "get failed: {err}");
+    assert!(out.contains("\"serves\": 4"), "get output: {out}");
+}
+
+/// `get` also decodes through any commit/ref whose tree has the compiled
+/// `{value/, schema/}` shape — the same shape a named, ref-addressed entity
+/// (written through the hidden old `put <kind> <name>` form) already has.
+#[test]
+fn get_decodes_through_a_ref_naming_a_bound_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "schema put failed: {err}");
+
+    let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
+    let (_, err, ok) = run(path, Some(recipe), &["put", "recipe", "carbonara"]);
+    assert!(ok, "named put failed: {err}");
+
+    let (out, err, ok) = run(path, None, &["get", "refs/store/recipe/carbonara"]);
+    assert!(ok, "get via ref failed: {err}");
+    assert!(out.contains("\"serves\": 4"), "get output: {out}");
+}
+
+/// `check <tree-ish> <schema>` validates a bare value tree against a schema
+/// without decoding it: it succeeds for the `value` subtree a matching
+/// document compiled to, and refuses the bound `{value/, schema/}` root
+/// itself, which is not a value tree.
+#[test]
+fn check_validates_a_value_tree_against_a_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "schema put failed: {err}");
+
+    let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
+    let (out, err, ok) = run(path, None, &["put", "recipe", recipe]);
+    assert!(ok, "put failed: {err}");
+    let hash = out.trim();
+
+    let (_, err, ok) = run(path, None, &["check", &format!("{hash}:value"), "recipe"]);
+    assert!(ok, "check of a conforming value tree failed: {err}");
+
+    let (_, err, ok) = run(path, None, &["check", hash, "recipe"]);
+    assert!(!ok, "check should refuse a non-value tree: {err}");
+}
