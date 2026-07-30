@@ -6,11 +6,14 @@
 //! lives in `tests/store.rs`.
 
 use std::collections::HashSet;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use facet::Facet;
 use facet_git_tree::schema_of;
 use facet_value::value;
-use gix_store::{Layout, RefPath, RefPrefix, RefSegment, RepoStore};
+use gix_store::{Layout, RefPath, RefPrefix, RefSegment, RepoStore, SignatureBytes, Signer};
 use test_support::init_repo;
 
 fn seg(s: &str) -> RefSegment {
@@ -298,5 +301,122 @@ fn committed_tree_has_the_plumbing_shape_stock_git_expects() {
     assert!(
         message.ends_with(&format!("Schema: {schema_commit}\n")),
         "commit message should end with the Schema: trailer, got {message:?}"
+    );
+}
+
+/// Signs by shelling out to `ssh-keygen -Y sign`, so the bytes on the commit are
+/// byte-for-byte what git's own ssh signing backend would have produced.
+struct SshKeygen {
+    key: PathBuf,
+}
+
+impl Signer for SshKeygen {
+    type Error = std::io::Error;
+
+    fn sign(&self, bytes: &[u8]) -> Result<SignatureBytes, Self::Error> {
+        // `-n git` is git's own SSHSIG namespace, and reading the payload from
+        // stdin keeps the signed bytes off disk.
+        let mut child = Command::new("ssh-keygen")
+            .arg("-Y")
+            .arg("sign")
+            .arg("-q")
+            .arg("-n")
+            .arg("git")
+            .arg("-f")
+            .arg(&self.key)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        child.stdin.take().expect("piped stdin").write_all(bytes)?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            return Err(std::io::Error::other("ssh-keygen -Y sign failed"));
+        }
+        Ok(SignatureBytes::from(out.stdout))
+    }
+}
+
+/// An ed25519 key at `<dir>/key`, plus an allowed-signers file trusting it for
+/// `test@example.com` — the identity [`init_repo`] configures, and the principal
+/// git hands `ssh-keygen -Y verify`.
+fn ssh_key(dir: &Path) -> PathBuf {
+    let key = dir.join("key");
+    let status = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "test", "-f"])
+        .arg(&key)
+        .status()
+        .expect("run ssh-keygen");
+    assert!(status.success(), "ssh-keygen keygen failed");
+
+    let public = std::fs::read_to_string(dir.join("key.pub")).expect("read public key");
+    std::fs::write(
+        dir.join("allowed_signers"),
+        format!("test@example.com namespaces=\"git\" {public}"),
+    )
+    .expect("write allowed signers");
+    key
+}
+
+/// The `gpgsig` transport exists to make true: real `git` verifies a commit this
+/// store wrote. Nothing here knows what a signature is — the [`Signer`] emits an
+/// SSHSIG block, the store carries it in git's header, and `git verify-commit`
+/// is the oracle that says the framing and the signed payload are both git's.
+#[test]
+fn a_signed_commit_verifies_under_real_git() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let key = ssh_key(dir.path());
+
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.path().join(".git/config"))
+        .expect("open config");
+    writeln!(
+        config,
+        "[gpg]\n\tformat = ssh\n[gpg \"ssh\"]\n\tallowedSignersFile = {}",
+        dir.path().join("allowed_signers").display()
+    )
+    .expect("write config");
+    drop(config);
+
+    let repo = gix::open(dir.path()).unwrap();
+    let store = RepoStore::open(&repo).with_signer(SshKeygen { key });
+    store
+        .dynamic(seg("counter"))
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+    let commit = store
+        .dynamic(seg("counter"))
+        .put(&entity("c"), &value!({ "n": 1 }))
+        .unwrap();
+
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .arg("verify-commit")
+        .arg("-v")
+        .arg(commit.to_string())
+        .output()
+        .expect("run git verify-commit");
+    assert!(
+        out.status.success(),
+        "git verify-commit rejected a store-written commit: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        report.contains("Good \"git\" signature"),
+        "expected a good-signature report, got {report:?}"
+    );
+
+    // And the same bytes come back out of the header, un-folded.
+    let signature = store.signature(commit).unwrap().expect("a signature");
+    assert!(
+        signature
+            .as_bytes()
+            .starts_with(b"-----BEGIN SSH SIGNATURE-----\n"),
+        "the header should hold the armored block verbatim"
     );
 }

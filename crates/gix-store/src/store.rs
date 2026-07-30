@@ -53,10 +53,13 @@ pub struct Store<R, O> {
 
 /// The extra commit header a signed write's bytes land in.
 ///
-/// Lowercase hex, because a header value may hold neither a newline nor a NUL;
-/// that transcoding is framing, not interpretation — the store reads back
-/// exactly the bytes the [`Signer`] produced and asks nothing else of them.
-const SIGNATURE_HEADER: &str = "signature";
+/// Git's own, so `git verify-commit` and `git log --show-signature` read a
+/// store-written commit with no tooling of ours installed; the bytes go in
+/// verbatim, and git's continuation-line folding of a multi-line value is
+/// framing the object codec does on both sides, not interpretation — the store
+/// reads back exactly the bytes the [`Signer`] produced and asks nothing else
+/// of them.
+const SIGNATURE_HEADER: &str = "gpgsig";
 
 impl<R, O> Store<R, O>
 where
@@ -83,6 +86,12 @@ where
     /// A store without one writes unsigned commits, which is the default: a
     /// signer is configured once here rather than passed at every write, so
     /// nothing on the write path changes shape when one is present.
+    ///
+    /// The bytes land in the standard `gpgsig` header, so a signer that emits
+    /// the armored block its format calls for — what `ssh-keygen -Y sign`
+    /// prints, under `gpg.format = ssh` — yields a commit stock `git
+    /// verify-commit` accepts. The store neither requires nor checks that: it
+    /// carries whatever bytes it is handed.
     ///
     /// ```no_run
     /// # use gix_refstore::{MemoryRefStore, SignatureBytes, Signer};
@@ -112,19 +121,15 @@ where
     ///
     /// Verbatim: the store performs no verification, and never has an opinion
     /// on what the bytes mean — that is attest's business.
+    ///
+    /// The commit decoder un-indents git's continuation lines, so a multi-line
+    /// armored block comes back exactly as the [`Signer`] produced it.
     pub fn signature(&self, commit: ObjectId) -> Result<Option<SignatureBytes>, Error> {
         self.with_commit(commit, |c| {
-            let Some((_, value)) = c
-                .extra_headers
+            Ok(c.extra_headers
                 .iter()
                 .find(|(name, _)| *name == SIGNATURE_HEADER)
-            else {
-                return Ok(None);
-            };
-            unhex(value).map(Some).ok_or(Error::InvalidSignatureHeader {
-                commit,
-                text: value.to_string(),
-            })
+                .map(|(_, value)| SignatureBytes::from(value.to_vec())))
         })
     }
 
@@ -330,9 +335,12 @@ where
             let mut bytes = Vec::new();
             commit.write_to(&mut bytes).map_err(Error::backend)?;
             let signature = signer.sign_erased(&bytes).map_err(Error::Signer)?;
+            // The commit encoder folds a multi-line value onto git's
+            // space-prefixed continuation lines itself, so the signer's bytes
+            // are pushed as they came.
             commit
                 .extra_headers
-                .push((SIGNATURE_HEADER.into(), hex(signature.as_bytes()).into()));
+                .push((SIGNATURE_HEADER.into(), signature.as_bytes().into()));
         }
         self.objects.write(&commit).map_err(Error::backend)
     }
@@ -429,22 +437,6 @@ where
             }),
         }
     }
-}
-
-/// Lowercase hex of `bytes`, the form a commit header can hold.
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// The bytes a [`hex`] string names, or `None` when it is not one.
-fn unhex(text: &gix::bstr::BStr) -> Option<SignatureBytes> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    text.chunks(2)
-        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
-        .collect::<Option<Vec<u8>>>()
-        .map(SignatureBytes::from)
 }
 
 /// Every ref name directly under `prefix` that is a single valid

@@ -5,8 +5,13 @@
 //! contract — a capability the code does not have cannot be exercised — so that
 //! invariant lives in [`Store::signature`]'s and [`Signer`]'s documentation
 //! instead. What *is* testable is that the bytes come back unchanged, whatever
-//! they are: the signer below returns bytes that are not a signature in any
-//! format, and the store carries them anyway.
+//! they are: the signer below returns an armored-looking block that is not a
+//! signature in any format, and the store carries it anyway — through the
+//! `gpgsig` header's continuation-line folding, which is what makes the
+//! round-trip worth asserting rather than obvious.
+//!
+//! Verifying the transport against real `git` needs a real key and a real
+//! repository, so that lives in `tests/repository.rs`.
 
 use std::cell::RefCell;
 use std::convert::Infallible;
@@ -34,12 +39,15 @@ impl Signer for Recorder {
 
     fn sign(&self, bytes: &[u8]) -> Result<SignatureBytes, Self::Error> {
         self.0.borrow_mut().push(bytes.to_vec());
-        Ok(SignatureBytes::from(vec![0x00, 0xff, b'\n', 0x7f]))
+        Ok(SignatureBytes::from(OPAQUE.to_vec()))
     }
 }
 
-/// The signature bytes the signer above produces, whatever it is asked to sign.
-const OPAQUE: [u8; 4] = [0x00, 0xff, b'\n', 0x7f];
+/// The signature bytes the signer above produces, whatever it is asked to sign:
+/// shaped like the armored block a real signer emits — several lines, a
+/// trailing newline — and gibberish inside, since nothing here may care.
+const OPAQUE: &[u8] =
+    b"-----BEGIN NOT A SIGNATURE-----\n\xffnot base64 either\n\n-----END NOT A SIGNATURE-----\n";
 
 fn store() -> Store<MemoryRefStore, ObjectStore> {
     Store::new(MemoryRefStore::new(), ObjectStore::default())
@@ -92,7 +100,7 @@ fn a_signed_write_returns_its_bytes_verbatim() {
             .unwrap()
             .as_ref()
             .map(|s| s.as_bytes()),
-        Some(OPAQUE.as_slice())
+        Some(OPAQUE)
     );
     assert_eq!(
         store.kind::<Counter>(kind()).get(&name()).unwrap(),

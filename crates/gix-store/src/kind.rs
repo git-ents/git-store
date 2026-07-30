@@ -120,7 +120,10 @@ where
         let (schema_commit, doc) = self.current_schema()?;
         let value_tree = E::write(value, &doc, self.store.objects())?;
         let schema_tree = self.store.commit_tree(schema_commit)?;
-        Ok((schema_commit, self.store.bind_schema(value_tree, schema_tree)?))
+        Ok((
+            schema_commit,
+            self.store.bind_schema(value_tree, schema_tree)?,
+        ))
     }
 
     /// The current value at `name` together with the commit it came from, or
