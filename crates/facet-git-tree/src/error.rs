@@ -1,8 +1,10 @@
 //! Error types, one per operation: [`KeyError`] for key validation,
 //! [`SerializeError`] for the write side, [`DeserializeError`] for the
 //! read side, [`SchemaError`] for schema generation, [`SchemaPinError`] for
-//! the schema-schema pin, [`SchemaReadError`] for schema-driven reads, and
-//! [`SchemaWriteError`] for schema-directed writes.
+//! the schema-schema pin, [`SchemaReadError`] for schema-driven reads,
+//! [`SchemaWriteError`] for schema-directed writes, and
+//! [`NormalFormError`]/[`UniverseError`] for the identity normal form's
+//! mapping and its type-universe check.
 
 use gix_hash::ObjectId;
 
@@ -224,6 +226,82 @@ pub enum DeserializeError {
     /// Holds the type identifier of the unsupported shape.
     #[error("unsupported type for deserialization: {0}")]
     Unsupported(&'static str),
+}
+
+/// An error produced by writing a value through the identity normal form
+/// ([`hash_into`](crate::normal_form::hash_into) and
+/// [`hash`](crate::normal_form::hash)).
+///
+/// The frozen mapping has no shape errors to report —
+/// [`NormalForm`](crate::normal_form::NormalForm) *is* the universe, so an
+/// out-of-universe value cannot be constructed — leaving only the two
+/// conditions the data itself can produce.
+#[derive(Debug, thiserror::Error)]
+pub enum NormalFormError {
+    /// A map key's name form is not usable as a Git tree entry name.
+    #[error(
+        "invalid normal-form map key name {key:?}: must be non-empty and hold neither '/' nor NUL"
+    )]
+    InvalidKey {
+        /// The offending name form.
+        key: String,
+    },
+    /// A list holds more elements than an eight-digit ordinal can name.
+    ///
+    /// The ordinal width is part of the frozen mapping, so a longer list is
+    /// refused rather than silently widened.
+    #[error(
+        "normal-form list holds {len} elements, more than the {max} an eight-digit ordinal names"
+    )]
+    ListTooLong {
+        /// The element count.
+        len: usize,
+        /// The largest count the mapping can name.
+        max: usize,
+    },
+    /// An error from the underlying `gix` object backend.
+    #[error("git object backend error")]
+    Backend(#[source] gix_object::write::Error),
+}
+
+/// An error produced by the identity normal form's type-universe check
+/// ([`check_universe`](crate::normal_form::check_universe) and
+/// [`check_identity_subtrees`](crate::normal_form::check_identity_subtrees)).
+///
+/// Every variant names the `path` within the checked subtree, so a refused
+/// schema says which field left the universe, not merely that one did.
+#[derive(Debug, thiserror::Error)]
+pub enum UniverseError {
+    /// A node the universe excludes.
+    ///
+    /// Holds the offending [`Node`](crate::Node) variant's name.
+    #[error("at {path}: {found} is outside the identity normal form's universe")]
+    Excluded {
+        /// The location within the checked subtree.
+        path: String,
+        /// The excluded node variant's name.
+        found: &'static str,
+    },
+    /// A [`Node::Ref`](crate::Node::Ref) names a definition absent from the
+    /// schema document.
+    #[error("at {path}: schema ref {name:?} has no definition in the document")]
+    UnknownRef {
+        /// The location within the checked subtree.
+        path: String,
+        /// The undefined reference name.
+        name: String,
+    },
+    /// The check exceeded the maximum supported nesting depth.
+    ///
+    /// A recursive type reaches this rather than recursing unboundedly; an
+    /// identity subtree that deep could not be hashed stably in any case.
+    #[error("at {path}: maximum nesting depth ({depth}) exceeded while checking the universe")]
+    MaxDepth {
+        /// The location reached when the limit tripped.
+        path: String,
+        /// The limit that was exceeded.
+        depth: usize,
+    },
 }
 
 /// An error produced by schema generation ([`schema_of`](crate::schema_of) and

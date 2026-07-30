@@ -10,9 +10,11 @@
 
 #[cfg(feature = "value")]
 pub mod apply;
-pub mod attr;
+
 pub mod derive;
 pub mod pin;
+
+pub use crate::attr;
 
 use std::collections::BTreeMap;
 

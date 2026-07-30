@@ -9,10 +9,12 @@
 //! The normative encoding rules live in `docs/specification.adoc`.
 #![forbid(unsafe_code)]
 
+pub mod attr;
 mod de;
 mod error;
 mod marker;
 pub mod migration;
+pub mod normal_form;
 mod raw_tree;
 pub mod schema;
 mod ser;
@@ -24,14 +26,18 @@ pub use gix_object::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 
 pub use de::{check_key, deserialize, deserialize_into};
 pub use error::{
-    DeserializeError, KeyError, MigrationError, MigrationPinError, SchemaError, SchemaPinError,
-    SchemaReadError, SchemaWriteError, SerializeError,
+    DeserializeError, KeyError, MigrationError, MigrationPinError, NormalFormError, SchemaError,
+    SchemaPinError, SchemaReadError, SchemaWriteError, SerializeError, UniverseError,
 };
 #[cfg(feature = "value")]
 pub use migration::apply::{Edge, apply, apply_chain};
 pub use migration::derive::{Derivation, Divergence, Incomplete, Side};
 pub use migration::pin::MigrationSchema;
 pub use migration::{Change, Constant, Hints, Migration, Op, Target};
+pub use normal_form::{
+    IDENTITY_DEF_PREFIX, Key, NormalForm, check_identity_subtrees, check_universe,
+    identity_subtrees,
+};
 pub use raw_tree::RawTree;
 pub use schema::pin::SchemaSchema;
 #[cfg(feature = "value")]

@@ -23,9 +23,11 @@ use std::collections::{BTreeMap, HashMap};
 use facet::{ConstTypeId, Def, Facet, ScalarType, Shape};
 
 use crate::RawTree;
+use crate::attr;
 use crate::de::{MAX_DEPTH, collapse_shape};
 use crate::error::SchemaError;
-use crate::migration::{Hints, Target, attr};
+use crate::migration::{Hints, Target};
+use crate::normal_form::IDENTITY_DEF_PREFIX;
 use crate::ser::is_byte_seq;
 
 /// A complete, self-contained schema document.
@@ -305,6 +307,47 @@ impl Walker {
         }
     }
 
+    /// The schema of one shape, with `#[facet(identity::key)]` on the type
+    /// compiled into the reserved definition that marks an identity- or
+    /// key-bearing subtree (see [`crate::normal_form`]).
+    fn node(&mut self, shape: &'static Shape, depth: usize) -> Result<Node, SchemaError> {
+        let marked = attr::is_identity_key(shape.attributes);
+        let node = self.unmarked_node(shape, depth)?;
+        Ok(self.mark_identity(node, marked))
+    }
+
+    /// Register `node` under a reserved [`IDENTITY_DEF_PREFIX`] definition
+    /// when `marked`, returning the [`Node::Ref`] that stands in for it — a
+    /// reference adds no tree level, so a marked subtree encodes exactly as
+    /// an unmarked one does. Bodies are deduplicated, and an already-marked
+    /// node is returned untouched, so marking is idempotent.
+    fn mark_identity(&mut self, node: Node, marked: bool) -> Node {
+        if !marked {
+            return node;
+        }
+        if let Node::Ref(name) = &node
+            && name.starts_with(IDENTITY_DEF_PREFIX)
+        {
+            return node;
+        }
+        if let Some((name, _)) = self
+            .defs
+            .iter()
+            .find(|(name, body)| name.starts_with(IDENTITY_DEF_PREFIX) && **body == node)
+        {
+            return Node::Ref(name.clone());
+        }
+        let name = format!(
+            "{IDENTITY_DEF_PREFIX}{}",
+            self.defs
+                .keys()
+                .filter(|name| name.starts_with(IDENTITY_DEF_PREFIX))
+                .count()
+        );
+        self.defs.insert(name.clone(), node);
+        Node::Ref(name)
+    }
+
     /// The schema of one shape, mirroring `serialize_node`'s dispatch order.
     ///
     /// `depth` counts nesting levels against [`MAX_DEPTH`], the same bound
@@ -312,7 +355,7 @@ impl Walker {
     /// that could never be read back regardless of what schema described it,
     /// so generation is refused here rather than recursing unboundedly on a
     /// pathological (or adversarially deep) type.
-    fn node(&mut self, shape: &'static Shape, depth: usize) -> Result<Node, SchemaError> {
+    fn unmarked_node(&mut self, shape: &'static Shape, depth: usize) -> Result<Node, SchemaError> {
         if depth > self.limit {
             return Err(SchemaError::MaxDepth(self.limit));
         }
@@ -438,7 +481,13 @@ impl Walker {
     ) -> Result<BTreeMap<String, Node>, SchemaError> {
         fields
             .iter()
-            .map(|f| Ok((f.name.to_owned(), self.node(f.shape(), depth)?)))
+            .map(|f| {
+                let node = self.node(f.shape(), depth)?;
+                Ok((
+                    f.name.to_owned(),
+                    self.mark_identity(node, attr::is_identity_key(f.attributes)),
+                ))
+            })
             .collect()
     }
 
@@ -453,10 +502,11 @@ impl Walker {
         fields
             .iter()
             .map(|f| {
+                let node = self.node(f.shape(), depth)?;
                 Ok((
                     f.name.to_owned(),
                     StructField {
-                        node: self.node(f.shape(), depth)?,
+                        node: self.mark_identity(node, attr::is_identity_key(f.attributes)),
                         has_default: f.has_default(),
                     },
                 ))
