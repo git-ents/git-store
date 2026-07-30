@@ -217,6 +217,33 @@ fn dynamic_node_matches_plain_serialize() {
 
 // --- conformance failures name the path ---
 
+/// A field the schema names but the object omits entirely (as opposed to
+/// setting it `null`) is rejected at write time — the omission would
+/// otherwise write a tree `read_struct` can never read back, since it
+/// requires an entry for every field, `Optional` included.
+#[test]
+fn omitting_a_field_is_rejected_at_write() {
+    let doc = schema_of::<WithOptional>().unwrap();
+    let store = ObjectStore::default();
+    let err = serialize_value_with_schema(&value!({}), &doc, &store).unwrap_err();
+    assert!(
+        matches!(&err, SchemaWriteError::MissingField { field, .. } if field == "maybe"),
+        "expected MissingField, got {err:?}"
+    );
+}
+
+/// An explicit `null` for an `Optional` field, as opposed to omitting the key,
+/// still writes and reads back as `None`.
+#[test]
+fn explicit_null_for_optional_field_round_trips() {
+    let doc = schema_of::<WithOptional>().unwrap();
+    let store = ObjectStore::default();
+    let root = serialize_value_with_schema(&value!({ "maybe": null }), &doc, &store)
+        .expect("an explicit null must write");
+    let back = deserialize_value_with_schema(&root, &doc, &store).expect("must read back");
+    assert_eq!(back, value!({ "maybe": null }));
+}
+
 #[test]
 fn unknown_field_is_rejected_with_path() {
     let doc = schema_of::<Person>().unwrap();

@@ -323,9 +323,11 @@ fn write_node<W: Write + ?Sized>(
 /// Encode an object as a name-keyed tree, shared by [`Node::Struct`] and
 /// struct enum variants.
 ///
-/// A field absent from the object is skipped, matching the read path's
-/// leniency (and the partial trees it can produce); a key the schema does not
-/// define is rejected, since the read path never emits one.
+/// A key the schema does not define is rejected, since the read path never
+/// emits one. A field the schema defines but the object omits is rejected
+/// too: the read path requires a tree entry for every field a schema names,
+/// `Optional` included, so writing one short would produce a tree that can
+/// never read back.
 fn write_named_tree<W: Write + ?Sized>(
     value: &Value,
     fields: &BTreeMap<String, Node>,
@@ -351,14 +353,18 @@ fn write_named_tree<W: Write + ?Sized>(
         // this, a field named exactly `crate::marker::MARKER_KEY` would encode
         // to the very tree that means "empty", and read back as empty.
         check_key(name).map_err(SerializeError::from)?;
-        if let Some(fv) = obj.get(name.as_str()) {
-            let (oid, kind) = write_node(fv, schema, doc, store, &path.field(name), depth + 1)?;
-            entries.push(TreeEntry {
-                mode: EntryMode::from(kind),
-                filename: name.as_str().into(),
-                oid,
-            });
-        }
+        let fv = obj
+            .get(name.as_str())
+            .ok_or_else(|| SchemaWriteError::MissingField {
+                path: path.show(),
+                field: name.clone(),
+            })?;
+        let (oid, kind) = write_node(fv, schema, doc, store, &path.field(name), depth + 1)?;
+        entries.push(TreeEntry {
+            mode: EntryMode::from(kind),
+            filename: name.as_str().into(),
+            oid,
+        });
     }
     entries.sort();
     tree(store, entries)

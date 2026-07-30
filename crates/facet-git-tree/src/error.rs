@@ -461,6 +461,19 @@ pub enum SchemaWriteError {
         /// The offending key.
         field: String,
     },
+    /// An object lacks a key a struct field requires.
+    ///
+    /// [`SchemaReadError::MissingField`] requires a tree entry for every
+    /// field a schema names, `Optional` included; a write that silently
+    /// dropped an absent field would produce exactly that unreadable tree, so
+    /// this is refused here instead, before anything is written.
+    #[error("at {path}: missing field {field:?}")]
+    MissingField {
+        /// The location of the object.
+        path: String,
+        /// The field the schema requires and the object omits.
+        field: String,
+    },
     /// A fixed-length sequence (`Tuple` or `Array`) has the wrong element
     /// count.
     #[error("at {path}: expected {expected} elements, found {found}")]

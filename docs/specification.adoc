@@ -322,7 +322,7 @@ Every blob referenced in the table below is a leaf blob per link:#serialization.
 | `Bytes` holding the blob's content verbatim.
 
 | `Struct`
-| an `Object` with one member per field; a field whose entry is missing from the tree is skipped, matching the typed decoder's leniency.
+| an `Object` with one member per field; every field the schema names MUST have a tree entry, `Optional` included, otherwise the read MUST fail.
 
 | `Tuple`, `List`
 | an `Array` of the elements, ordered by numeric index per link:#serialization.design.trees.ordering[entry name ordering].
@@ -510,7 +510,7 @@ The accepted set MUST be exactly the image of link:#deserialization.schema-drive
 | `Bytes`, encoded verbatim; or a `String`, encoded as its UTF-8 bytes.
 
 | `Struct`
-| an `Object` whose keys are all defined fields; a field absent from the object is skipped (matching the read path's leniency), and a key the schema does not define MUST be an error.
+| an `Object` whose keys are all defined fields; every field the schema names MUST be present in the object, and a key the schema does not define MUST be an error.
 
 | `Tuple`, `Array { elem, len }`
 | an `Array` of the exact required length, encoded as an link:#serialization.design.trees.ordering[ordinal-named] tree; a length mismatch MUST be an error.
@@ -675,7 +675,7 @@ Every other added field without a supplied default MUST be reported as unclassif
 Application MUST take a value read against the source document and return a value conforming to the target schema, per link:#migration.no-rewrite[read-time upcast].
 
 Operations at a target apply in document order, each a total transformation of that node, so conflicting operations are well-defined rather than an error.
-`Rename` and `Remove` on a field the value does not carry MUST be no-ops, matching the leniency link:#deserialization.schema-driven[schema-driven deserialization] already applies to a missing struct field.
+`Rename` and `Remove` on a field the value does not carry MUST be no-ops: application walks a value already read, not a tree, so a field's absence there is not rechecked against the source schema.
 `Add` MUST insert the constant, overwriting any member already present.
 
 Children MUST be upcast before their parent's operations run, so that operations address source-side field names exactly as they were derived.
