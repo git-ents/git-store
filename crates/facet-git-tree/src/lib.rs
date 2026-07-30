@@ -36,7 +36,7 @@ pub use migration::pin::MigrationSchema;
 pub use migration::{Change, Constant, Hints, Migration, Op, Target};
 pub use normal_form::{
     IDENTITY_DEF_PREFIX, Key, NormalForm, check_identity_subtrees, check_universe,
-    identity_subtrees,
+    check_universe_at, identity_subtrees,
 };
 pub use raw_tree::RawTree;
 pub use schema::pin::SchemaSchema;

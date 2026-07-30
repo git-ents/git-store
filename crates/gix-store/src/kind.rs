@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 
 use facet::Facet;
 use facet_git_tree::{
-    Derivation, Hints, ObjectId, Schema, SchemaPinError, deserialize_value_with_schema,
-    migration::derive::derive, schema_of,
+    Derivation, Hints, ObjectId, Schema, SchemaPinError, check_universe_at,
+    deserialize_value_with_schema, identity_subtrees, migration::derive::derive, schema_of,
 };
 use facet_value::Value;
 use gix::objs::{Find, Write};
@@ -347,6 +347,7 @@ where
     /// [`put`](Self::put) with authoring hints, which are what let a
     /// remove-plus-add pair be recognised as the rename it actually is.
     pub fn write(&self, doc: &Schema, hints: &Hints) -> Result<ObjectId, Error> {
+        self.check_identity_subtrees(doc)?;
         let previous = match self
             .store
             .refs()
@@ -382,6 +383,27 @@ where
         }
         let message = format!("schema {}\n", self.kind);
         self.store.commit_forward(&self.reference, &message, tree)
+    }
+
+    /// Refuse a schema whose identity- or key-bearing subtree leaves the
+    /// identity normal form's universe.
+    ///
+    /// A marked subtree (`#[facet(facet_git_tree::identity_key)]`, compiled
+    /// into the document as a reserved definition) is what an anchor id or an
+    /// action key is hashed from, so a subtree the frozen mapping cannot
+    /// express is refused at registration — the one point where the whole
+    /// schema is in hand and nothing has been published yet.
+    fn check_identity_subtrees(&self, doc: &Schema) -> Result<(), Error> {
+        for (subtree, node) in identity_subtrees(doc) {
+            check_universe_at(node, &doc.defs, subtree).map_err(|source| {
+                Error::IdentityUniverse {
+                    kind: self.kind.clone(),
+                    subtree: subtree.to_owned(),
+                    source,
+                }
+            })?;
+        }
+        Ok(())
     }
 
     /// The current schema, or `None` when never published.

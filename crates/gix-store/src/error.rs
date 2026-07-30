@@ -95,6 +95,22 @@ pub enum Error {
         /// The ref that was already taken.
         name: RefName,
     },
+    /// A schema declares an identity- or key-bearing subtree that leaves the
+    /// identity normal form's universe, so it cannot be registered: a value
+    /// under it could never be given a stable identity.
+    ///
+    /// The source names the field path within the subtree and the schema node
+    /// found there.
+    #[error("kind {kind} declares an identity subtree {subtree} outside the identity normal form")]
+    IdentityUniverse {
+        /// The kind whose schema was refused.
+        kind: RefSegment,
+        /// The marked subtree's definition name.
+        subtree: String,
+        /// Where, and how, the subtree left the universe.
+        #[source]
+        source: facet_git_tree::UniverseError,
+    },
     /// A schema could not be derived from a Rust type.
     #[error(transparent)]
     Schema(#[from] facet_git_tree::SchemaError),
