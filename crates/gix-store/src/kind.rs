@@ -94,6 +94,35 @@ where
         Ok(self.get_entry_at(commit)?.value)
     }
 
+    /// Decode a `{value/, schema/}` tree directly — the read-side mirror of
+    /// [`compile`](Self::compile). Unlike [`get_at`](Self::get_at), `tree`
+    /// need not be a commit's tree, and no ref is consulted: any tree of that
+    /// shape decodes, however it was reached.
+    pub fn decode(&self, tree: ObjectId) -> Result<E::Value, Error> {
+        let (value_tree, schema_tree) = self.store.split(tree, tree)?;
+        let doc = Schema::read_pinned(&schema_tree, self.store.objects())?;
+        E::read(&value_tree, &doc, self.store.objects())
+    }
+
+    /// Compile `value` under this kind's current schema into the same
+    /// `{value/, schema/}` tree a write commits — but writes no commit and
+    /// advances no ref. The returned tree hash is the document's identity: a
+    /// pure function of the value and the schema it is checked against.
+    pub fn compile(&self, value: &E::Value) -> Result<ObjectId, Error> {
+        let (_, tree) = self.compile_with_schema(value)?;
+        Ok(tree)
+    }
+
+    /// [`compile`](Self::compile), plus the schema commit it was compiled
+    /// against — shared with the committing write path so the two agree by
+    /// construction.
+    fn compile_with_schema(&self, value: &E::Value) -> Result<(ObjectId, ObjectId), Error> {
+        let (schema_commit, doc) = self.current_schema()?;
+        let value_tree = E::write(value, &doc, self.store.objects())?;
+        let schema_tree = self.store.commit_tree(schema_commit)?;
+        Ok((schema_commit, self.store.bind_schema(value_tree, schema_tree)?))
+    }
+
     /// The current value at `name` together with the commit it came from, or
     /// `None` when absent.
     pub fn get_entry(&self, name: &RefPath) -> Result<Option<Entry<E::Value>>, Error> {
@@ -537,10 +566,7 @@ where
     R: RefStore + Committer,
     O: Find + Write,
 {
-    let (schema_commit, doc) = kind.current_schema()?;
-    let value_tree = E::write(value, &doc, kind.store.objects())?;
-    let schema_tree = kind.store.commit_tree(schema_commit)?;
-    let tree = kind.store.bind_schema(value_tree, schema_tree)?;
+    let (schema_commit, tree) = kind.compile_with_schema(value)?;
     let message = format!("{summary}\n\nSchema: {schema_commit}\n");
     Ok((message, tree))
 }
