@@ -63,7 +63,16 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
 
 `Store` is generic over a [`gix_refstore::RefStore`] for refs and a
 `gix_object::Find`/`Write` object database for objects.
-`Store::open(&repo)` is the specialization over a real repository;
+`Store::open(&repo)` is the specialization over a real repository. For workloads
+that repeatedly read objects, configure gix's object cache before opening the
+store:
+
+```rust
+let mut repo = gix::discover(".")?;
+repo.object_cache_size_if_unset(4 * 1024 * 1024);
+let store = Store::open(&repo);
+```
+
 `Store::new(MemoryRefStore::new(), ObjectStore::default())` is the same store
 with no filesystem behind it, which is what most of this crate's own tests use.
 

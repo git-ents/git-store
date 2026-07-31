@@ -147,7 +147,8 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
-    let repo = gix::discover(".").context("not inside a git repository")?;
+    let mut repo = gix::discover(".").context("not inside a git repository")?;
+    repo.object_cache_size_if_unset(4 * 1024 * 1024);
     let store = RepoStore::open(&repo);
 
     match cli.command {
