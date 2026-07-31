@@ -159,6 +159,10 @@ pub enum Error {
     #[error("signing the commit failed")]
     Signer(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 
+    /// Computing a kind fingerprint failed, for example because SHA-1
+    /// collision detection rejected the digest.
+    #[error("could not compute kind fingerprint")]
+    Fingerprint(#[source] gix::hash::hasher::Error),
     /// A backend failure from the ref store or object store.
     #[error(transparent)]
     Backend(Box<dyn std::error::Error + Send + Sync + 'static>),

@@ -17,7 +17,9 @@ use crate::encoding::{Encoding, Typed};
 use crate::error::Error;
 use crate::store::Store;
 
-/// One kind: its schema ref and the entities under it.
+const KIND_FINGERPRINT_DOMAIN: &[u8] = b"gix-store\0kind-fingerprint\0v1\0";
+
+/// One kind: its schema ref and the entities beneath it.
 pub struct Kind<'s, E, R, O> {
     store: &'s Store<R, O>,
     name: RefSegment,
@@ -306,6 +308,29 @@ where
             .into_iter()
             .map(|(name, commit)| Ok((name, self.get_entry_at(commit)?)))
             .collect()
+    }
+
+    /// Return a digest of this kind's published entity refs without reading
+    /// any Git objects.
+    ///
+    /// The digest changes when an entity name or commit ID changes. It is
+    /// domain-separated and versioned, and includes this kind's name. The
+    /// returned [`ObjectId`] is a digest for cache keys, not a Git object ID;
+    /// schema refs are not included.
+    pub fn fingerprint(&self) -> Result<ObjectId, Error> {
+        let entries = self.list_entries()?;
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(KIND_FINGERPRINT_DOMAIN);
+        update_fingerprint_bytes(&mut hasher, self.name.as_str().as_bytes());
+        hasher.update(&(entries.len() as u64).to_be_bytes());
+        for (name, commit) in entries {
+            hasher.update(&(name.segments().len() as u64).to_be_bytes());
+            for segment in name.segments() {
+                update_fingerprint_bytes(&mut hasher, segment.as_str().as_bytes());
+            }
+            hasher.update(commit.as_slice());
+        }
+        hasher.try_finalize().map_err(Error::Fingerprint)
     }
 
     /// [`list`](Self::list) narrowed to the entities nested under `group`,
@@ -640,6 +665,11 @@ where
             }
         }
     }
+}
+
+fn update_fingerprint_bytes(hasher: &mut gix::hash::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 /// The tree and commit message a value builds down to, under `kind`'s
