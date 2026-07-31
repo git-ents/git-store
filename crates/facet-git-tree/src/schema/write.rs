@@ -31,7 +31,7 @@ use gix_object::Write;
 
 use crate::de::MAX_DEPTH;
 use crate::error::{SchemaWriteError, SerializeError};
-use crate::schema::{FieldNode, Node, Schema, VariantKind};
+use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind};
 use crate::ser::{float_text, serialize_node, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
 
@@ -327,9 +327,9 @@ fn write_node<W: Write + ?Sized>(
 /// emits one. A field the schema defines but the object omits is rejected too
 /// — the read path requires a tree entry for every field a schema names, so
 /// writing one short would produce a tree that can never read back — unless
-/// [`FieldNode::has_default`] is set for it, in which case the field's entry
+/// [`DefaultFieldNode::has_default`] is set for it, in which case the field's entry
 /// is simply left out.
-fn write_named_tree<W: Write + ?Sized, T: FieldNode>(
+fn write_named_tree<W: Write + ?Sized, T: DefaultFieldNode>(
     value: &Value,
     fields: &BTreeMap<String, T>,
     doc: &Schema,

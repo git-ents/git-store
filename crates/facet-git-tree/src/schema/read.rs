@@ -19,7 +19,7 @@ use crate::de::{
     find_tree_entries, map_pair_entries, sort_by_ordinal, validate_option_entries,
 };
 use crate::error::{DeserializeError, SchemaReadError};
-use crate::schema::{FieldNode, Node, Schema, VariantKind};
+use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind};
 use crate::{EntryKind, ObjectId};
 
 /// Deserialize the tree at `root` into a full-fidelity [`Value`], guided by
@@ -281,7 +281,7 @@ fn read_node<F: Find + ?Sized>(
 
 /// Read a name-keyed tree as a [`VObject`], requiring the tree's entries and
 /// the schema's fields to correspond exactly — except a field whose
-/// [`FieldNode::has_default`] is set, whose entry may be absent: the result
+/// [`DefaultFieldNode::has_default`] is set, whose entry may be absent: the result
 /// simply omits it, since a schema-only read has no default *value* to
 /// invent, only the marker that one exists elsewhere.
 ///
@@ -290,7 +290,7 @@ fn read_node<F: Find + ?Sized>(
 /// leniency a tree sharing no field name at all with the schema read as an
 /// empty object rather than an error, so every tree conformed to every
 /// struct schema.
-fn read_struct<F: Find + ?Sized, T: FieldNode>(
+fn read_struct<F: Find + ?Sized, T: DefaultFieldNode>(
     entries: &Entries,
     fields: &BTreeMap<String, T>,
     doc: &Schema,

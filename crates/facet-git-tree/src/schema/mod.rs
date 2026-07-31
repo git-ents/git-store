@@ -183,16 +183,11 @@ pub struct StructField {
 pub(crate) trait FieldNode {
     /// The field's own schema.
     fn node(&self) -> &Node;
-    /// Whether the field's tree entry may be absent.
-    fn has_default(&self) -> bool;
 }
 
 impl FieldNode for Node {
     fn node(&self) -> &Node {
         self
-    }
-    fn has_default(&self) -> bool {
-        false
     }
 }
 
@@ -200,6 +195,23 @@ impl FieldNode for StructField {
     fn node(&self) -> &Node {
         &self.node
     }
+}
+
+#[cfg(feature = "value")]
+pub(crate) trait DefaultFieldNode: FieldNode {
+    /// Whether the field's tree entry may be absent.
+    fn has_default(&self) -> bool;
+}
+
+#[cfg(feature = "value")]
+impl DefaultFieldNode for Node {
+    fn has_default(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "value")]
+impl DefaultFieldNode for StructField {
     fn has_default(&self) -> bool {
         self.has_default
     }
