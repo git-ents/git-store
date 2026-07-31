@@ -58,9 +58,10 @@ impl<T: for<'a> Facet<'a>> Encoding for Typed<T> {
 
     fn read<S: Find + Write + ?Sized>(
         root: &ObjectId,
-        _doc: &Schema,
+        doc: &Schema,
         objects: &S,
     ) -> Result<T, Error> {
+        validate_with_schema(root, doc, objects)?;
         Ok(deserialize(root, objects)?)
     }
 }
