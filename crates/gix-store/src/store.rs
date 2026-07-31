@@ -78,49 +78,19 @@ where
         }
     }
 
-    /// Cover every commit this store writes with `signer`'s bytes.
+    /// Configure a signer for commits written by this store.
     ///
-    /// A store without one writes unsigned commits, which is the default: a
-    /// signer is configured once here rather than passed at every write, so
-    /// nothing on the write path changes shape when one is present.
-    ///
-    /// The bytes land in the standard `gpgsig` header, so a signer that emits
-    /// the armored block its format calls for — what `ssh-keygen -Y sign`
-    /// prints, under `gpg.format = ssh` — yields a commit stock `git
-    /// verify-commit` accepts. The store neither requires nor checks that: it
-    /// carries whatever bytes it is handed.
-    ///
-    /// ```no_run
-    /// # use gix_refstore::{MemoryRefStore, SignatureBytes, Signer};
-    /// # use gix_store::Store;
-    /// struct Machine;
-    ///
-    /// impl Signer for Machine {
-    ///     type Error = std::io::Error;
-    ///
-    ///     fn sign(&self, bytes: &[u8]) -> Result<SignatureBytes, Self::Error> {
-    ///         Ok(SignatureBytes::from(bytes.to_vec()))
-    ///     }
-    /// }
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let objects = gix::open(".")?.objects.clone();
-    /// let store = Store::new(MemoryRefStore::new(), objects).with_signer(Machine);
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// The signer output is stored as opaque bytes. A store without a signer
+    /// writes unsigned commits.
     pub fn with_signer(mut self, signer: impl Signer + 'static) -> Self {
         self.signer = Some(Box::new(signer));
         self
     }
 
-    /// The signature bytes `commit` carries, or `None` when it is unsigned.
+    /// Return the opaque signature bytes carried by `commit`, or `None` when
+    /// it is unsigned.
     ///
-    /// Verbatim: the store performs no verification, and never has an opinion
-    /// on what the bytes mean — that is attest's business.
-    ///
-    /// The commit decoder un-indents git's continuation lines, so a multi-line
-    /// armored block comes back exactly as the [`Signer`] produced it.
+    /// The store does not verify or interpret the returned bytes.
     pub fn signature(&self, commit: ObjectId) -> Result<Option<SignatureBytes>, Error> {
         self.with_commit(commit, |c| {
             Ok(c.extra_headers
