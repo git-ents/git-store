@@ -28,8 +28,8 @@ pub struct Kind<'s, E, R, O> {
 
 impl<'s, E, R, O> Kind<'s, E, R, O>
 where
-    R: RefStore + Committer,
-    O: Find + Write,
+    R: RefStore,
+    O: Find,
 {
     pub(crate) fn new(store: &'s Store<R, O>, name: RefSegment) -> Self {
         let schema_ref = store.layout().schema.join(&name);
@@ -46,8 +46,8 @@ where
 
 impl<'s, E: Encoding, R, O> Kind<'s, E, R, O>
 where
-    R: RefStore + Committer,
-    O: Find + Write,
+    R: RefStore,
+    O: Find,
 {
     /// This kind's name.
     pub fn name(&self) -> &RefSegment {
@@ -69,13 +69,21 @@ where
     }
 
     /// Store `value` at `name`, with a default commit summary.
-    pub fn put(&self, name: &RefPath, value: &E::Value) -> Result<ObjectId, Error> {
+    pub fn put(&self, name: &RefPath, value: &E::Value) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         self.write(value).at(name)
     }
 
     /// The general form of [`put`](Self::put): set a message, then choose a
     /// name.
-    pub fn write<'k>(&'k self, value: &'k E::Value) -> Put<'k, E, R, O> {
+    pub fn write<'k>(&'k self, value: &'k E::Value) -> Put<'k, E, R, O>
+    where
+        R: Committer,
+        O: Write,
+    {
         Put {
             kind: self,
             value,
@@ -108,7 +116,10 @@ where
     /// `{value/, schema/}` tree a write commits — but writes no commit and
     /// advances no ref. The returned tree hash is the document's identity: a
     /// pure function of the value and the schema it is checked against.
-    pub fn compile(&self, value: &E::Value) -> Result<ObjectId, Error> {
+    pub fn compile(&self, value: &E::Value) -> Result<ObjectId, Error>
+    where
+        O: Write,
+    {
         let (_, tree) = self.compile_with_schema(value)?;
         Ok(tree)
     }
@@ -116,7 +127,10 @@ where
     /// [`compile`](Self::compile), plus the schema commit it was compiled
     /// against — shared with the committing write path so the two agree by
     /// construction.
-    fn compile_with_schema(&self, value: &E::Value) -> Result<(ObjectId, ObjectId), Error> {
+    fn compile_with_schema(&self, value: &E::Value) -> Result<(ObjectId, ObjectId), Error>
+    where
+        O: Write,
+    {
         let (schema_commit, doc) = self.current_schema()?;
         let value_tree = E::write(value, &doc, self.store.objects())?;
         let schema_tree = self.store.commit_tree(schema_commit)?;
@@ -216,7 +230,11 @@ where
         &self,
         name: &RefPath,
         rebuild: impl Fn(Option<&Entry<E::Value>>) -> (String, E::Value),
-    ) -> Result<ObjectId, Error> {
+    ) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         self.try_update(name, |current| Ok(rebuild(current)))
     }
 
@@ -232,6 +250,8 @@ where
         rebuild: impl Fn(Option<&Entry<E::Value>>) -> Result<(String, E::Value), Er>,
     ) -> Result<ObjectId, Er>
     where
+        R: Committer,
+        O: Write,
         Er: From<Error>,
     {
         let reference = self.reference(name);
@@ -296,7 +316,10 @@ where
     }
 
     /// Delete an entity's ref. Returns whether it existed.
-    pub fn remove(&self, name: &RefPath) -> Result<bool, Error> {
+    pub fn remove(&self, name: &RefPath) -> Result<bool, Error>
+    where
+        R: Committer,
+    {
         let reference = self.reference(name);
         loop {
             let Some(expected) = self.store.refs().read(&reference).map_err(Error::backend)? else {
@@ -332,11 +355,15 @@ where
 
 impl<'s, T: for<'a> Facet<'a>, R, O> Kind<'s, Typed<T>, R, O>
 where
-    R: RefStore + Committer,
-    O: Find + Write,
+    R: RefStore,
+    O: Find,
 {
     /// Publish the schema derived from `T`.
-    pub fn publish(&self) -> Result<ObjectId, Error> {
+    pub fn publish(&self) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         self.schema().put(&schema_of::<T>()?)
     }
 }
@@ -362,8 +389,8 @@ pub struct KindSchema<'s, R, O> {
 
 impl<'s, R, O> KindSchema<'s, R, O>
 where
-    R: RefStore + Committer,
-    O: Find + Write,
+    R: RefStore,
+    O: Find,
 {
     /// The ref this schema is published at.
     pub fn reference(&self) -> &RefName {
@@ -372,13 +399,21 @@ where
 
     /// Publish (or evolve) the schema, committing it forward over the current
     /// tip.
-    pub fn put(&self, doc: &Schema) -> Result<ObjectId, Error> {
+    pub fn put(&self, doc: &Schema) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         self.write(doc, &Hints::new())
     }
 
     /// [`put`](Self::put) with authoring hints, which are what let a
     /// remove-plus-add pair be recognised as the rename it actually is.
-    pub fn write(&self, doc: &Schema, hints: &Hints) -> Result<ObjectId, Error> {
+    pub fn write(&self, doc: &Schema, hints: &Hints) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         self.check_identity_subtrees(doc)?;
         let message = format!("schema {}\n", self.kind);
         self.store
@@ -482,8 +517,8 @@ pub struct Put<'k, E: Encoding, R, O> {
 
 impl<'k, E: Encoding, R, O> Put<'k, E, R, O>
 where
-    R: RefStore + Committer,
-    O: Find + Write,
+    R: RefStore,
+    O: Find,
 {
     /// Use `summary` as the commit summary instead of the default.
     pub fn message(mut self, summary: impl Into<String>) -> Self {
@@ -492,7 +527,11 @@ where
     }
 
     /// Commit the value forward at `name`.
-    pub fn at(self, name: &RefPath) -> Result<ObjectId, Error> {
+    pub fn at(self, name: &RefPath) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         let kind = self.kind;
         let default = || format!("store {}/{name}", kind.name);
         let (message, tree) = self.build(default)?;
@@ -500,7 +539,10 @@ where
             .commit_forward(&kind.reference(name), &message, |_| Ok(tree))
     }
 
-    fn build(self, default_summary: impl FnOnce() -> String) -> Result<(String, ObjectId), Error> {
+    fn build(self, default_summary: impl FnOnce() -> String) -> Result<(String, ObjectId), Error>
+    where
+        O: Write,
+    {
         let summary = self.message.unwrap_or_else(default_summary);
         commit_body(self.kind, self.value, summary)
     }
@@ -510,7 +552,11 @@ where
     /// The returned id *is* the name, recoverable with [`entity_name`], so an
     /// anonymous entity collides only when two distinct commits share an
     /// object id.
-    pub fn anonymous(self) -> Result<ObjectId, Error> {
+    pub fn anonymous(self) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         self.anonymous_at(entity_name)
     }
 
@@ -519,11 +565,19 @@ where
     /// Recoverable with [`entity_name_under`]. Grouping this way makes
     /// listing every anonymous entity in `group` a ref-prefix scan instead of
     /// a full-store scan.
-    pub fn anonymous_under(self, group: &RefPath) -> Result<ObjectId, Error> {
+    pub fn anonymous_under(self, group: &RefPath) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         self.anonymous_at(|commit| entity_name_under(group, commit))
     }
 
-    fn anonymous_at(self, name: impl FnOnce(ObjectId) -> RefPath) -> Result<ObjectId, Error> {
+    fn anonymous_at(self, name: impl FnOnce(ObjectId) -> RefPath) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         let kind = self.kind;
         let default = || format!("store {}/<auto>", kind.name);
         let (message, tree) = self.build(default)?;
@@ -564,7 +618,7 @@ fn commit_body<E: Encoding, R, O>(
     summary: String,
 ) -> Result<(String, ObjectId), Error>
 where
-    R: RefStore + Committer,
+    R: RefStore,
     O: Find + Write,
 {
     let (schema_commit, tree) = kind.compile_with_schema(value)?;

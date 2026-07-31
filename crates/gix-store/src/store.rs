@@ -63,8 +63,8 @@ const SIGNATURE_HEADER: &str = "gpgsig";
 
 impl<R, O> Store<R, O>
 where
-    R: RefStore + Committer,
-    O: Find + Write,
+    R: RefStore,
+    O: Find,
 {
     /// Open a store with the default `refs/store`/`refs/schema` [`Layout`].
     pub fn new(refs: R, objects: O) -> Self {
@@ -219,7 +219,10 @@ where
 
     /// Splice an already-written value tree and schema tree into the
     /// two-entry root a data commit's own tree becomes.
-    pub(crate) fn bind_schema(&self, value: ObjectId, schema: ObjectId) -> Result<ObjectId, Error> {
+    pub(crate) fn bind_schema(&self, value: ObjectId, schema: ObjectId) -> Result<ObjectId, Error>
+    where
+        O: Write,
+    {
         let mut entries = vec![
             gix::objs::tree::Entry {
                 mode: self.entry_mode(value)?,
@@ -289,7 +292,11 @@ where
         name: &RefName,
         message: &str,
         mut build_tree: impl FnMut(Option<ObjectId>) -> Result<ObjectId, Error>,
-    ) -> Result<ObjectId, Error> {
+    ) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         loop {
             let parent = self.refs.read(name).map_err(Error::backend)?;
             let tree = build_tree(parent)?;
@@ -319,7 +326,11 @@ where
         message: &str,
         tree: ObjectId,
         parent: Option<ObjectId>,
-    ) -> Result<ObjectId, Error> {
+    ) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         let mut commit = gix::objs::Commit {
             tree,
             parents: parent.into_iter().collect(),

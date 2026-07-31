@@ -27,7 +27,7 @@ pub trait Encoding {
     ) -> Result<ObjectId, Error>;
 
     /// Decode the value rooted at `root`, guided by `doc`.
-    fn read<S: Find + Write + ?Sized>(
+    fn read<S: Find + ?Sized>(
         root: &ObjectId,
         doc: &Schema,
         objects: &S,
@@ -56,11 +56,7 @@ impl<T: for<'a> Facet<'a>> Encoding for Typed<T> {
         Ok(root)
     }
 
-    fn read<S: Find + Write + ?Sized>(
-        root: &ObjectId,
-        doc: &Schema,
-        objects: &S,
-    ) -> Result<T, Error> {
+    fn read<S: Find + ?Sized>(root: &ObjectId, doc: &Schema, objects: &S) -> Result<T, Error> {
         validate_with_schema(root, doc, objects)?;
         Ok(deserialize(root, objects)?)
     }
@@ -77,11 +73,7 @@ impl Encoding for Dynamic {
         Ok(serialize_value_with_schema(value, doc, objects)?)
     }
 
-    fn read<S: Find + Write + ?Sized>(
-        root: &ObjectId,
-        doc: &Schema,
-        objects: &S,
-    ) -> Result<Value, Error> {
+    fn read<S: Find + ?Sized>(root: &ObjectId, doc: &Schema, objects: &S) -> Result<Value, Error> {
         Ok(deserialize_value_with_schema(root, doc, objects)?)
     }
 }

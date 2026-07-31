@@ -11,7 +11,7 @@
 use facet_git_tree::{Edge, Migration, ObjectId, Schema, apply_chain};
 use facet_value::Value;
 use gix::objs::{Find, Write};
-use gix_refstore::{Committer, RefStore};
+use gix_refstore::RefStore;
 
 use crate::error::Error;
 use crate::kind::KindSchema;
@@ -22,15 +22,18 @@ pub(crate) const ENTRY: &str = "migration";
 
 impl<R, O> Store<R, O>
 where
-    R: RefStore + Committer,
-    O: Find + Write,
+    R: RefStore,
+    O: Find,
 {
     /// Add `migration` to the already-written schema tree `doc`.
     pub(crate) fn bind_migration(
         &self,
         doc: ObjectId,
         migration: ObjectId,
-    ) -> Result<ObjectId, Error> {
+    ) -> Result<ObjectId, Error>
+    where
+        O: Write,
+    {
         let mut entries = self.tree_entries(doc)?;
         entries.push(gix::objs::tree::Entry {
             mode: self.entry_mode(migration)?,
@@ -53,8 +56,8 @@ struct Step {
 
 impl<R, O> KindSchema<'_, R, O>
 where
-    R: RefStore + Committer,
-    O: Find + Write,
+    R: RefStore,
+    O: Find,
 {
     /// The migration a schema commit records off its predecessor, or `None`
     /// for a commit that established the kind.
