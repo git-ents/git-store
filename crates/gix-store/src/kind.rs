@@ -1,6 +1,6 @@
 //! One [`Kind`]: its schema ref and the entities beneath it.
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, rc::Rc};
 
 use facet::Facet;
 use facet_git_tree::{
@@ -212,10 +212,13 @@ where
         })
     }
 
-    fn read_bound(&self, commit: ObjectId) -> Result<(ObjectId, ObjectId, Schema, String), Error> {
+    fn read_bound(
+        &self,
+        commit: ObjectId,
+    ) -> Result<(ObjectId, ObjectId, Rc<Schema>, String), Error> {
         let (root, message) = self.store.commit_tree_and_summary(commit)?;
         let (value_tree, schema_tree) = self.store.split(root, commit)?;
-        let doc = Schema::read_pinned(&schema_tree, self.store.objects())?;
+        let doc = self.store.schema(schema_tree)?;
         Ok((value_tree, schema_tree, doc, message))
     }
 

@@ -1,7 +1,9 @@
 //! [`Store`]: kinds, schemas, and entities as Git refs and commits.
 
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
 use facet::Facet;
-use facet_git_tree::ObjectId;
+use facet_git_tree::{ObjectId, Schema};
 use gix::objs::{Find, Write, WriteTo};
 use gix_refstore::{
     ApplyError, Committer, ErasedSigner, GixRefStore, RefEdit, RefName, RefPrefix, RefSegment,
@@ -46,6 +48,7 @@ pub struct Store<R, O> {
     objects: O,
     layout: Layout,
     signer: Option<Box<dyn ErasedSigner>>,
+    schemas: RefCell<HashMap<ObjectId, Rc<Schema>>>,
 }
 
 /// The extra commit header a signed write's bytes land in.
@@ -75,6 +78,7 @@ where
             objects,
             layout,
             signer: None,
+            schemas: RefCell::new(HashMap::new()),
         }
     }
 
@@ -108,6 +112,16 @@ where
     /// The object database backing this store.
     pub fn objects(&self) -> &O {
         &self.objects
+    }
+
+    pub(crate) fn schema(&self, tree: ObjectId) -> Result<Rc<Schema>, Error> {
+        if let Some(schema) = self.schemas.borrow().get(&tree) {
+            return Ok(Rc::clone(schema));
+        }
+
+        let schema = Rc::new(Schema::read_pinned(&tree, self.objects())?);
+        self.schemas.borrow_mut().insert(tree, Rc::clone(&schema));
+        Ok(schema)
     }
 
     /// This store's ref namespace.
