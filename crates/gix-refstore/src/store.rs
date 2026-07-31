@@ -48,7 +48,17 @@ pub trait RefStore {
     ///
     /// Fails with [`ApplyError::LostRace`], having changed nothing, when it
     /// does not.
-    fn apply(&self, edit: RefEdit) -> Result<(), ApplyError<Self::Error>>;
+    fn apply(&self, edit: RefEdit) -> Result<(), ApplyError<Self::Error>> {
+        self.apply_batch(vec![edit])
+    }
+
+    /// Apply all `edits` as one compare-and-swap transaction.
+    ///
+    /// Every expectation is checked before any edit is published. A lost race
+    /// identifies the ref whose expectation failed, and leaves the batch
+    /// unchanged. Implementations must not emulate this with sequential calls
+    /// to [`RefStore::apply`].
+    fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>>;
 }
 
 /// The identity to attribute writes to.

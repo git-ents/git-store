@@ -71,38 +71,38 @@ impl RefStore for MemoryRefStore {
             .collect())
     }
 
-    fn apply(&self, edit: RefEdit) -> Result<(), ApplyError<Self::Error>> {
+    fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>> {
         let mut refs = self
             .refs
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let name = edit.name().clone();
-        let expectation = edit.expectation();
-        let current = refs.get(&name).copied();
 
-        let race = || ApplyError::LostRace {
-            name: name.clone(),
-            expected: expectation,
-        };
+        for edit in &edits {
+            let name = edit.name().clone();
+            let current = refs.get(&name).copied();
+            let expectation = edit.expectation();
+            let matches = match edit {
+                RefEdit::Create { .. } => current.is_none(),
+                RefEdit::Update { expected, .. } | RefEdit::Delete { expected, .. } => {
+                    current == Some(*expected)
+                }
+            };
+            if !matches {
+                return Err(ApplyError::LostRace {
+                    name,
+                    expected: expectation,
+                });
+            }
+        }
 
-        match edit {
-            RefEdit::Create { new, .. } => {
-                if current.is_some() {
-                    return Err(race());
+        for edit in edits {
+            match edit {
+                RefEdit::Create { name, new } | RefEdit::Update { name, new, .. } => {
+                    refs.insert(name, new);
                 }
-                refs.insert(name, new);
-            }
-            RefEdit::Update { expected, new, .. } => {
-                if current != Some(expected) {
-                    return Err(race());
+                RefEdit::Delete { name, .. } => {
+                    refs.remove(&name);
                 }
-                refs.insert(name, new);
-            }
-            RefEdit::Delete { expected, .. } => {
-                if current != Some(expected) {
-                    return Err(race());
-                }
-                refs.remove(&name);
             }
         }
         Ok(())

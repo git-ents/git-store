@@ -113,7 +113,7 @@ impl<S: RefStore> RefStore for AsOfRefStore<S> {
     /// historical view is a category error, not a race to retry, so it is
     /// refused rather than delegated to `inner` or silently accepted and
     /// dropped.
-    fn apply(&self, _edit: RefEdit) -> Result<(), ApplyError<Self::Error>> {
+    fn apply_batch(&self, _edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>> {
         Err(ApplyError::Backend(AsOfError::ReadOnly))
     }
 }

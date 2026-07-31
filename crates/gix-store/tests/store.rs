@@ -868,19 +868,22 @@ impl RefStore for FlakyRefStore {
         self.inner.prefixed(prefix)
     }
 
-    fn apply(&self, edit: RefEdit) -> Result<(), ApplyError<Self::Error>> {
+    fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>> {
         match self.injections.borrow_mut().pop_front() {
             Some(Injection::Concurrent(winner)) => {
                 self.inner
                     .apply(winner)
                     .expect("injected concurrent edit applies cleanly");
-                self.inner.apply(edit)
+                self.inner.apply_batch(edits)
             }
-            Some(Injection::Phantom) => Err(ApplyError::LostRace {
-                name: edit.name().clone(),
-                expected: edit.expectation(),
-            }),
-            None => self.inner.apply(edit),
+            Some(Injection::Phantom) => {
+                let edit = edits.first().expect("batch is not empty");
+                Err(ApplyError::LostRace {
+                    name: edit.name().clone(),
+                    expected: edit.expectation(),
+                })
+            }
+            None => self.inner.apply_batch(edits),
         }
     }
 }

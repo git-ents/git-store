@@ -1,6 +1,6 @@
 //! One [`Kind`]: its schema ref and the entities beneath it.
 
-use std::{marker::PhantomData, rc::Rc};
+use std::{collections::BTreeMap, marker::PhantomData, rc::Rc};
 
 use facet::Facet;
 use facet_git_tree::{
@@ -15,6 +15,7 @@ use gix_refstore::{
 
 use crate::encoding::{Encoding, Typed};
 use crate::error::Error;
+use crate::index;
 use crate::store::Store;
 
 const KIND_FINGERPRINT_DOMAIN: &[u8] = b"gix-store\0kind-fingerprint\0v1\0";
@@ -269,23 +270,93 @@ where
             let (message, tree) = commit_body(self, &value, summary)?;
             let parent = current.as_ref().map(|entry| entry.commit);
             let commit = self.store.write_commit(&message, tree, parent)?;
-            let edit = match parent {
-                Some(expected) => RefEdit::Update {
-                    name: reference.clone(),
-                    expected,
-                    new: commit,
-                },
-                None => RefEdit::Create {
-                    name: reference.clone(),
-                    new: commit,
-                },
-            };
-            match self.store.refs().apply(edit) {
+            let source = self.source_entries()?;
+            let index_ref = index::reference(&self.name);
+            let current_index = self.store.refs().read(&index_ref).map_err(Error::backend)?;
+            let mut next = source.into_iter().collect::<BTreeMap<_, _>>();
+            next.insert(name.clone(), commit);
+            let edits = self.entity_edits(
+                &reference,
+                parent,
+                Some(commit),
+                &index_ref,
+                current_index,
+                &next.into_iter().collect::<Vec<_>>(),
+            )?;
+            match self.store.refs().apply_batch(edits) {
                 Ok(()) => return Ok(commit),
                 Err(ApplyError::LostRace { .. }) => continue,
                 Err(ApplyError::Backend(err)) => return Err(Error::backend(err).into()),
             }
         }
+    }
+
+    fn source_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
+        let mut entries: Vec<_> = self
+            .store
+            .refs()
+            .prefixed(&self.entities)
+            .map_err(Error::backend)?
+            .into_iter()
+            .filter_map(|(name, commit)| {
+                name.relative_to(&self.entities).map(|name| (name, commit))
+            })
+            .collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Ok(entries)
+    }
+
+    fn entity_edits(
+        &self,
+        reference: &RefName,
+        expected: Option<ObjectId>,
+        new: Option<ObjectId>,
+        index_ref: &RefName,
+        current_index: Option<ObjectId>,
+        next: &[(RefPath, ObjectId)],
+    ) -> Result<Vec<RefEdit>, Error>
+    where
+        O: Write,
+    {
+        let entity = match (expected, new) {
+            (Some(expected), Some(new)) => RefEdit::Update {
+                name: reference.clone(),
+                expected,
+                new,
+            },
+            (None, Some(new)) => RefEdit::Create {
+                name: reference.clone(),
+                new,
+            },
+            (Some(expected), None) => RefEdit::Delete {
+                name: reference.clone(),
+                expected,
+            },
+            (None, None) => unreachable!("an entity edit must create or delete a ref"),
+        };
+        let mut edits = vec![entity];
+        if next.is_empty() {
+            if let Some(expected) = current_index {
+                edits.push(RefEdit::Delete {
+                    name: index_ref.clone(),
+                    expected,
+                });
+            }
+        } else {
+            let tree = index::write(self.store, next)?;
+            edits.push(match current_index {
+                Some(expected) => RefEdit::Update {
+                    name: index_ref.clone(),
+                    expected,
+                    new: tree,
+                },
+                None => RefEdit::Create {
+                    name: index_ref.clone(),
+                    new: tree,
+                },
+            });
+        }
+        Ok(edits)
     }
 
     /// The entity names published under this kind, ascending. Nesting is
@@ -299,7 +370,54 @@ where
     /// The commit IDs are the values of the entity refs, so callers can decode
     /// entries without resolving each ref a second time.
     pub fn list_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
-        self.list_entries_in(self.entities.clone())
+        let source = self.source_entries()?;
+        Ok(
+            index::read_validated(self.store, &self.name, &self.entities, &source)?
+                .unwrap_or(source),
+        )
+    }
+
+    /// Rebuild this kind's materialized index from the entity refs.
+    ///
+    /// This is the explicit repair path for repositories created before the
+    /// index existed or after an out-of-band ref write. It only publishes the
+    /// cache ref; entity refs remain the source of truth.
+    pub fn rebuild_index(&self) -> Result<(), Error>
+    where
+        O: Write,
+    {
+        let index_ref = index::reference(&self.name);
+        loop {
+            let source = self.source_entries()?;
+            let current = self.store.refs().read(&index_ref).map_err(Error::backend)?;
+            let edit = if source.is_empty() {
+                current.map(|expected| RefEdit::Delete {
+                    name: index_ref.clone(),
+                    expected,
+                })
+            } else {
+                let tree = index::write(self.store, &source)?;
+                Some(match current {
+                    Some(expected) => RefEdit::Update {
+                        name: index_ref.clone(),
+                        expected,
+                        new: tree,
+                    },
+                    None => RefEdit::Create {
+                        name: index_ref.clone(),
+                        new: tree,
+                    },
+                })
+            };
+            let Some(edit) = edit else {
+                return Ok(());
+            };
+            match self.store.refs().apply(edit) {
+                Ok(()) => return Ok(()),
+                Err(ApplyError::LostRace { .. }) => continue,
+                Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
+            }
+        }
     }
 
     /// Decode every entity published under this kind, ascending by name.
@@ -372,19 +490,14 @@ where
     }
 
     fn list_entries_in(&self, prefix: RefPrefix) -> Result<Vec<(RefPath, ObjectId)>, Error> {
-        let mut entries: Vec<(RefPath, ObjectId)> = self
-            .store
-            .refs()
-            .prefixed(&prefix)
-            .map_err(Error::backend)?
+        if prefix == self.entities {
+            return self.list_entries();
+        }
+        let mut entries: Vec<_> = self
+            .source_entries()?
             .into_iter()
-            .filter_map(|(name, commit)| {
-                name.relative_to(&self.entities).map(|name| (name, commit))
-            })
+            .filter(|(name, _)| self.entities.join_path(name).is_under(&prefix))
             .collect();
-        // `prefixed` is ascending by *ref name*, which orders `a/b` against
-        // `a-b` by the separator byte; `RefPath` orders segment by segment.
-        // Sort so the result agrees with the type it is returned as.
         entries.sort_by(|(a, _), (b, _)| a.cmp(b));
         Ok(entries)
     }
@@ -393,17 +506,27 @@ where
     pub fn remove(&self, name: &RefPath) -> Result<bool, Error>
     where
         R: Committer,
+        O: Write,
     {
         let reference = self.reference(name);
         loop {
             let Some(expected) = self.store.refs().read(&reference).map_err(Error::backend)? else {
                 return Ok(false);
             };
-            let edit = RefEdit::Delete {
-                name: reference.clone(),
-                expected,
-            };
-            match self.store.refs().apply(edit) {
+            let source = self.source_entries()?;
+            let index_ref = index::reference(&self.name);
+            let current_index = self.store.refs().read(&index_ref).map_err(Error::backend)?;
+            let mut next = source.into_iter().collect::<BTreeMap<_, _>>();
+            next.remove(name);
+            let edits = self.entity_edits(
+                &reference,
+                Some(expected),
+                None,
+                &index_ref,
+                current_index,
+                &next.into_iter().collect::<Vec<_>>(),
+            )?;
+            match self.store.refs().apply_batch(edits) {
                 Ok(()) => return Ok(true),
                 Err(ApplyError::LostRace { .. }) => continue,
                 Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
@@ -613,8 +736,29 @@ where
         let kind = self.kind;
         let default = || format!("store {}/{name}", kind.name);
         let (message, tree) = self.build(default)?;
-        kind.store
-            .commit_forward(&kind.reference(name), &message, |_| Ok(tree))
+        let reference = kind.reference(name);
+        loop {
+            let parent = kind.store.refs().read(&reference).map_err(Error::backend)?;
+            let commit = kind.store.write_commit(&message, tree, parent)?;
+            let source = kind.source_entries()?;
+            let index_ref = index::reference(&kind.name);
+            let current_index = kind.store.refs().read(&index_ref).map_err(Error::backend)?;
+            let mut next = source.into_iter().collect::<BTreeMap<_, _>>();
+            next.insert(name.clone(), commit);
+            let edits = kind.entity_edits(
+                &reference,
+                parent,
+                Some(commit),
+                &index_ref,
+                current_index,
+                &next.into_iter().collect::<Vec<_>>(),
+            )?;
+            match kind.store.refs().apply_batch(edits) {
+                Ok(()) => return Ok(commit),
+                Err(ApplyError::LostRace { .. }) => continue,
+                Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
+            }
+        }
     }
 
     fn build(self, default_summary: impl FnOnce() -> String) -> Result<(String, ObjectId), Error>
@@ -664,24 +808,32 @@ where
         // Write the commit before touching any ref, so its id — which
         // determines the entity's name — is known first.
         let commit = store.write_commit(&message, tree, None)?;
-        let reference = kind.reference(&name(commit));
+        let entity_name = name(commit);
+        let reference = kind.reference(&entity_name);
 
         loop {
-            match store.refs().apply(RefEdit::Create {
-                name: reference.clone(),
-                new: commit,
-            }) {
+            let current = store.refs().read(&reference).map_err(Error::backend)?;
+            if let Some(existing) = current
+                && existing != commit
+            {
+                return Err(Error::NameTaken { name: reference });
+            }
+            let source = kind.source_entries()?;
+            let index_ref = index::reference(&kind.name);
+            let current_index = store.refs().read(&index_ref).map_err(Error::backend)?;
+            let mut next = source.into_iter().collect::<BTreeMap<_, _>>();
+            next.insert(entity_name.clone(), commit);
+            let edits = kind.entity_edits(
+                &reference,
+                current,
+                Some(commit),
+                &index_ref,
+                current_index,
+                &next.into_iter().collect::<Vec<_>>(),
+            )?;
+            match store.refs().apply_batch(edits) {
                 Ok(()) => return Ok(commit),
-                Err(ApplyError::LostRace { .. }) => {
-                    match store.refs().read(&reference).map_err(Error::backend)? {
-                        Some(existing) if existing == commit => return Ok(commit),
-                        // The name is still unoccupied, so the loss was
-                        // transient backend contention, not a genuine
-                        // collision: retry the same create.
-                        None => continue,
-                        Some(_) => return Err(Error::NameTaken { name: reference }),
-                    }
-                }
+                Err(ApplyError::LostRace { .. }) => continue,
                 Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
             }
         }

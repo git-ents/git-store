@@ -54,10 +54,27 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   naming the same schema commit for `git log`, but it is provenance only —
   `Store::provenance` returns it as a label, and nothing reads it back to
   resolve a schema.)
-- **Writes compare and swap.** Each write reads the ref, writes its commit
-  object, and applies a [`RefEdit`] conditional on the value it read; a lost
-  race is retried, never resolved by overwriting. Concurrent writers — threads
-  *or* processes — therefore produce a linear history with no lost updates.
+- **Writes compare and swap.** Each entity write reads the entity and index
+  refs, writes its commit and the next index tree, then applies both edits with
+  one [`RefStore::apply_batch`](gix_refstore::RefStore::apply_batch)
+  transaction. A lost race retries the whole read/build/publication sequence;
+  object writes may remain unreachable, but the old pair of refs remains valid.
+- **Kinds have a materialized index.** The private cache ref
+  `refs/gix-store/index/v1/<kind-encoding>` points directly to a canonical Git
+  tree. Kind names are encoded as `k` followed by lowercase hexadecimal UTF-8
+  bytes, an injective encoding. Tree entries use `160000` commit mode and
+  encode each length-framed, nested `RefPath` as one flat filename, avoiding
+  the Git tree file/directory prefix collision while preserving every segment.
+  The existing fingerprint domain and kind-name component are unchanged, so
+  schema refs remain excluded and different kinds cannot share a cache key.
+- **Indexes are advisory.** Entity refs remain authoritative. Reads validate a
+  present index against the complete entity-ref mapping and fall back safely to
+  that mapping when the index is absent, malformed, or stale. This preserves
+  correctness after low-level or external ref writes, at the cost of validation
+  work; `Kind::rebuild_index` is the explicit repair/materialization API and
+  getters never publish refs implicitly. Writes through `Kind` maintain the
+  pair atomically. Schema interpretation is still separate from this
+  entity-only fingerprint.
 
 ## Backends
 
@@ -78,9 +95,10 @@ with no filesystem behind it, which is what most of this crate's own tests use.
 
 ## Scope
 
-`gix-store` is the untrusted-single-writer-friendly demo primitive: one entity,
-one ref, committed forward. Signing, gate policy, event sinks, and multi-ref
-atomic transactions are out of scope by design.
+`gix-store` keeps entity refs as the source of truth and maintains the
+per-kind index only as a persisted read cache. Low-level ref access remains an
+escape hatch; its changes are detected by read validation rather than trusted
+as index maintenance. Signing, gate policy, and event sinks are out of scope.
 
 [`Schema`]: facet_git_tree::Schema
 [`RefEdit`]: gix_refstore::RefEdit

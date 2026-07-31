@@ -27,11 +27,14 @@ loop {
 
 ## Scope
 
-`RefStore` is the write primitive: every mutation is a compare-and-swap on
-one ref, atomic against concurrent writers in other threads and other
-processes. `Committer` carries the identity to stamp on writes, kept
-separate because a store's refs and a repository's configured identity are
-independent concerns. `MemoryRefStore` implements both over a `BTreeMap`, for
-tests; a `gix::Repository`-backed implementation lives alongside it.
+`RefStore` is the write primitive: every mutation is a compare-and-swap, and
+`apply_batch` publishes several conditional ref edits as one transaction. A
+lost batch names the expectation that failed and publishes none of its edits.
+`GixRefStore` delegates batches to gitoxide's multi-reference transaction API;
+`MemoryRefStore` checks the complete batch under one lock. `Committer` carries
+the identity to stamp on writes, kept separate because a store's refs and a
+repository's configured identity are independent concerns.
 
 Objects are written through `gix_object::Write`; this crate is refs only.
+A batch may therefore publish object IDs whose objects were written before the
+transaction, leaving unreachable objects if publication loses its race.

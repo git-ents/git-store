@@ -13,6 +13,7 @@
 mod document;
 mod encoding;
 mod error;
+mod index;
 mod kind;
 mod migrate;
 mod provenance;

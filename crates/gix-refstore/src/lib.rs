@@ -1,8 +1,8 @@
 //! Compare-and-swap storage for Git refs, factored out from any one backend.
 //!
-//! [`RefStore`] is the write primitive — one ref, one CAS, atomic against
-//! concurrent writers — so a caller depends on the trait rather than being
-//! welded to `gix::Repository`. [`Committer`] carries the identity to stamp
+//! [`RefStore`] is the write primitive — one-ref CAS or an atomic batch of
+//! CASes — so a caller depends on the trait rather than being welded to
+//! `gix::Repository`. [`Committer`] carries the identity to stamp
 //! on writes, kept separate since a store's refs and a repository's
 //! configured identity are independent concerns, and [`Signer`] carries the
 //! opaque signature bytes a write may be covered by — bytes this crate moves
