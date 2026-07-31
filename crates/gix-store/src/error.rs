@@ -33,27 +33,22 @@ impl fmt::Display for Subtree {
 /// An error from a [`Store`](crate::Store) operation.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// No schema is published for the kind, so nothing can be stored under it.
-    #[error("no schema published for kind \"{kind}\"; run `git store schema put {kind}`")]
+    /// No schema is published for the kind, so publish one before storing values.
+    #[error("no schema published for kind \"{kind}\"; publish a schema before storing values")]
     NoSchema {
         /// The kind with no published schema.
         kind: RefSegment,
     },
-    /// A data commit's tree is not the `{schema/, value/}` split a write
-    /// produces.
-    #[error(
-        "commit {commit} is not subtree-bound: its tree has [{found}], expected `schema` and \
-         `value` — it predates subtree schema binding and must be re-stored"
-    )]
+    /// A data commit does not contain the bound value and schema required for reading.
+    #[error("commit {commit} does not contain a readable bound value (found [{found}])")]
     NotSubtreeBound {
         /// The data commit whose tree was not the expected split.
         commit: ObjectId,
         /// The entry names actually found, comma-separated, for diagnosis.
         found: String,
     },
-    /// A data commit's `value/` or `schema/` entry names an object that is
-    /// not present in this repository.
-    #[error("commit {commit} names a {subtree} subtree {oid} that is not present")]
+    /// A data commit references an object needed for reading that is not present.
+    #[error("commit {commit} references a missing {subtree} object {oid}")]
     SubtreeMissing {
         /// Which half of the split is absent.
         subtree: Subtree,
@@ -80,14 +75,14 @@ pub enum Error {
         /// The object of the wrong kind.
         oid: ObjectId,
     },
-    /// A data commit has no `Schema:` trailer.
-    #[error("commit {commit} is missing its Schema: trailer")]
+    /// A data commit has no schema binding.
+    #[error("commit {commit} is missing its schema binding")]
     MissingTrailer {
         /// The commit that lacked the trailer.
         commit: ObjectId,
     },
-    /// A data commit's `Schema:` trailer is not a valid object id.
-    #[error("commit {commit} has an invalid Schema: trailer {text:?}")]
+    /// A data commit's schema binding is not a valid object id.
+    #[error("commit {commit} has an invalid schema binding {text:?}")]
     InvalidTrailer {
         /// The commit carrying the malformed trailer.
         commit: ObjectId,
@@ -133,22 +128,17 @@ pub enum Error {
     /// Schema-directed deserialization of a stored value failed.
     #[error(transparent)]
     SchemaRead(#[from] facet_git_tree::SchemaReadError),
-    /// The schema-schema pin failed: a document was pinned to (or, on
-    /// publish, would overwrite a tip pinned to) a schema-schema this binary
-    /// does not recognize, or a document carries no pin and is not itself a
-    /// known root.
+    /// A schema document is incompatible with the schema definition supported by this binary.
     #[error(transparent)]
     SchemaPin(#[from] facet_git_tree::SchemaPinError),
-    /// The migration-schema pin failed, on the same terms as
-    /// [`SchemaPin`](Self::SchemaPin) but for a stored migration document.
+    /// A migration document is incompatible with the migration definition supported by this binary.
     #[error(transparent)]
     MigrationPin(#[from] facet_git_tree::MigrationPinError),
     /// Applying a migration to a value failed, with the offending path in the
     /// message.
     #[error(transparent)]
     Migration(#[from] facet_git_tree::MigrationError),
-    /// A value's bound schema tree is not one this kind's schema ref ever
-    /// published, so no chain of migrations reaches the current schema.
+    /// A value is bound to a schema that is not part of the kind's published history.
     #[error("schema tree {schema_tree} is not in the published history of kind {kind}")]
     SchemaNotInHistory {
         /// The kind whose history was searched.
@@ -156,13 +146,12 @@ pub enum Error {
         /// The schema tree bound into the value's own commit.
         schema_tree: ObjectId,
     },
-    /// A schema commit advanced over a predecessor without recording a
-    /// migration, so values written under the predecessor cannot be upcast.
-    #[error("schema commit {commit} of kind {kind} records no migration off its parent")]
+    /// A schema update has no migration from its predecessor, so older values cannot be updated.
+    #[error("schema commit {commit} of kind {kind} has no update from its predecessor")]
     MigrationMissing {
         /// The kind whose schema history holds the gap.
         kind: RefSegment,
-        /// The schema commit lacking a `migration` entry.
+        /// The schema commit lacking the update information.
         commit: ObjectId,
     },
     /// The configured [`Signer`](gix_refstore::Signer) could not produce
