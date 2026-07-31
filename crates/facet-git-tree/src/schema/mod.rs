@@ -592,40 +592,59 @@ fn collapse(shape: &'static Shape) -> Result<&'static Shape, SchemaError> {
     Ok(shape)
 }
 
-/// The per-width scalar table, mirroring [`facet::ScalarType`].
+/// The authoritative supported-scalar table, mirroring [`facet::ScalarType`].
 ///
-/// Every textual scalar (`str`, `String`, `Cow<str>`) is [`Node::String`];
-/// every numeric width maps 1:1. Scalars outside the table (network address
-/// types, `ConstTypeId`, future additions) are unsupported, exactly as the
-/// encoder's `scalar_bytes` refuses them. `()` (`ScalarType::Unit`) is
-/// likewise refused here: `scalar_bytes` has no textual rendering for it
-/// either — `Display`/`FromStr` on `()` is not implemented — so it cannot
-/// reach a leaf blob. [`Node::Unit`] remains reachable, but only for a unit
-/// struct or a unit enum variant, whose *composite* (not scalar) encoding is
-/// the empty tree those actually write.
+/// Every textual scalar (`str`, `String`, `Cow<str>`) maps to [`Node::String`];
+/// every numeric width maps 1:1. Scalars outside the table (including `Unit`,
+/// network address types, `ConstTypeId`, and future additions) are unsupported
+/// by both serialization and schema generation.
+static SUPPORTED_SCALARS: &[(ScalarType, Node)] = &[
+    (ScalarType::Bool, Node::Bool),
+    (ScalarType::Char, Node::Char),
+    (ScalarType::Str, Node::String),
+    (ScalarType::String, Node::String),
+    (ScalarType::CowStr, Node::String),
+    (ScalarType::F32, Node::F32),
+    (ScalarType::F64, Node::F64),
+    (ScalarType::U8, Node::U8),
+    (ScalarType::U16, Node::U16),
+    (ScalarType::U32, Node::U32),
+    (ScalarType::U64, Node::U64),
+    (ScalarType::U128, Node::U128),
+    (ScalarType::USize, Node::USize),
+    (ScalarType::I8, Node::I8),
+    (ScalarType::I16, Node::I16),
+    (ScalarType::I32, Node::I32),
+    (ScalarType::I64, Node::I64),
+    (ScalarType::I128, Node::I128),
+    (ScalarType::ISize, Node::ISize),
+];
+
+pub(crate) fn scalar_node(scalar: ScalarType) -> Option<Node> {
+    SUPPORTED_SCALARS
+        .iter()
+        .find(|(supported, _)| *supported == scalar)
+        .map(|(_, node)| node.clone())
+}
+
 fn scalar_schema(shape: &'static Shape) -> Result<Node, SchemaError> {
     let Some(scalar) = shape.scalar_type() else {
         return Err(SchemaError::UnsupportedScalar(shape.type_identifier));
     };
-    Ok(match scalar {
-        ScalarType::Unit => return Err(SchemaError::UnsupportedScalar(shape.type_identifier)),
-        ScalarType::Bool => Node::Bool,
-        ScalarType::Char => Node::Char,
-        ScalarType::Str | ScalarType::String | ScalarType::CowStr => Node::String,
-        ScalarType::F32 => Node::F32,
-        ScalarType::F64 => Node::F64,
-        ScalarType::U8 => Node::U8,
-        ScalarType::U16 => Node::U16,
-        ScalarType::U32 => Node::U32,
-        ScalarType::U64 => Node::U64,
-        ScalarType::U128 => Node::U128,
-        ScalarType::USize => Node::USize,
-        ScalarType::I8 => Node::I8,
-        ScalarType::I16 => Node::I16,
-        ScalarType::I32 => Node::I32,
-        ScalarType::I64 => Node::I64,
-        ScalarType::I128 => Node::I128,
-        ScalarType::ISize => Node::ISize,
-        _ => return Err(SchemaError::UnsupportedScalar(shape.type_identifier)),
-    })
+    scalar_node(scalar).ok_or(SchemaError::UnsupportedScalar(shape.type_identifier))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_scalar_table_is_exhaustive_and_self_consistent() {
+        assert_eq!(SUPPORTED_SCALARS.len(), 19);
+        for (scalar, expected) in SUPPORTED_SCALARS {
+            assert_eq!(scalar_node(*scalar), Some(expected.clone()));
+        }
+        assert!(scalar_node(ScalarType::Unit).is_none());
+        assert!(scalar_node(ScalarType::ConstTypeId).is_none());
+    }
 }

@@ -6,6 +6,7 @@ use gix_object::{Kind, Write};
 use crate::check_key;
 use crate::de::collapse_shape;
 use crate::error::SerializeError;
+use crate::schema::scalar_node;
 use crate::store::ObjectStore;
 use crate::{EntryKind, EntryMode, ObjectId, RawTree, TreeEntry};
 
@@ -714,13 +715,21 @@ pub(crate) fn write_leaf_blob<W: Write + ?Sized>(
 }
 
 fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, SerializeError> {
+    let shape = peek.shape();
+    let scalar_shape = collapse_shape(shape);
+    if scalar_shape
+        .scalar_type()
+        .is_none_or(|scalar| scalar_node(scalar).is_none())
+    {
+        return Err(SerializeError::UnsupportedScalar(shape.type_identifier));
+    }
+
     // Strings: verbatim UTF-8 bytes
     if let Some(s) = peek.as_str() {
         return Ok(s.as_bytes().to_vec());
     }
 
     // Use Display for everything else, with special float/bool/char handling
-    let shape = peek.shape();
     if let facet::Type::Primitive(pt) = shape.ty {
         use facet::{NumericType, PrimitiveType, TextualType};
         match pt {
