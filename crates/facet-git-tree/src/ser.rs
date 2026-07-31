@@ -499,7 +499,6 @@ fn serialize_dynamic<W: Write + ?Sized>(
                     oid,
                 });
             }
-            entries.sort();
             tree_or_marker(entries)
         }
         DynValueKind::Object => {
@@ -516,7 +515,6 @@ fn serialize_dynamic<W: Write + ?Sized>(
                     oid,
                 });
             }
-            entries.sort();
             tree_or_marker(entries)
         }
         DynValueKind::DateTime => {
@@ -656,7 +654,6 @@ fn serialize_sequence<W: Write + ?Sized>(
             oid,
         });
     }
-    entries.sort();
     Ok(entries)
 }
 
