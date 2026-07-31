@@ -7,14 +7,16 @@ use gix_refstore::{ObjectId, RefName, RefPath, RefPrefix, RefSegment, RefStore};
 
 use crate::{error::Error, store::Store};
 
-const INDEX_NAMESPACE: &str = "refs/gix-store/index/v1";
+const CACHE_NAMESPACE: &str = "refs/cache";
+const CACHE_NAME: &str = "index-v1";
 
-/// The ref name is injective in the kind name. The `v1` namespace is private
+/// The ref name is injective in the kind name. The cache namespace is private
 /// by convention and deliberately separate from both user data and schemas.
 pub(crate) fn reference(kind: &RefSegment) -> RefName {
     RefName::new(format!(
-        "{INDEX_NAMESPACE}/{}",
-        encode_bytes(kind.as_str().as_bytes())
+        "{CACHE_NAMESPACE}/{}/{}",
+        encode_bytes(kind.as_str().as_bytes()),
+        CACHE_NAME
     ))
     .expect("encoded index ref is valid")
 }

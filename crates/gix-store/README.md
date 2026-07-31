@@ -60,11 +60,13 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   transaction. A lost race retries the whole read/build/publication sequence;
   object writes may remain unreachable, but the old pair of refs remains valid.
 - **Kinds have a materialized index.** The private cache ref
-  `refs/gix-store/index/v1/<kind-encoding>` points directly to a canonical Git
+  `refs/cache/<kind-encoding>/index-v1` points directly to a canonical Git
   tree. Kind names are encoded as `k` followed by lowercase hexadecimal UTF-8
-  bytes, an injective encoding. Tree entries use `160000` commit mode and
-  encode each length-framed, nested `RefPath` as one flat filename, avoiding
-  the Git tree file/directory prefix collision while preserving every segment.
+  bytes, an injective encoding. Ephemeral caches use the `refs/cache/<kind>/<name>`
+  namespace; `index-v1` identifies this cache's format and domain. Tree entries
+  use `160000` commit mode and encode each length-framed, nested `RefPath` as
+  one flat filename, avoiding the Git tree file/directory prefix collision while
+  preserving every segment.
   The existing fingerprint domain and kind-name component are unchanged, so
   schema refs remain excluded and different kinds cannot share a cache key.
 - **Indexes are advisory.** Entity refs remain authoritative. Reads validate a
