@@ -159,7 +159,7 @@ where
         self.kind_with(name)
     }
 
-    /// A handle on the kind `name` under a caller-supplied [`Encoding`].
+    /// A handle on the kind `name` under a caller-supplied tree [`Encoding`].
     pub fn kind_with<E: Encoding>(&self, name: RefSegment) -> Kind<'_, E, R, O> {
         Kind::new(self, name)
     }

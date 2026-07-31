@@ -5,6 +5,8 @@
 //! against travels with it through any fetch. [`Store`] is generic over a
 //! [`RefStore`] and a `gix_object` `Find`/`Write` object database, with
 //! [`RepoStore`] as the specialization over a real `gix::Repository`.
+//!
+//! [`tree`] is the tree and schema format used by this crate.
 //! [`Store::kind`] hands out a [`Kind`] typed to a `Facet`-derived Rust type;
 //! [`Store::dynamic`] hands out one that reads and writes
 //! [`facet_value::Value`] under the kind's published schema instead.
@@ -28,6 +30,9 @@ pub use provenance::SchemaLabel;
 pub use store::{Layout, RepoStore, Store};
 
 pub use facet_git_tree::{ObjectId, Schema, schema_of};
+
+/// The tree and schema format used by `gix-store`.
+pub use facet_git_tree as tree;
 pub use gix_refstore::{
     ApplyError, Committer, Expectation, GixRefStore, InvalidRefName, MemoryRefStore, RefEdit,
     RefName, RefPath, RefPrefix, RefSegment, RefStore, SignatureBytes, Signer,

@@ -1,6 +1,5 @@
-//! How a kind's values are encoded into, and read back from, the `value/`
-//! subtree. Two implementations ship: [`Typed`] and [`Dynamic`]. Everything
-//! above this trait — refs, commits, schema binding — is shared.
+//! Codecs for values stored in the `value/` subtree. Two implementations ship:
+//! [`Typed`] and [`Dynamic`].
 
 use std::marker::PhantomData;
 
@@ -14,7 +13,11 @@ use gix::objs::{Find, Write};
 
 use crate::error::Error;
 
-/// How a kind's values are read from, and written to, its `value/` subtree.
+/// A codec for values stored as `facet-git-tree` objects.
+///
+/// Implementations use the kind's published [`Schema`] and a `gix` object
+/// database. This is an extension point for the store's tree format, not a
+/// general serialization interface.
 pub trait Encoding {
     /// The Rust type entities of this kind are read and written as.
     type Value;
