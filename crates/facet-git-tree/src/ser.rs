@@ -21,58 +21,51 @@ fn reflect(e: impl std::fmt::Display) -> SerializeError {
 
 /// Serialize a [`facet::Facet`] value into the given `gix` object `store`.
 ///
-/// Writes all blobs and sub-trees reachable from `value` and returns the root
-/// tree [`ObjectId`]. This is the generic core; [`serialize`] is a convenience
-/// wrapper that allocates a fresh [`ObjectStore`].
-///
-/// `store` is the backend contract: any `gix` [`Write`] sink works — a real
-/// `gix` repository, an in-memory odb proxy, or the bundled [`ObjectStore`]. The
-/// bound is `&self` (never `&mut`) because `gix`'s `Write` is; that is what lets
-/// one backend be shared while objects stream into it. `?Sized` is permitted so
-/// a `&dyn Write` may be passed for runtime backend selection.
+/// Returns the root tree [`ObjectId`].
 pub fn serialize_into<T, W>(value: &T, store: &W) -> Result<ObjectId, SerializeError>
 where
     T: for<'a> facet::Facet<'a>,
     W: Write + ?Sized,
 {
-    let peek = Peek::new(value);
-    serialize_peek_into(peek, store)
+    serialize_root(Peek::new(value), store)
 }
 
-/// Serialize a [`facet::Facet`] value into a set of Git objects.
+/// Serialize a [`facet::Facet`] value into a fresh [`ObjectStore`].
 ///
-/// Returns the root [`ObjectId`] (a tree) and an [`ObjectStore`] containing
-/// all blobs and sub-trees reachable from that root.
+/// Returns the root [`ObjectId`] and the store containing all reachable objects.
 pub fn serialize<T: for<'a> facet::Facet<'a>>(
     value: &T,
 ) -> Result<(ObjectId, ObjectStore), SerializeError> {
     let store = ObjectStore::default();
-    let root = serialize_into(value, &store)?;
+    let root = serialize_root(Peek::new(value), &store)?;
     Ok((root, store))
 }
 
 /// Serialize an already-constructed [`Peek`] into the given `gix` object `store`.
 ///
-/// The [`Peek`] entry point for callers that have a reflected handle rather than
-/// a concrete `T` — for example, when relaying a value obtained from another
-/// `facet` operation. This is the [`Peek`]-based mirror of [`serialize_into`];
-/// `serialize_into` is just `serialize_peek_into` applied to `Peek::new(value)`.
+/// Returns the root tree [`ObjectId`].
 pub fn serialize_peek_into<W>(peek: Peek<'_, '_>, store: &W) -> Result<ObjectId, SerializeError>
 where
     W: Write + ?Sized,
 {
-    let (oid, _kind) = serialize_node(peek, store, 0)?;
-    Ok(oid)
+    serialize_root(peek, store)
 }
 
-/// Serialize an already-constructed [`Peek`] into a fresh set of Git objects.
+/// Serialize an already-constructed [`Peek`] into a fresh [`ObjectStore`].
 ///
-/// The [`Peek`]-based mirror of [`serialize`]: returns the root [`ObjectId`] and
-/// an [`ObjectStore`] containing every object reachable from it.
+/// Returns the root [`ObjectId`] and the store containing all reachable objects.
 pub fn serialize_peek(peek: Peek<'_, '_>) -> Result<(ObjectId, ObjectStore), SerializeError> {
     let store = ObjectStore::default();
-    let root = serialize_peek_into(peek, &store)?;
+    let root = serialize_root(peek, &store)?;
     Ok((root, store))
+}
+
+fn serialize_root<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<ObjectId, SerializeError> {
+    let (oid, _kind) = serialize_node(peek, store, 0)?;
+    Ok(oid)
 }
 
 /// The element shape of a `Vec`/array/slice, or `None` for any other type.
