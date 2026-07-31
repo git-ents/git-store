@@ -1,5 +1,5 @@
-//! Building one struct-shaped document from named field values, checked
-//! against a published [`Schema`] as they are supplied.
+//! Building one struct-shaped document from named field values under a
+//! published [`Schema`].
 
 use std::collections::BTreeMap;
 
@@ -28,12 +28,9 @@ pub enum DocumentError {
     },
 }
 
-/// A struct document under construction: named field values accumulate
-/// through [`set`](Self::set), then [`build`](Self::build) applies schema
-/// defaults and refuses if anything required is still unset, yielding a
-/// [`Value`] that
-/// [`serialize_value_with_schema`](facet_git_tree::serialize_value_with_schema)
-/// accepts.
+/// A struct document under construction: [`set`](Self::set) accepts defined
+/// field names, and [`build`](Self::build) refuses if any required field is
+/// unset. Unset defaultable fields are omitted from the resulting [`Value`].
 pub struct DocumentBuilder<'s> {
     fields: &'s BTreeMap<String, StructField>,
     values: VObject,
@@ -67,7 +64,8 @@ impl<'s> DocumentBuilder<'s> {
             .map(|(name, field)| (name.as_str(), &field.node, field.has_default))
     }
 
-    /// Supply `name`'s value, overwriting any previous one.
+    /// Supply `name`'s value, overwriting any previous one. The field name is
+    /// checked against the schema; the value is stored without validation.
     pub fn set(&mut self, name: &str, value: impl Into<Value>) -> Result<(), DocumentError> {
         if !self.fields.contains_key(name) {
             return Err(DocumentError::UnknownField {
@@ -79,7 +77,8 @@ impl<'s> DocumentBuilder<'s> {
     }
 
     /// Finish the document. Refuses, naming every offender, if a field with
-    /// no schema default was never [`set`](Self::set).
+    /// no schema default was never [`set`](Self::set). Unset defaultable
+    /// fields are omitted.
     pub fn build(self) -> Result<Value, DocumentError> {
         let names: Vec<String> = self
             .fields
