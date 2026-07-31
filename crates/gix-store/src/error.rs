@@ -74,6 +74,12 @@ pub enum Error {
         /// The object of the wrong kind.
         oid: ObjectId,
     },
+    /// An object a read needed is present but is not a tree.
+    #[error("object {oid} is not a tree")]
+    NotATree {
+        /// The object of the wrong kind.
+        oid: ObjectId,
+    },
     /// A data commit has no `Schema:` trailer.
     #[error("commit {commit} is missing its Schema: trailer")]
     MissingTrailer {

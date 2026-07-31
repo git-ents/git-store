@@ -278,7 +278,7 @@ where
             Ok((value.oid.to_owned(), schema.oid.to_owned()))
         })?;
         self.require_present(value, Subtree::Value, commit)?;
-        self.require_present(schema, Subtree::Schema, commit)?;
+        self.require_tree(schema, Subtree::Schema, commit)?;
         Ok((value, schema))
     }
 
@@ -391,6 +391,9 @@ where
             .try_find(&id, &mut buf)
             .map_err(Error::backend)?
             .ok_or(Error::MissingObject { oid: id })?;
+        if data.kind != gix::objs::Kind::Tree {
+            return Err(Error::NotATree { oid: id });
+        }
         let tree =
             gix::objs::TreeRef::from_bytes(data.data, data.object_hash).map_err(Error::backend)?;
         f(&tree)
@@ -431,6 +434,18 @@ where
     ) -> Result<(), Error> {
         match self.kind_of(oid)? {
             Some(_) => Ok(()),
+            None => Err(Error::SubtreeMissing {
+                subtree,
+                oid,
+                commit,
+            }),
+        }
+    }
+
+    fn require_tree(&self, oid: ObjectId, subtree: Subtree, commit: ObjectId) -> Result<(), Error> {
+        match self.kind_of(oid)? {
+            Some(gix::objs::Kind::Tree) => Ok(()),
+            Some(_) => Err(Error::NotATree { oid }),
             None => Err(Error::SubtreeMissing {
                 subtree,
                 oid,
