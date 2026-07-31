@@ -94,60 +94,216 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
-    // Smart pointer (`Box`/`Arc`/`Rc`, including `Arc<[T]>`) and transparent
-    // newtype (`#[facet(transparent)]`, `NonZero<T>`, path wrappers) → the
-    // inner value's own encoding. Neither carries information Git needs to
-    // record, so both are transparent: `Arc<[u8]>` serializes exactly as
-    // `[u8]` would, and a transparent `Hex(String)` exactly as `String` would.
     let peek = peek.innermost_peek();
     let shape = peek.shape();
 
-    // RawTree → its wrapped object id, straight through as a tree entry. No
-    // write happens here: the referenced tree must already be present in
-    // `store`, from a write the caller made directly beforehand.
     if shape.is_type::<RawTree>() {
         let rt = peek.get::<RawTree>().map_err(reflect)?;
         return Ok((rt.oid(), EntryKind::Tree));
     }
 
-    // Dynamic value (`facet_value::Value` and friends) → the encoding of its
-    // runtime kind, dispatched in serialize_dynamic.
     if let Def::DynamicValue(_) = shape.def {
         return serialize_dynamic(peek, store);
     }
 
-    // Scalar leaf → blob
     if matches!(shape.def, Def::Scalar) {
-        let bytes = scalar_bytes(peek)?;
-        let oid = write_leaf_blob(store, &bytes)?;
-        return Ok((oid, EntryKind::Blob));
+        return serialize_leaf(peek, store);
     }
 
-    // Byte sequence (`Vec<u8>`, `[u8; N]`, `[u8]`) → a single blob. This is the
-    // Git-native representation; a per-byte tree would be wasteful and would
-    // defeat blob-level deduplication of identical buffers.
     if is_byte_seq(shape) {
-        let seq = peek.into_list_like().map_err(reflect)?;
-        let mut bytes = Vec::new();
-        for item in seq.iter() {
-            bytes.push(*item.get::<u8>().map_err(reflect)?);
-        }
-        let oid = write_leaf_blob(store, &bytes)?;
-        return Ok((oid, EntryKind::Blob));
+        return serialize_byte_sequence(peek, store);
     }
 
-    // Struct or tuple → tree. A named struct keys entries by field name; a tuple
-    // or tuple struct keys them by zero-padded positional ordinal (facet models
-    // all of these as `UserType::Struct`, distinguished by `StructKind`).
-    if let facet::Type::User(facet::UserType::Struct(st)) = shape.ty {
-        let positional = matches!(
-            st.kind,
-            facet::StructKind::Tuple | facet::StructKind::TupleStruct
-        );
-        let ps = peek.into_struct().map_err(reflect)?;
-        let mut entries: Vec<TreeEntry> = Vec::with_capacity(st.fields.len());
-        for (i, field) in st.fields.iter().enumerate() {
-            let child = ps.field(i).map_err(reflect)?;
+    if matches!(shape.ty, facet::Type::User(facet::UserType::Struct(_))) {
+        return serialize_struct(peek, store);
+    }
+
+    if matches!(shape.def, Def::List(_) | Def::Array(_) | Def::Slice(_)) {
+        return serialize_sequence_node(peek, store);
+    }
+
+    if matches!(shape.def, Def::Map(_)) {
+        return serialize_map(peek, store);
+    }
+
+    if matches!(shape.def, Def::Option(_)) {
+        return serialize_option(peek, store);
+    }
+
+    if matches!(shape.ty, facet::Type::User(facet::UserType::Enum(_))) {
+        return serialize_enum(peek, store);
+    }
+
+    Err(SerializeError::Unsupported(shape.type_identifier))
+}
+
+fn serialize_leaf<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<(ObjectId, EntryKind), SerializeError> {
+    let oid = write_leaf_blob(store, &scalar_bytes(peek)?)?;
+    Ok((oid, EntryKind::Blob))
+}
+
+fn serialize_byte_sequence<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<(ObjectId, EntryKind), SerializeError> {
+    let seq = peek.into_list_like().map_err(reflect)?;
+    let mut bytes = Vec::new();
+    for item in seq.iter() {
+        bytes.push(*item.get::<u8>().map_err(reflect)?);
+    }
+    let oid = write_leaf_blob(store, &bytes)?;
+    Ok((oid, EntryKind::Blob))
+}
+
+fn serialize_struct<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<(ObjectId, EntryKind), SerializeError> {
+    let facet::Type::User(facet::UserType::Struct(st)) = peek.shape().ty else {
+        unreachable!()
+    };
+    let positional = matches!(
+        st.kind,
+        facet::StructKind::Tuple | facet::StructKind::TupleStruct
+    );
+    let ps = peek.into_struct().map_err(reflect)?;
+    let mut entries = Vec::with_capacity(st.fields.len());
+    for (i, field) in st.fields.iter().enumerate() {
+        let (oid, kind) = serialize_node(ps.field(i).map_err(reflect)?, store)?;
+        let filename: gix_object::bstr::BString = if positional {
+            format!("{i:04}").into()
+        } else {
+            field.name.into()
+        };
+        entries.push(TreeEntry {
+            mode: EntryMode::from(kind),
+            filename,
+            oid,
+        });
+    }
+    Ok((write_sorted_tree(store, entries)?, EntryKind::Tree))
+}
+
+fn serialize_sequence_node<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<(ObjectId, EntryKind), SerializeError> {
+    let entries = serialize_sequence(peek, store)?;
+    Ok((
+        write_tree_or_presence_marker(store, entries)?,
+        EntryKind::Tree,
+    ))
+}
+
+fn serialize_map<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<(ObjectId, EntryKind), SerializeError> {
+    let Def::Map(md) = peek.shape().def else {
+        unreachable!()
+    };
+    let pm = peek.into_map().map_err(reflect)?;
+    let scalar_keys = matches!(collapse_shape(md.k).def, Def::Scalar);
+    let mut entries = Vec::new();
+    if scalar_keys {
+        for (k, v) in pm.iter() {
+            let key_bytes = scalar_bytes(k)?;
+            let key_str =
+                std::str::from_utf8(&key_bytes).map_err(|_| SerializeError::NonUtf8MapKey)?;
+            check_key(key_str)?;
+            let (oid, kind) = serialize_node(v, store)?;
+            entries.push(TreeEntry {
+                mode: EntryMode::from(kind),
+                filename: key_str.into(),
+                oid,
+            });
+        }
+    } else {
+        let mut pair_oids = Vec::new();
+        for (k, v) in pm.iter() {
+            let (k_oid, k_kind) = serialize_node(k, store)?;
+            let (v_oid, v_kind) = serialize_node(v, store)?;
+            let pair = vec![
+                TreeEntry {
+                    mode: EntryMode::from(k_kind),
+                    filename: "k".into(),
+                    oid: k_oid,
+                },
+                TreeEntry {
+                    mode: EntryMode::from(v_kind),
+                    filename: "v".into(),
+                    oid: v_oid,
+                },
+            ];
+            pair_oids.push(write_sorted_tree(store, pair)?);
+        }
+        pair_oids.sort();
+        for (i, pair_oid) in pair_oids.into_iter().enumerate() {
+            entries.push(TreeEntry {
+                mode: EntryMode::from(EntryKind::Tree),
+                filename: format!("{i:04}").into(),
+                oid: pair_oid,
+            });
+        }
+    }
+    Ok((
+        write_tree_or_presence_marker(store, entries)?,
+        EntryKind::Tree,
+    ))
+}
+
+fn serialize_option<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<(ObjectId, EntryKind), SerializeError> {
+    let po = peek.into_option().map_err(reflect)?;
+    let Some(inner) = po.value() else {
+        return Ok((
+            write_tree_or_presence_marker(store, Vec::new())?,
+            EntryKind::Tree,
+        ));
+    };
+    let (oid, kind) = serialize_node(inner, store)?;
+    let entries = vec![TreeEntry {
+        mode: EntryMode::from(kind),
+        filename: "some".into(),
+        oid,
+    }];
+    Ok((write_sorted_tree(store, entries)?, EntryKind::Tree))
+}
+
+fn serialize_enum<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<(ObjectId, EntryKind), SerializeError> {
+    let pe = peek.into_enum().map_err(reflect)?;
+    let variant = pe.active_variant().map_err(reflect)?;
+    let variant_name = pe.variant_name_active().map_err(reflect)?;
+    if variant.data.fields.is_empty() {
+        return Ok((
+            write_leaf_blob(store, variant_name.as_bytes())?,
+            EntryKind::Blob,
+        ));
+    }
+
+    let positional = matches!(variant.data.kind, facet::StructKind::TupleStruct);
+    let newtype = positional && variant.data.fields.len() == 1;
+    let (inner_oid, inner_kind) = if newtype {
+        let child = pe
+            .field(0)
+            .map_err(reflect)?
+            .ok_or_else(|| SerializeError::Reflect("variant field 0 missing".into()))?;
+        serialize_node(child, store)?
+    } else {
+        let mut entries = Vec::new();
+        for (i, field) in variant.data.fields.iter().enumerate() {
+            let child = pe
+                .field(i)
+                .map_err(reflect)?
+                .ok_or_else(|| SerializeError::Reflect(format!("variant field {i} missing")))?;
             let (oid, kind) = serialize_node(child, store)?;
             let filename: gix_object::bstr::BString = if positional {
                 format!("{i:04}").into()
@@ -160,195 +316,35 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
                 oid,
             });
         }
-        entries.sort();
-        let oid = store
-            .write(&gix_object::Tree { entries })
-            .map_err(SerializeError::Backend)?;
-        return Ok((oid, EntryKind::Tree));
+        (write_sorted_tree(store, entries)?, EntryKind::Tree)
+    };
+    let entries = vec![TreeEntry {
+        mode: EntryMode::from(inner_kind),
+        filename: variant_name.into(),
+        oid: inner_oid,
+    }];
+    Ok((write_sorted_tree(store, entries)?, EntryKind::Tree))
+}
+
+fn write_sorted_tree<W: Write + ?Sized>(
+    store: &W,
+    mut entries: Vec<TreeEntry>,
+) -> Result<ObjectId, SerializeError> {
+    entries.sort();
+    store
+        .write(&gix_object::Tree { entries })
+        .map_err(SerializeError::Backend)
+}
+
+fn write_tree_or_presence_marker<W: Write + ?Sized>(
+    store: &W,
+    entries: Vec<TreeEntry>,
+) -> Result<ObjectId, SerializeError> {
+    if entries.is_empty() {
+        crate::marker::write_marker_tree(store)
+    } else {
+        write_sorted_tree(store, entries)
     }
-
-    // Vec / Array / slice → tree with ordinal keys. An empty sequence writes
-    // the presence marker instead of a literal empty tree, so it stays
-    // visible to `git ls-tree -r`/`diff` per `crate::marker`.
-    if matches!(shape.def, Def::List(_) | Def::Array(_) | Def::Slice(_)) {
-        let entries = serialize_sequence(peek, store)?;
-        let oid = if entries.is_empty() {
-            crate::marker::write_marker_tree(store)?
-        } else {
-            store
-                .write(&gix_object::Tree { entries })
-                .map_err(SerializeError::Backend)?
-        };
-        return Ok((oid, EntryKind::Tree));
-    }
-
-    // Map → tree. A map with scalar keys names each entry by the textual form of
-    // its key (the readable, JSON-like form). A map with composite keys (structs,
-    // tuples, enums, ...) — which have no faithful textual form — instead stores
-    // each pair as an ordinal-named two-entry sub-tree `{ k, v }`, both children
-    // recursing through the normal encoding. The two layouts are distinguished by
-    // the key shape *after* transparency collapse (`collapse_shape`), so no
-    // on-disk marker is needed and a smart-pointer or transparent-newtype key
-    // (`Arc<str>`, a `#[facet(transparent)]` wrapper, ...) is named exactly as
-    // its collapsed scalar shape would be.
-    if let Def::Map(md) = shape.def {
-        let pm = peek.into_map().map_err(reflect)?;
-        let scalar_keys = matches!(collapse_shape(md.k).def, Def::Scalar);
-        let mut entries: Vec<TreeEntry> = Vec::new();
-        if scalar_keys {
-            for (k, v) in pm.iter() {
-                let key_bytes = scalar_bytes(k)?;
-                let key_str =
-                    std::str::from_utf8(&key_bytes).map_err(|_| SerializeError::NonUtf8MapKey)?;
-                check_key(key_str)?;
-                let (oid, kind) = serialize_node(v, store)?;
-                entries.push(TreeEntry {
-                    mode: EntryMode::from(kind),
-                    filename: key_str.into(),
-                    oid,
-                });
-            }
-        } else {
-            // Each pair becomes a `{ k, v }` sub-tree; the outer entries are named
-            // by ordinal. To keep the map content-addressed (insertion-order
-            // independent), the ordinals are assigned after sorting the pairs by
-            // their sub-tree object id.
-            let mut pair_oids: Vec<ObjectId> = Vec::new();
-            for (k, v) in pm.iter() {
-                let (k_oid, k_kind) = serialize_node(k, store)?;
-                let (v_oid, v_kind) = serialize_node(v, store)?;
-                let mut pair = vec![
-                    TreeEntry {
-                        mode: EntryMode::from(k_kind),
-                        filename: "k".into(),
-                        oid: k_oid,
-                    },
-                    TreeEntry {
-                        mode: EntryMode::from(v_kind),
-                        filename: "v".into(),
-                        oid: v_oid,
-                    },
-                ];
-                pair.sort();
-                let pair_oid = store
-                    .write(&gix_object::Tree { entries: pair })
-                    .map_err(SerializeError::Backend)?;
-                pair_oids.push(pair_oid);
-            }
-            pair_oids.sort();
-            for (i, pair_oid) in pair_oids.into_iter().enumerate() {
-                entries.push(TreeEntry {
-                    mode: EntryMode::from(EntryKind::Tree),
-                    filename: format!("{i:04}").into(),
-                    oid: pair_oid,
-                });
-            }
-        }
-        entries.sort();
-        // An empty map (either layout falls through to the same `entries`
-        // here) writes the presence marker instead of a literal empty tree,
-        // per `crate::marker`.
-        let oid = if entries.is_empty() {
-            crate::marker::write_marker_tree(store)?
-        } else {
-            store
-                .write(&gix_object::Tree { entries })
-                .map_err(SerializeError::Backend)?
-        };
-        return Ok((oid, EntryKind::Tree));
-    }
-
-    // Option
-    if matches!(shape.def, Def::Option(_)) {
-        let po = peek.into_option().map_err(reflect)?;
-        if let Some(inner) = po.value() {
-            let (oid, kind) = serialize_node(inner, store)?;
-            // Some: wrap in a tree with a single "some" entry
-            let entries = vec![TreeEntry {
-                mode: EntryMode::from(kind),
-                filename: "some".into(),
-                oid,
-            }];
-            let oid = store
-                .write(&gix_object::Tree { entries })
-                .map_err(SerializeError::Backend)?;
-            return Ok((oid, EntryKind::Tree));
-        } else {
-            // None: the presence marker, not a literal empty tree — see
-            // `crate::marker`.
-            let oid = crate::marker::write_marker_tree(store)?;
-            return Ok((oid, EntryKind::Tree));
-        }
-    }
-
-    // Enum → externally tagged: a unit variant collapses to a bare blob
-    // holding the variant name (its entire information content), so it
-    // appears as ordinary content to `git diff`/`ls-tree -r` instead of
-    // vanishing as a tree-entry rename with no blob underneath. Every other
-    // variant keeps the single-entry tree (variant name → payload) form.
-    if let facet::Type::User(facet::UserType::Enum(_)) = shape.ty {
-        let pe = peek.into_enum().map_err(reflect)?;
-        let variant = pe.active_variant().map_err(reflect)?;
-        let variant_name = pe.variant_name_active().map_err(reflect)?;
-
-        if variant.data.fields.is_empty() {
-            let oid = write_leaf_blob(store, variant_name.as_bytes())?;
-            return Ok((oid, EntryKind::Blob));
-        }
-
-        // Encode the variant's payload (newtype → the field's own encoding
-        // directly, tuple → ordinal-keyed tree, struct → name-keyed tree). A
-        // tuple variant is `StructKind::TupleStruct`; a struct variant is
-        // `StructKind::Struct`.
-        let positional = matches!(variant.data.kind, facet::StructKind::TupleStruct);
-        let newtype = positional && variant.data.fields.len() == 1;
-        let (inner_oid, inner_kind) = if newtype {
-            // Newtype variant: resolves directly to the encoding of its one field.
-            let child = pe
-                .field(0)
-                .map_err(reflect)?
-                .ok_or_else(|| SerializeError::Reflect("variant field 0 missing".into()))?;
-            serialize_node(child, store)?
-        } else {
-            let mut inner_entries: Vec<TreeEntry> = Vec::new();
-            for (i, field) in variant.data.fields.iter().enumerate() {
-                let child = pe
-                    .field(i)
-                    .map_err(reflect)?
-                    .ok_or_else(|| SerializeError::Reflect(format!("variant field {i} missing")))?;
-                let (oid, kind) = serialize_node(child, store)?;
-                let name: gix_object::bstr::BString = if positional {
-                    format!("{i:04}").into()
-                } else {
-                    field.name.into()
-                };
-                inner_entries.push(TreeEntry {
-                    mode: EntryMode::from(kind),
-                    filename: name,
-                    oid,
-                });
-            }
-            inner_entries.sort();
-            let oid = store
-                .write(&gix_object::Tree {
-                    entries: inner_entries,
-                })
-                .map_err(SerializeError::Backend)?;
-            (oid, EntryKind::Tree)
-        };
-
-        let entries = vec![TreeEntry {
-            mode: EntryMode::from(inner_kind),
-            filename: variant_name.into(),
-            oid: inner_oid,
-        }];
-        let oid = store
-            .write(&gix_object::Tree { entries })
-            .map_err(SerializeError::Backend)?;
-        return Ok((oid, EntryKind::Tree));
-    }
-
-    Err(SerializeError::Unsupported(shape.type_identifier))
 }
 
 /// Serialize a dynamic value (`Def::DynamicValue`, e.g. `facet_value::Value`)
@@ -386,24 +382,12 @@ fn serialize_dynamic<W: Write + ?Sized>(
         let oid = write_leaf_blob(store, bytes)?;
         Ok((oid, EntryKind::Blob))
     };
-    let tree = |entries: Vec<TreeEntry>| -> Result<(ObjectId, EntryKind), SerializeError> {
-        let oid = store
-            .write(&gix_object::Tree { entries })
-            .map_err(SerializeError::Backend)?;
-        Ok((oid, EntryKind::Tree))
-    };
-
-    // An empty tree, for `Null`, `Array`, and `Object`, writes the presence
-    // marker instead — see `crate::marker` — so it stays visible to
-    // `ls-tree -r`/`diff` rather than vanishing.
     let tree_or_marker =
         |entries: Vec<TreeEntry>| -> Result<(ObjectId, EntryKind), SerializeError> {
-            if entries.is_empty() {
-                let oid = crate::marker::write_marker_tree(store)?;
-                Ok((oid, EntryKind::Tree))
-            } else {
-                tree(entries)
-            }
+            Ok((
+                write_tree_or_presence_marker(store, entries)?,
+                EntryKind::Tree,
+            ))
         };
 
     match dv.kind() {
