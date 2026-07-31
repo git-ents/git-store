@@ -7,8 +7,9 @@ use facet::{Def, Partial};
 use gix_hash::Kind as HashKind;
 use gix_object::{Data, Find, Kind};
 
+pub(crate) use crate::classify::collapse_shape;
+use crate::classify::{ShapeClass, classify, is_byte_seq};
 use crate::error::{DeserializeError, KeyError};
-use crate::ser::is_byte_seq;
 use crate::{EntryKind, ObjectId, RawTree};
 
 /// Collapse a `facet` reflection error to [`DeserializeError::Reflect`].
@@ -219,44 +220,6 @@ pub(crate) fn sort_by_ordinal(
     Ok(())
 }
 
-/// Collapse a shape's smart-pointer and transparent-newtype layers to the
-/// shape actually written on disk, iterating to a fixed point.
-///
-/// Mirrors `Peek::innermost_peek` on the write side: a smart pointer
-/// (`Def::Pointer`) is transparent to its pointee, and a transparent newtype
-/// (`#[facet(transparent)]`, `NonZero<T>`, path wrappers) is transparent to
-/// its inner shape — gated on `has_try_borrow_inner`, not just
-/// `shape.inner.is_some()`, since plain collections like `Vec<T>` also carry
-/// an `inner` shape (for variance) but were never unwrapped on write. Shared
-/// by every caller that must classify a *shape* — not a concrete value — by
-/// what it actually encodes to: the map-key scalar-vs-composite layout check
-/// ([`ser`](crate::ser)'s and this module's `Def::Map` branches) and the
-/// schema walker's own collapse (`crate::schema::collapse`).
-///
-/// A pointer shape with no pointee (an opaque pointer shape) cannot be
-/// collapsed further; the loop simply stops there and returns it as-is, since
-/// it is not a scalar or any other shape a caller here would special-case.
-/// [`crate::schema::collapse`] treats that case as an error, since a schema
-/// document has no way to describe an indescribable shape.
-pub(crate) fn collapse_shape(mut shape: &'static facet::Shape) -> &'static facet::Shape {
-    loop {
-        if let Def::Pointer(pd) = shape.def {
-            match pd.pointee {
-                Some(pointee) => {
-                    shape = pointee;
-                    continue;
-                }
-                None => return shape,
-            }
-        }
-        if shape.inner.is_some() && shape.vtable.has_try_borrow_inner() {
-            shape = shape.inner.expect("checked is_some above");
-            continue;
-        }
-        return shape;
-    }
-}
-
 /// The `k`/`v` object ids of a composite-key map pair sub-tree.
 ///
 /// Shared by this module's and [`crate::schema::read`]'s `Def::Map`/
@@ -392,7 +355,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // originally written. Still verified to be a tree, not a blob, so a
     // malformed or foreign tree fails fast with `NotATree` rather than
     // silently handing back a bogus tree id.
-    if shape.is_type::<RawTree>() {
+    if matches!(classify(shape), ShapeClass::RawTree) {
         let mut buf = Vec::new();
         let data = find_object(oid, &mut buf, store)?;
         if data.kind != Kind::Tree {
@@ -404,12 +367,12 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // Dynamic value (`Def::DynamicValue`, e.g. `facet_value::Value`): the
     // encoding writes no type marker, so the value's shape is recovered
     // heuristically from the object graph itself.
-    if let Def::DynamicValue(_) = shape.def {
+    if matches!(classify(shape), ShapeClass::Dynamic) {
         return deser_dynamic(partial, oid, store, depth);
     }
 
     // Scalar leaf: read blob, parse from str
-    if matches!(shape.def, Def::Scalar) {
+    if matches!(classify(shape), ShapeClass::Scalar) {
         let bytes = find_blob_bytes(oid, store)?;
         let s = std::str::from_utf8(&bytes).map_err(|_| DeserializeError::NonUtf8Blob(*oid))?;
         return partial
@@ -423,7 +386,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
 
     // Byte sequence (`Vec<u8>`, `[u8; N]`): read the single blob and fill the
     // collection one byte at a time, mirroring the serializer's blob encoding.
-    if is_byte_seq(shape) {
+    if matches!(classify(shape), ShapeClass::Bytes) {
         let bytes = find_blob_bytes(oid, store)?;
         if matches!(shape.def, Def::Array(_)) {
             let mut partial = partial.init_array().map_err(reflect)?;
@@ -490,7 +453,9 @@ fn deser_into<'facet, F: Find + ?Sized>(
 
     // Struct: read tree, fill fields by name. Tuples and tuple structs key their
     // entries by zero-padded positional ordinal (mirroring serialization).
-    if let facet::Type::User(facet::UserType::Struct(st)) = shape.ty {
+    if matches!(classify(shape), ShapeClass::Struct)
+        && let facet::Type::User(facet::UserType::Struct(st)) = shape.ty
+    {
         let positional = matches!(
             st.kind,
             facet::StructKind::Tuple | facet::StructKind::TupleStruct
@@ -522,7 +487,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // List (Vec): read tree with ordinal keys, sort numerically, push items.
     // The marker tree (`crate::marker`), written for an empty list instead of
     // a literal empty tree, is stripped before ordinal parsing.
-    if matches!(shape.def, Def::List(_)) {
+    if matches!(classify(shape), ShapeClass::Sequence) && matches!(shape.def, Def::List(_)) {
         let mut entries = find_tree_entries(oid, store)?;
         if crate::marker::is_marker(&entries) {
             entries.clear();
@@ -538,7 +503,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
     }
 
     // Array: same as List but init_array
-    if matches!(shape.def, Def::Array(_)) {
+    if matches!(classify(shape), ShapeClass::Sequence) && matches!(shape.def, Def::Array(_)) {
         let mut entries = find_tree_entries(oid, store)?;
         if crate::marker::is_marker(&entries) {
             entries.clear();
@@ -564,7 +529,9 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // encoder actually wrote: a smart-pointer or transparent-newtype key
     // (`Arc<str>`, a `#[facet(transparent)]` wrapper, ...) is written
     // name-keyed exactly as its collapsed scalar shape would be.
-    if let Def::Map(md) = shape.def {
+    if matches!(classify(shape), ShapeClass::Map)
+        && let Def::Map(md) = shape.def
+    {
         let mut entries = find_tree_entries(oid, store)?;
         if crate::marker::is_marker(&entries) {
             entries.clear();
@@ -596,7 +563,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
     }
 
     // Option: empty tree → None, single "some"-named entry → Some(inner).
-    if matches!(shape.def, Def::Option(_)) {
+    if matches!(classify(shape), ShapeClass::Option) {
         let entries = find_tree_entries(oid, store)?;
         let Some(inner_oid) = validate_option_entries(&entries)? else {
             // None — the partial already holds the default None.
@@ -612,7 +579,9 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // (variant name → payload). `extract_enum_entry` fetches `oid` itself and
     // reports which form it found; `select_variant_named` (below) is the
     // authority on whether `variant_name` even exists.
-    if let facet::Type::User(facet::UserType::Enum(et)) = shape.ty {
+    if matches!(classify(shape), ShapeClass::Enum)
+        && let facet::Type::User(facet::UserType::Enum(et)) = shape.ty
+    {
         let (variant_name, inner_oid) = extract_enum_entry(oid, store)?;
 
         // The variant's field layout comes from the type, not the tree: a tuple

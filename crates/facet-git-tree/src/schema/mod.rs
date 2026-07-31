@@ -22,13 +22,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use facet::{ConstTypeId, Def, Facet, ScalarType, Shape};
 
-use crate::RawTree;
 use crate::attr;
+use crate::classify::{ShapeClass, classify};
 use crate::de::{MAX_DEPTH, collapse_shape};
 use crate::error::SchemaError;
 use crate::migration::{Hints, Target};
 use crate::normal_form::IDENTITY_DEF_PREFIX;
-use crate::ser::is_byte_seq;
 
 /// A complete, self-contained schema document.
 ///
@@ -378,30 +377,32 @@ impl Walker {
         let shape = collapse(shape)?;
 
         // RawTree → a verbatim tree reference.
-        if shape.is_type::<RawTree>() {
+        if matches!(classify(shape), ShapeClass::RawTree) {
             return Ok(Node::RawTree);
         }
 
         // Dynamic value → shape decided at runtime, not describable further.
-        if let Def::DynamicValue(_) = shape.def {
+        if matches!(classify(shape), ShapeClass::Dynamic) {
             return Ok(Node::Dynamic);
         }
 
         // Scalar leaf → the per-width scalar table.
-        if matches!(shape.def, Def::Scalar) {
+        if matches!(classify(shape), ShapeClass::Scalar) {
             return scalar_schema(shape);
         }
 
         // Byte sequence → a single blob, before generic sequence handling,
         // exactly as the encoder special-cases it.
-        if is_byte_seq(shape) {
+        if matches!(classify(shape), ShapeClass::Bytes) {
             return Ok(Node::Bytes);
         }
 
         // Struct or tuple. An anonymous tuple `(A, B)` has no user name and is
         // inlined; unit structs, tuple structs, and named-field structs are
         // named user types and live in `defs`.
-        if let facet::Type::User(facet::UserType::Struct(st)) = shape.ty {
+        if matches!(classify(shape), ShapeClass::Struct)
+            && let facet::Type::User(facet::UserType::Struct(st)) = shape.ty
+        {
             if matches!(st.kind, facet::StructKind::Tuple) {
                 return Ok(Node::Tuple(self.field_schemas(st.fields, depth + 1)?));
             }
@@ -420,28 +421,36 @@ impl Walker {
         }
 
         // Sequences, maps, options — the same order the encoder checks them.
-        match shape.def {
-            Def::List(d) => return Ok(Node::List(Box::new(self.node(d.t, depth + 1)?))),
-            Def::Slice(d) => return Ok(Node::List(Box::new(self.node(d.t, depth + 1)?))),
-            Def::Array(d) => {
+        match (classify(shape), shape.def) {
+            (ShapeClass::Sequence, Def::List(d)) => {
+                return Ok(Node::List(Box::new(self.node(d.t, depth + 1)?)));
+            }
+            (ShapeClass::Sequence, Def::Slice(d)) => {
+                return Ok(Node::List(Box::new(self.node(d.t, depth + 1)?)));
+            }
+            (ShapeClass::Sequence, Def::Array(d)) => {
                 return Ok(Node::Array {
                     elem: Box::new(self.node(d.t, depth + 1)?),
                     len: d.n,
                 });
             }
-            Def::Map(d) => {
+            (ShapeClass::Map, Def::Map(d)) => {
                 return Ok(Node::Map {
                     key: Box::new(self.node(d.k, depth + 1)?),
                     value: Box::new(self.node(d.v, depth + 1)?),
                 });
             }
-            Def::Option(d) => return Ok(Node::Optional(Box::new(self.node(d.t, depth + 1)?))),
+            (ShapeClass::Option, Def::Option(d)) => {
+                return Ok(Node::Optional(Box::new(self.node(d.t, depth + 1)?)));
+            }
             _ => {}
         }
 
         // Enum → a named user type in `defs`, with each variant's payload
         // classified exactly as the encoder classifies it.
-        if let facet::Type::User(facet::UserType::Enum(et)) = shape.ty {
+        if matches!(classify(shape), ShapeClass::Enum)
+            && let facet::Type::User(facet::UserType::Enum(et)) = shape.ty
+        {
             return self.define(shape, |walker, def_name| {
                 let mut variants = BTreeMap::new();
                 for variant in et.variants {

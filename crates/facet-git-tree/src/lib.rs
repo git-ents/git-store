@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod attr;
+mod classify;
 mod de;
 mod error;
 mod marker;

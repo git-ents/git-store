@@ -4,7 +4,8 @@ use facet::{Def, DynDateTimeKind, DynValueKind, Peek};
 use gix_object::{Kind, Write};
 
 use crate::check_key;
-use crate::de::{MAX_DEPTH, collapse_shape};
+use crate::classify::{ShapeClass, classify, collapse_shape};
+use crate::de::MAX_DEPTH;
 use crate::error::SerializeError;
 use crate::schema::scalar_node;
 use crate::store::ObjectStore;
@@ -71,22 +72,6 @@ fn serialize_root<W: Write + ?Sized>(
     Ok(oid)
 }
 
-/// The element shape of a `Vec`/array/slice, or `None` for any other type.
-pub(crate) fn seq_elem(shape: &facet::Shape) -> Option<&'static facet::Shape> {
-    match shape.def {
-        Def::List(d) => Some(d.t),
-        Def::Array(d) => Some(d.t),
-        Def::Slice(d) => Some(d.t),
-        _ => None,
-    }
-}
-
-/// Whether `shape` is a sequence of `u8` (`Vec<u8>`, `[u8; N]`, `[u8]`). Such a
-/// sequence is stored as one blob rather than a per-element tree.
-pub(crate) fn is_byte_seq(shape: &facet::Shape) -> bool {
-    seq_elem(shape).is_some_and(|t| t.is_type::<u8>())
-}
-
 pub(crate) fn serialize_node<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
@@ -95,48 +80,28 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
     let peek = peek.innermost_peek();
     let shape = peek.shape();
 
-    if shape.is_type::<RawTree>() {
-        let rt = peek.get::<RawTree>().map_err(reflect)?;
-        return Ok((rt.oid(), EntryKind::Tree));
-    }
-
     if depth > MAX_DEPTH {
         return Err(SerializeError::MaxDepth(MAX_DEPTH));
     }
 
-    if let Def::DynamicValue(_) = shape.def {
-        return serialize_dynamic(peek, store, depth);
+    match classify(shape) {
+        ShapeClass::RawTree => {
+            let rt = peek.get::<RawTree>().map_err(reflect)?;
+            Ok((rt.oid(), EntryKind::Tree))
+        }
+        ShapeClass::Dynamic => serialize_dynamic(peek, store, depth),
+        ShapeClass::Scalar => serialize_leaf(peek, store),
+        ShapeClass::Bytes => serialize_byte_sequence(peek, store),
+        ShapeClass::Struct => serialize_struct(peek, store, depth),
+        ShapeClass::Sequence => serialize_sequence_node(peek, store, depth),
+        ShapeClass::Map => serialize_map(peek, store, depth),
+        ShapeClass::Option => serialize_option(peek, store, depth),
+        ShapeClass::Enum => serialize_enum(peek, store, depth),
+        ShapeClass::TransparentPointer | ShapeClass::TransparentNewtype => {
+            unreachable!("innermost_peek must collapse transparent shapes")
+        }
+        ShapeClass::Unsupported => Err(SerializeError::Unsupported(shape.type_identifier)),
     }
-
-    if matches!(shape.def, Def::Scalar) {
-        return serialize_leaf(peek, store);
-    }
-
-    if is_byte_seq(shape) {
-        return serialize_byte_sequence(peek, store);
-    }
-
-    if matches!(shape.ty, facet::Type::User(facet::UserType::Struct(_))) {
-        return serialize_struct(peek, store, depth);
-    }
-
-    if matches!(shape.def, Def::List(_) | Def::Array(_) | Def::Slice(_)) {
-        return serialize_sequence_node(peek, store, depth);
-    }
-
-    if matches!(shape.def, Def::Map(_)) {
-        return serialize_map(peek, store, depth);
-    }
-
-    if matches!(shape.def, Def::Option(_)) {
-        return serialize_option(peek, store, depth);
-    }
-
-    if matches!(shape.ty, facet::Type::User(facet::UserType::Enum(_))) {
-        return serialize_enum(peek, store, depth);
-    }
-
-    Err(SerializeError::Unsupported(shape.type_identifier))
 }
 
 fn serialize_leaf<W: Write + ?Sized>(
