@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use facet::Facet;
 use facet_git_tree::{EntryKind, deserialize, serialize};
+use proptest::prelude::*;
 
 mod common;
 use common::{WithArray, WithMap, WithVec, get_tree_entry_mode, tree_entries};
@@ -26,7 +27,7 @@ struct WithArcStrKeyMap {
     table: HashMap<Arc<str>, u32>,
 }
 
-#[derive(Facet, PartialEq, Eq, Hash, Debug, Clone)]
+#[derive(Facet, PartialEq, Eq, Hash, Ord, PartialOrd, Debug, Clone)]
 struct Coord {
     x: i32,
     y: i32,
@@ -304,4 +305,91 @@ fn map_with_composite_keys_roundtrips_order_independently() {
 
     let got: WithCompositeKeyMap = deserialize(&id_a, &store).expect("deserialize");
     assert_eq!(got.table, a, "composite-keyed map must round-trip");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 48, .. ProptestConfig::default() })]
+
+    #[test]
+    fn scalar_maps_are_deterministic_across_independent_stores(
+        entries in proptest::collection::btree_map("[a-z]{1,6}", "[a-z]{0,8}", 0..6),
+    ) {
+        let value = WithMap { table: entries.into_iter().collect() };
+        let (first, _) = serialize(&value).expect("serialize");
+        let (second, _) = serialize(&value).expect("serialize");
+        prop_assert_eq!(first, second);
+    }
+
+    #[test]
+    fn scalar_map_insertion_order_does_not_change_root_id(
+        entries in proptest::collection::btree_map("[a-z]{1,6}", "[a-z]{0,8}", 1..6),
+    ) {
+        let pairs: Vec<_> = entries.into_iter().collect();
+        let forward = pairs.iter().cloned().collect::<HashMap<_, _>>();
+        let reverse = pairs.iter().rev().cloned().collect::<HashMap<_, _>>();
+        let (first, _) = serialize(&WithMap { table: forward }).expect("serialize");
+        let (second, _) = serialize(&WithMap { table: reverse }).expect("serialize");
+        prop_assert_eq!(first, second);
+    }
+
+    #[test]
+    fn scalar_map_keys_are_valid_tree_entry_names(
+        entries in proptest::collection::btree_map("[a-z][a-z0-9]{0,5}", "[a-z]{0,8}", 1..6),
+    ) {
+        let expected: HashMap<_, _> = entries.into_iter().collect();
+        let (root, store) = serialize(&WithMap { table: expected.clone() }).expect("serialize");
+        let (_, map_id) = get_tree_entry_mode(&store, &root, "table");
+        let names: Vec<_> = tree_entries(&store, &map_id)
+            .into_iter()
+            .map(|entry| entry.filename.to_string())
+            .collect();
+        let mut expected_names: Vec<_> = expected.keys().cloned().collect();
+        expected_names.sort();
+        prop_assert_eq!(names.clone(), expected_names);
+        prop_assert!(names.iter().all(|name| !name.contains('/') && name != "_"));
+    }
+
+    #[test]
+    fn composite_map_pair_order_is_deterministic(
+        entries in proptest::collection::btree_map(
+            (-20i32..20, -20i32..20).prop_map(|(x, y)| Coord { x, y }),
+            "[a-z]{1,8}",
+            1..6,
+        ),
+    ) {
+        let pairs: Vec<_> = entries.into_iter().collect();
+        let forward = pairs.iter().cloned().collect::<HashMap<_, _>>();
+        let reverse = pairs.iter().rev().cloned().collect::<HashMap<_, _>>();
+        let (first, _) = serialize(&WithCompositeKeyMap { table: forward }).expect("serialize");
+        let (second, _) = serialize(&WithCompositeKeyMap { table: reverse }).expect("serialize");
+        prop_assert_eq!(first, second);
+    }
+
+    #[test]
+    fn composite_map_entries_are_pair_subtrees(
+        entries in proptest::collection::btree_map(
+            (-20i32..20, -20i32..20).prop_map(|(x, y)| Coord { x, y }),
+            "[a-z]{1,8}",
+            1..6,
+        ),
+    ) {
+        let expected = entries.len();
+        let table = entries.into_iter().collect();
+        let (root, store) = serialize(&WithCompositeKeyMap { table }).expect("serialize");
+        let (_, map_id) = get_tree_entry_mode(&store, &root, "table");
+        let pairs = tree_entries(&store, &map_id);
+        prop_assert_eq!(pairs.len(), expected);
+        let mut ordinals: Vec<_> = pairs
+            .iter()
+            .map(|pair| pair.filename.to_string().parse::<usize>().expect("ordinal"))
+            .collect();
+        ordinals.sort_unstable();
+        prop_assert_eq!(ordinals, (0..expected).collect::<Vec<_>>());
+        for pair in pairs {
+            let pair_entries = tree_entries(&store, &pair.oid);
+            prop_assert_eq!(pair_entries.len(), 2);
+            prop_assert!(pair_entries.iter().any(|entry| entry.filename == "k"));
+            prop_assert!(pair_entries.iter().any(|entry| entry.filename == "v"));
+        }
+    }
 }

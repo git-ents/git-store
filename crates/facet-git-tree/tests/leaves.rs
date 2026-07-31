@@ -15,9 +15,10 @@ use facet_git_tree::{
     serialize,
 };
 use gix_object::{Kind, Write};
+use proptest::prelude::*;
 
 mod common;
-use common::find_entry;
+use common::{WithVec, find_entry};
 
 // --- single-field scalar wrappers ---
 
@@ -251,4 +252,34 @@ fn leaf_blob_without_trailing_newline_is_rejected() {
         matches!(&result, Err(DeserializeError::MissingLeafNewline(oid)) if *oid == blob_id),
         "a leaf blob without its trailing newline must be MissingLeafNewline, got {result:?}"
     );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 48, .. ProptestConfig::default() })]
+
+    #[test]
+    fn ordinary_leaf_blob_is_input_bytes_plus_one_newline(text in "[a-z\\n]{0,24}") {
+        let bytes = v_blob(&WithString { v: text.clone() });
+        let mut expected = text.into_bytes();
+        expected.push(b'\n');
+        prop_assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn newline_terminated_values_remain_distinct(text in "[a-z]{1,12}") {
+        let without = v_blob_entry(&WithString { v: text.clone() });
+        let with = v_blob_entry(&WithString { v: format!("{text}\\n") });
+        prop_assert_ne!(without, with);
+    }
+
+    #[test]
+    fn marker_tree_is_distinct_from_an_ordinary_empty_leaf(_unit in Just(())) {
+        let (leaf_root, leaf_store) = serialize(&WithString { v: String::new() }).expect("serialize");
+        let leaf = find_entry(&leaf_store, &leaf_root, "v");
+        let (marker_root, marker_store) = serialize(&WithVec { items: vec![] }).expect("serialize");
+        let marker = find_entry(&marker_store, &marker_root, "items");
+        prop_assert_eq!(leaf.mode.kind(), EntryKind::Blob);
+        prop_assert_eq!(marker.mode.kind(), EntryKind::Tree);
+        prop_assert_ne!(leaf.oid, marker.oid);
+    }
 }

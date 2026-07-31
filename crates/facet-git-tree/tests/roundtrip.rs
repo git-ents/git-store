@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use facet::Facet;
 use facet_git_tree::{deserialize, serialize};
+use proptest::prelude::*;
 
 mod common;
 use common::{Nested, Person, Point, WithArray, WithMap, WithOptional, WithVec, roundtrip};
@@ -233,4 +234,21 @@ fn negative_zero_roundtrip() {
     // The spec mandates normalization of -0.0 to +0.0 on write.
     // On read, the value must be zero (the sign is unspecified but normalized form is +0.0).
     assert_eq!(recovered.x, 0.0_f64);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 48, .. ProptestConfig::default() })]
+
+    #[test]
+    fn bounded_nested_sequences_preserve_empty_and_non_empty_structure(
+        rows in proptest::collection::vec(
+            proptest::collection::vec(-20i64..20, 0..5),
+            0..5,
+        ),
+    ) {
+        let value = Matrix { rows: rows.clone() };
+        let (root, store) = serialize(&value).expect("serialize");
+        let recovered: Matrix = deserialize(&root, &store).expect("deserialize");
+        prop_assert_eq!(recovered, value);
+    }
 }

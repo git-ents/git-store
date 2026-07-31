@@ -9,7 +9,8 @@
 //!
 //! (Tuple-variant ordinal naming is covered in `variants.rs`.)
 
-use facet_git_tree::serialize;
+use facet_git_tree::{deserialize, serialize};
+use proptest::prelude::*;
 
 mod common;
 use common::{WithArray, WithVec, get_tree_entry_mode, roundtrip, tree_entries};
@@ -110,4 +111,37 @@ fn large_vec_roundtrips_with_wide_ordinals() {
         items: items.clone(),
     });
     assert_eq!(recovered, WithVec { items });
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 48, .. ProptestConfig::default() })]
+
+    #[test]
+    fn sequence_ordinals_are_unique_and_cover_all_elements(items in proptest::collection::vec(-100i64..100, 1..8)) {
+        let (root, store) = serialize(&WithVec { items: items.clone() }).expect("serialize");
+        let (_, items_id) = get_tree_entry_mode(&store, &root, "items");
+        let mut ordinals: Vec<_> = tree_entries(&store, &items_id)
+            .into_iter()
+            .map(|entry| entry.filename.to_string().parse::<usize>().expect("ordinal"))
+            .collect();
+        ordinals.sort_unstable();
+        prop_assert_eq!(ordinals, (0..items.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn sequence_order_survives_serialization(items in proptest::collection::vec(-100i64..100, 0..8)) {
+        let (root, store) = serialize(&WithVec { items: items.clone() }).expect("serialize");
+        let recovered: WithVec = deserialize(&root, &store).expect("deserialize");
+        prop_assert_eq!(recovered, WithVec { items });
+    }
+
+    #[test]
+    fn empty_sequences_use_the_marker_tree(_unit in Just(())) {
+        let (root, store) = serialize(&WithVec { items: vec![] }).expect("serialize");
+        let (_, items_id) = get_tree_entry_mode(&store, &root, "items");
+        let entries = tree_entries(&store, &items_id);
+        prop_assert_eq!(entries.len(), 1);
+        prop_assert_eq!(entries[0].filename.to_string(), "_");
+        prop_assert_eq!(entries[0].mode.kind(), facet_git_tree::EntryKind::Blob);
+    }
 }
