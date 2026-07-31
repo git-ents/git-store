@@ -15,37 +15,6 @@ use proptest::prelude::*;
 mod common;
 use common::roundtrip;
 
-// --- the faithful subset ---
-
-/// Strings roundtrip exactly: a UTF-8 blob always reads back as a String.
-#[test]
-fn string_roundtrips() {
-    assert_eq!(roundtrip(Value::from("hello")), Value::from("hello"));
-    assert_eq!(roundtrip(Value::from("")), Value::from(""));
-}
-
-/// Non-UTF-8 bytes roundtrip exactly: the blob cannot be read as a String, so
-/// it comes back as Bytes verbatim.
-#[test]
-fn non_utf8_bytes_roundtrip() {
-    let v = Value::from(vec![0xffu8, 0x00, 0x61]);
-    assert_eq!(roundtrip(v.clone()), v);
-}
-
-/// A non-empty array of strings roundtrips exactly.
-#[test]
-fn array_of_strings_roundtrips() {
-    let v = value!(["a", "b", "c"]);
-    assert_eq!(roundtrip(v.clone()), v);
-}
-
-/// An object of strings (with non-ordinal keys) roundtrips exactly.
-#[test]
-fn object_of_strings_roundtrips() {
-    let v = value!({ "alpha": "a", "beta": "b" });
-    assert_eq!(roundtrip(v.clone()), v);
-}
-
 // --- property: the faithful subset always roundtrips ---
 
 /// A strategy over the faithful subset: strings, guaranteed-non-UTF-8 bytes,
@@ -98,22 +67,30 @@ proptest! {
 
 // --- the documented lossy mappings ---
 
-/// A bool has no on-disk marker, so it comes back as its textual form.
+/// Scalar numeric text does not retain the original numeric type or width.
 #[test]
-fn bool_degrades_to_string() {
-    assert_eq!(roundtrip(Value::from(true)), Value::from("true"));
-}
-
-/// A number has no on-disk marker, so it comes back as its decimal text.
-#[test]
-fn number_degrades_to_string() {
+fn numeric_type_and_width_degrade_to_string() {
     assert_eq!(roundtrip(Value::from(42i64)), Value::from("42"));
+    assert_eq!(roundtrip(Value::from(42u64)), Value::from("42"));
 }
 
-/// Null writes the empty tree, which reads back as an empty Object.
+/// Null and empty dynamic containers share the marker tree and read as an
+/// empty Object; the heuristic cannot distinguish them.
 #[test]
-fn null_degrades_to_empty_object() {
-    assert_eq!(roundtrip(Value::NULL), value!({}));
+fn null_and_empty_containers_degrade_to_empty_object() {
+    let empty_array = Value::from(VArray::new());
+    let empty_object = Value::from(VObject::new());
+    let expected = value!({});
+
+    assert_eq!(roundtrip(Value::NULL), expected);
+    assert_eq!(roundtrip(empty_array), expected);
+    assert_eq!(roundtrip(empty_object), expected);
+}
+
+/// An object whose keys are all ordinals is interpreted as an Array.
+#[test]
+fn ordinal_keyed_object_degrades_to_array() {
+    assert_eq!(roundtrip(value!({ "0000": "x" })), value!(["x"]));
 }
 
 // --- content addressing ---

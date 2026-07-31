@@ -257,7 +257,7 @@ A dynamic `String` therefore produces the same blob, and the same object id, as 
 [role="requirement", id="deserialization.roundtrip"]
 .Support for Serialization and Deserialization
 --
-Deserialization of a data which was serialized via `facet-git-tree` MUST result in the original data.
+Deserialization of data serialized via `facet-git-tree` into its original typed `Facet` target MUST result in the original data. Typed `Facet` round trips are expected to be faithful. This requirement does not apply to a schemaless dynamic-value target; its read behavior is defined by link:#deserialization.dynamic.heuristic[the dynamic value read heuristic].
 --
 
 [role="requirement", id="deserialization.dynamic.heuristic"]
@@ -269,7 +269,7 @@ When the deserialization target is a dynamic value, no schema is available on di
 . A non-empty tree in which every entry name parses as a decimal ordinal MUST be read as an `Array`, with elements ordered by numeric index per link:#serialization.design.trees.ordering[entry name ordering].
 . Any other tree — including the presence-marker tree (link:#serialization.design.trees.empty-marker[presence marker]), which MUST be stripped before this classification so it is not misread as a one-member `Object` — MUST be read as an `Object`, with one member per entry.
 
-This mapping is best-effort and lossy: it recovers structure, not the writer's dynamic kind.
+This mapping is best-effort and lossy: it recovers structure, not the writer's dynamic kind. In particular, scalar numeric text does not retain the original numeric width, signedness, or scalar type, so that information cannot be recovered without a schema or typed target. `Null` and empty dynamic `Array`/`Object` values share the same marker and are all read with the empty-`Object` interpretation; the heuristic cannot distinguish those empty states.
 The following writes do not survive a dynamic round-trip.
 
 [cols="1,1", options="header"]

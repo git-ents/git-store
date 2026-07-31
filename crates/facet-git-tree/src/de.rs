@@ -1,4 +1,7 @@
 //! Deserialization: decoding Git trees back into [`facet::Facet`] values.
+//!
+//! Typed targets are expected to round-trip faithfully. Schemaless dynamic-value
+//! reads use the lossy heuristic defined in `docs/specification.adoc`.
 
 use facet::{Def, Partial};
 use gix_hash::Kind as HashKind;
@@ -47,6 +50,10 @@ pub fn check_key(key: &str) -> Result<(), KeyError> {
 }
 
 /// Deserialize a [`facet::Facet`] value from a root tree stored in `store`.
+///
+/// Typed [`facet::Facet`] targets are expected to round-trip faithfully. A
+/// schemaless dynamic-value target is intentionally lossy and follows the
+/// heuristic in `docs/specification.adoc`.
 ///
 /// `store` is any `gix` [`Find`] source — a real repository, an in-memory odb,
 /// or an [`ObjectStore`](crate::ObjectStore) — the read side of the backend

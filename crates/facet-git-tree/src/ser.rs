@@ -32,7 +32,11 @@ where
 
 /// Serialize a [`facet::Facet`] value into a fresh [`ObjectStore`].
 ///
-/// Returns the root [`ObjectId`] and the store containing all reachable objects.
+/// The wire format is defined in `docs/specification.adoc`; dynamic-value
+/// deserialization is intentionally heuristic and lossy because it has no
+/// runtime type markers.
+///
+/// Returns the root tree [`ObjectId`] and the store containing all reachable objects.
 pub fn serialize<T: for<'a> facet::Facet<'a>>(
     value: &T,
 ) -> Result<(ObjectId, ObjectStore), SerializeError> {
