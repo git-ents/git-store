@@ -304,9 +304,7 @@ fn write_node<W: Write + ?Sized>(
         }
         // A dynamic node carries no schema, so the bare heuristic write — the
         // same one `serialize` applies to a `Value` field — is exactly right.
-        // Serialization is not depth-bounded (a `Value` is a finite tree), so
-        // no budget need be threaded across the boundary as reads must.
-        Node::Dynamic => Ok(serialize_node(Peek::new(value), store)?),
+        Node::Dynamic => Ok(serialize_node(Peek::new(value), store, depth)?),
         Node::Ref(name) => {
             let target = doc
                 .defs

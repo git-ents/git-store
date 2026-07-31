@@ -76,6 +76,9 @@ pub enum SerializeError {
     /// them is preferred over guessing an encoding.
     #[error("unsupported dynamic value kind: {0}")]
     UnsupportedDynamicKind(String),
+    /// Serialization exceeded the maximum supported nesting depth.
+    #[error("maximum nesting depth ({0}) exceeded while serializing")]
+    MaxDepth(usize),
 }
 
 /// An error produced by deserialization ([`deserialize`](crate::deserialize)

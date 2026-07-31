@@ -6,13 +6,13 @@
 //!       into the encoding; the value itself is finite and cycle-free.
 
 use facet::Facet;
-use facet_git_tree::serialize;
+use facet_git_tree::{SerializeError, serialize};
 
 mod common;
 use common::roundtrip;
 
 /// A self-referential type: a node owns child nodes of the same type.
-#[derive(Debug, Facet, PartialEq)]
+#[derive(Clone, Debug, Facet, PartialEq)]
 struct TreeNode {
     value: i64,
     children: Vec<TreeNode>,
@@ -52,4 +52,30 @@ fn recursive_type_serializes() {
 #[test]
 fn recursive_type_roundtrips() {
     assert_eq!(roundtrip(sample()), sample());
+}
+
+fn nested_tree(depth: usize) -> TreeNode {
+    let mut node = TreeNode {
+        value: depth as i64,
+        children: vec![],
+    };
+    for value in (0..depth).rev() {
+        node = TreeNode {
+            value: value as i64,
+            children: vec![node],
+        };
+    }
+    node
+}
+
+#[test]
+fn nested_collection_within_depth_limit_roundtrips() {
+    let value = nested_tree(10);
+    assert_eq!(roundtrip(value.clone()), value);
+}
+
+#[test]
+fn nested_collection_beyond_depth_limit_is_rejected() {
+    let err = serialize(&nested_tree(40)).expect_err("depth limit must reject deep values");
+    assert!(matches!(err, SerializeError::MaxDepth(32)), "got {err:?}");
 }

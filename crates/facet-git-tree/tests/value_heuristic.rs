@@ -9,8 +9,11 @@
 
 use std::collections::HashMap;
 
-use facet_git_tree::{DeserializeError, deserialize, serialize};
-use facet_value::{VArray, Value, value};
+use facet_git_tree::{
+    DeserializeError, EntryKind, EntryMode, ObjectStore, TreeEntry, deserialize, serialize,
+};
+use facet_value::{Value, value};
+use gix_object::{Kind, Write as _};
 
 mod common;
 use common::{Person, WithMap};
@@ -106,13 +109,19 @@ fn typed_person_reads_as_object_of_strings() -> anyhow::Result<()> {
 /// recursion: a tree nested deeper fails rather than overflowing the stack.
 #[test]
 fn depth_beyond_max_is_rejected() -> anyhow::Result<()> {
-    let mut v = Value::from("leaf");
+    let store = ObjectStore::default();
+    let mut root = store.write_buf(Kind::Blob, b"leaf\n").expect("write leaf");
     for _ in 0..40 {
-        let mut arr = VArray::new();
-        arr.push(v);
-        v = arr.into();
+        root = store
+            .write(&gix_object::Tree {
+                entries: vec![TreeEntry {
+                    mode: EntryMode::from(EntryKind::Tree),
+                    filename: "0000".into(),
+                    oid: root,
+                }],
+            })
+            .expect("write nesting tree");
     }
-    let (root, store) = serialize(&v)?;
     let err = deserialize::<Value>(&root, &store).unwrap_err();
     assert!(matches!(err, DeserializeError::MaxDepth(_)), "got {err:?}");
     Ok(())

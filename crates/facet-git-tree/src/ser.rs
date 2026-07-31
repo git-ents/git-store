@@ -4,7 +4,7 @@ use facet::{Def, DynDateTimeKind, DynValueKind, Peek};
 use gix_object::{Kind, Write};
 
 use crate::check_key;
-use crate::de::collapse_shape;
+use crate::de::{MAX_DEPTH, collapse_shape};
 use crate::error::SerializeError;
 use crate::schema::scalar_node;
 use crate::store::ObjectStore;
@@ -61,7 +61,7 @@ pub fn serialize_peek_into<W>(peek: Peek<'_, '_>, store: &W) -> Result<ObjectId,
 where
     W: Write + ?Sized,
 {
-    let (oid, _kind) = serialize_node(peek, store)?;
+    let (oid, _kind) = serialize_node(peek, store, 0)?;
     Ok(oid)
 }
 
@@ -94,6 +94,7 @@ pub(crate) fn is_byte_seq(shape: &facet::Shape) -> bool {
 pub(crate) fn serialize_node<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
+    depth: usize,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
     let peek = peek.innermost_peek();
     let shape = peek.shape();
@@ -103,8 +104,12 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
         return Ok((rt.oid(), EntryKind::Tree));
     }
 
+    if depth > MAX_DEPTH {
+        return Err(SerializeError::MaxDepth(MAX_DEPTH));
+    }
+
     if let Def::DynamicValue(_) = shape.def {
-        return serialize_dynamic(peek, store);
+        return serialize_dynamic(peek, store, depth);
     }
 
     if matches!(shape.def, Def::Scalar) {
@@ -116,23 +121,23 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
     }
 
     if matches!(shape.ty, facet::Type::User(facet::UserType::Struct(_))) {
-        return serialize_struct(peek, store);
+        return serialize_struct(peek, store, depth);
     }
 
     if matches!(shape.def, Def::List(_) | Def::Array(_) | Def::Slice(_)) {
-        return serialize_sequence_node(peek, store);
+        return serialize_sequence_node(peek, store, depth);
     }
 
     if matches!(shape.def, Def::Map(_)) {
-        return serialize_map(peek, store);
+        return serialize_map(peek, store, depth);
     }
 
     if matches!(shape.def, Def::Option(_)) {
-        return serialize_option(peek, store);
+        return serialize_option(peek, store, depth);
     }
 
     if matches!(shape.ty, facet::Type::User(facet::UserType::Enum(_))) {
-        return serialize_enum(peek, store);
+        return serialize_enum(peek, store, depth);
     }
 
     Err(SerializeError::Unsupported(shape.type_identifier))
@@ -162,6 +167,7 @@ fn serialize_byte_sequence<W: Write + ?Sized>(
 fn serialize_struct<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
+    depth: usize,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
     let facet::Type::User(facet::UserType::Struct(st)) = peek.shape().ty else {
         unreachable!()
@@ -173,7 +179,7 @@ fn serialize_struct<W: Write + ?Sized>(
     let ps = peek.into_struct().map_err(reflect)?;
     let mut entries = Vec::with_capacity(st.fields.len());
     for (i, field) in st.fields.iter().enumerate() {
-        let (oid, kind) = serialize_node(ps.field(i).map_err(reflect)?, store)?;
+        let (oid, kind) = serialize_node(ps.field(i).map_err(reflect)?, store, depth + 1)?;
         let filename: gix_object::bstr::BString = if positional {
             format!("{i:04}").into()
         } else {
@@ -191,8 +197,9 @@ fn serialize_struct<W: Write + ?Sized>(
 fn serialize_sequence_node<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
+    depth: usize,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
-    let entries = serialize_sequence(peek, store)?;
+    let entries = serialize_sequence(peek, store, depth)?;
     Ok((
         write_tree_or_presence_marker(store, entries)?,
         EntryKind::Tree,
@@ -202,6 +209,7 @@ fn serialize_sequence_node<W: Write + ?Sized>(
 fn serialize_map<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
+    depth: usize,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
     let Def::Map(md) = peek.shape().def else {
         unreachable!()
@@ -215,7 +223,7 @@ fn serialize_map<W: Write + ?Sized>(
             let key_str =
                 std::str::from_utf8(&key_bytes).map_err(|_| SerializeError::NonUtf8MapKey)?;
             check_key(key_str)?;
-            let (oid, kind) = serialize_node(v, store)?;
+            let (oid, kind) = serialize_node(v, store, depth + 1)?;
             entries.push(TreeEntry {
                 mode: EntryMode::from(kind),
                 filename: key_str.into(),
@@ -225,8 +233,8 @@ fn serialize_map<W: Write + ?Sized>(
     } else {
         let mut pair_oids = Vec::new();
         for (k, v) in pm.iter() {
-            let (k_oid, k_kind) = serialize_node(k, store)?;
-            let (v_oid, v_kind) = serialize_node(v, store)?;
+            let (k_oid, k_kind) = serialize_node(k, store, depth + 1)?;
+            let (v_oid, v_kind) = serialize_node(v, store, depth + 1)?;
             let pair = vec![
                 TreeEntry {
                     mode: EntryMode::from(k_kind),
@@ -259,6 +267,7 @@ fn serialize_map<W: Write + ?Sized>(
 fn serialize_option<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
+    depth: usize,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
     let po = peek.into_option().map_err(reflect)?;
     let Some(inner) = po.value() else {
@@ -267,7 +276,7 @@ fn serialize_option<W: Write + ?Sized>(
             EntryKind::Tree,
         ));
     };
-    let (oid, kind) = serialize_node(inner, store)?;
+    let (oid, kind) = serialize_node(inner, store, depth + 1)?;
     let entries = vec![TreeEntry {
         mode: EntryMode::from(kind),
         filename: "some".into(),
@@ -279,6 +288,7 @@ fn serialize_option<W: Write + ?Sized>(
 fn serialize_enum<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
+    depth: usize,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
     let pe = peek.into_enum().map_err(reflect)?;
     let variant = pe.active_variant().map_err(reflect)?;
@@ -297,7 +307,7 @@ fn serialize_enum<W: Write + ?Sized>(
             .field(0)
             .map_err(reflect)?
             .ok_or_else(|| SerializeError::Reflect("variant field 0 missing".into()))?;
-        serialize_node(child, store)?
+        serialize_node(child, store, depth + 1)?
     } else {
         let mut entries = Vec::new();
         for (i, field) in variant.data.fields.iter().enumerate() {
@@ -305,7 +315,7 @@ fn serialize_enum<W: Write + ?Sized>(
                 .field(i)
                 .map_err(reflect)?
                 .ok_or_else(|| SerializeError::Reflect(format!("variant field {i} missing")))?;
-            let (oid, kind) = serialize_node(child, store)?;
+            let (oid, kind) = serialize_node(child, store, depth + 1)?;
             let filename: gix_object::bstr::BString = if positional {
                 format!("{i:04}").into()
             } else {
@@ -376,6 +386,7 @@ fn write_tree_or_presence_marker<W: Write + ?Sized>(
 fn serialize_dynamic<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
+    depth: usize,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
     let dv = peek.into_dynamic_value().map_err(reflect)?;
 
@@ -484,7 +495,7 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 .ok_or_else(|| reflect("dynamic array unreadable"))?;
             let mut entries: Vec<TreeEntry> = Vec::with_capacity(iter.len());
             for (i, item) in iter.enumerate() {
-                let (oid, kind) = serialize_node(item, store)?;
+                let (oid, kind) = serialize_node(item, store, depth + 1)?;
                 entries.push(TreeEntry {
                     mode: EntryMode::from(kind),
                     filename: format!("{i:04}").into(),
@@ -501,7 +512,7 @@ fn serialize_dynamic<W: Write + ?Sized>(
             let mut entries: Vec<TreeEntry> = Vec::with_capacity(iter.len());
             for (key, value) in iter {
                 check_key(key)?;
-                let (oid, kind) = serialize_node(value, store)?;
+                let (oid, kind) = serialize_node(value, store, depth + 1)?;
                 entries.push(TreeEntry {
                     mode: EntryMode::from(kind),
                     filename: key.into(),
@@ -636,11 +647,12 @@ fn value_special_text(peek: Peek<'_, '_>) -> Result<Option<String>, SerializeErr
 fn serialize_sequence<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
+    depth: usize,
 ) -> Result<Vec<TreeEntry>, SerializeError> {
     let seq = peek.into_list_like().map_err(reflect)?;
     let mut entries: Vec<TreeEntry> = Vec::new();
     for (i, item) in seq.iter().enumerate() {
-        let (oid, kind) = serialize_node(item, store)?;
+        let (oid, kind) = serialize_node(item, store, depth + 1)?;
         entries.push(TreeEntry {
             mode: EntryMode::from(kind),
             filename: format!("{i:04}").into(),
