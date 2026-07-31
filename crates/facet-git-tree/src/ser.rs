@@ -32,9 +32,8 @@ where
 
 /// Serialize a [`facet::Facet`] value into a fresh [`ObjectStore`].
 ///
-/// The wire format is defined in `docs/specification.adoc`; dynamic-value
-/// deserialization is intentionally heuristic and lossy because it has no
-/// runtime type markers.
+/// Dynamic values have no runtime type markers, so their heuristic read is
+/// intentionally lossy; typed values round-trip through their supplied shape.
 ///
 /// Returns the root tree [`ObjectId`] and the store containing all reachable objects.
 pub fn serialize<T: for<'a> facet::Facet<'a>>(
@@ -358,28 +357,14 @@ fn write_tree_or_presence_marker<W: Write + ?Sized>(
 /// Serialize a dynamic value (`Def::DynamicValue`, e.g. `facet_value::Value`)
 /// by dispatching on its runtime kind.
 ///
-/// Each kind maps onto the encoding its typed counterpart uses, so a dynamic
-/// value and the equivalent typed value produce identical objects *whenever
-/// the dynamic value can be rendered at all*: strings are their UTF-8 bytes,
-/// bytes a raw blob, booleans and numbers their textual form, arrays
-/// ordinal-keyed trees, and objects name-keyed trees (each key validated by
-/// [`check_key`]). Null is the [`crate::marker`] presence-marker tree,
-/// because a literal empty tree would be invisible to `ls-tree -r`/`diff` —
-/// exactly the problem the marker exists to avoid. An empty `Array` or
-/// `Object` writes the same marker tree, for the same reason. (The marker
-/// once also avoided a collision with `""` and empty bytes; now that every
-/// leaf blob carries a mandatory trailing newline the empty blob is the
-/// marker's alone, so only the invisibility argument still applies.)
+/// Dynamic kinds use the same encodings as equivalent typed values whenever
+/// they can be rendered. Empty dynamic containers and `Null` use the presence
+/// marker so Git tooling can observe their presence instead of treating them
+/// as absent empty trees.
 ///
-/// The generic vtable cannot render every kind exactly: integers beyond 64
-/// bits, QNames, and UUIDs need the `value`-feature downcast to
-/// `facet_value::Value`, which also resolves numbers the generic 64-bit reads
-/// leave ambiguous (see the `Number` case below). Without that downcast —
-/// or when it is available but still cannot tell an out-of-range whole value's
-/// exact representation apart from a truncated one — rendering is refused
-/// rather than writing a lossy form that would change the value's object id,
-/// with [`SerializeError::UnrepresentableNumber`] or
-/// [`SerializeError::UnsupportedDynamicKind`].
+/// If the runtime interface cannot recover an exact representation—especially
+/// for out-of-range integers—the value is rejected rather than serialized
+/// lossily, which would change its object id.
 fn serialize_dynamic<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
@@ -407,8 +392,7 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 .ok_or_else(|| reflect("dynamic bool unreadable"))?;
             blob(if b { "true" } else { "false" }.as_bytes())
         }
-        // Also covers char values: `facet_value` surfaces a char as a String
-        // (its UTF-8 form), which matches the typed `char` encoding.
+        // Dynamic chars are surfaced as their UTF-8 string representation.
         DynValueKind::String => {
             let s = dv
                 .as_str()
@@ -422,12 +406,8 @@ fn serialize_dynamic<W: Write + ?Sized>(
             blob(b)
         }
         DynValueKind::Number => {
-            // Exact fast path (`value` feature): the generic vtable only
-            // surfaces 64-bit reads, so anything outside that range is
-            // resolved through `facet_value`'s own accessors instead.
-            // Numbers that fit the generic reads below never take this path,
-            // keeping the emitted bytes identical with and without the
-            // feature.
+            // Resolve values beyond the generic vtable's 64-bit accessors
+            // without changing the encoding of values those accessors handle.
             #[cfg(feature = "value")]
             {
                 if peek.shape().is_type::<facet_value::Value>()
@@ -436,26 +416,14 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 {
                     let v = peek.get::<facet_value::Value>().map_err(reflect)?;
                     if let Some(n) = v.as_number() {
-                        // Dispatch on the number's actual backing
-                        // (`VNumber::is_float`) rather than on whether
-                        // `to_i128`/`to_u128` succeed: those *do* round-trip
-                        // a whole float within range (e.g. `6.022e23`), but
-                        // they read back its exact binary value, which is
-                        // not the same decimal as the *shortest*
-                        // round-tripping text `float_text`/the typed `f64`
-                        // path renders for those same bits (`f64::to_string`
-                        // is shortest-round-trip, not exact-value). Using
-                        // the integer accessors for a float-backed number
-                        // would therefore silently diverge from the typed
-                        // encoding — and from a different `f64` whose exact
-                        // bits happen to share that same shortest decimal.
+                        // Preserve float-backed values as floats: integer
+                        // accessors can expose an exact integer while changing
+                        // the shortest-round-tripping decimal representation.
                         if n.is_float() {
                             return blob(&float_text(n.to_f64_lossy()));
                         }
-                        // Not float-backed: `VNumber` canonicalizes every
-                        // integer repr (`I64`/`U64`/`I128`/`U128`) so that
-                        // whichever of `to_i128`/`to_u128` is
-                        // signed-appropriate for its range always succeeds.
+                        // `VNumber` canonicalizes integer representations, so
+                        // the range-appropriate accessor is exact.
                         if let Some(i) = n.to_i128() {
                             return blob(i.to_string().as_bytes());
                         }
@@ -472,13 +440,8 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 return blob(u.to_string().as_bytes());
             }
             if let Some(f) = dv.as_f64() {
-                // A finite whole f64 only reaches here when the value did not
-                // fit the 64-bit reads above, the `value`-feature fast path
-                // did not already resolve it (either the feature is off, or
-                // this dynamic value is not a `facet_value::Value`), and it
-                // may therefore be the lossy image of a >64-bit integer.
-                // Refuse rather than write an approximation that would
-                // silently change the object id.
+                // A whole value here may be a lossy image of an out-of-range
+                // integer; reject it rather than change the object id.
                 if f.is_finite() && f.trunc() == f {
                     return Err(SerializeError::UnrepresentableNumber);
                 }
@@ -523,9 +486,7 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 .ok_or_else(|| reflect("dynamic datetime unreadable"))?;
             blob(datetime_text(parts)?.as_bytes())
         }
-        // Neither QName nor UUID has a generic textual read on the vtable;
-        // only the `value` feature's downcast to `facet_value::Value` can
-        // render them.
+        // QName and UUID text requires the `value` feature's downcast.
         kind @ (DynValueKind::QName | DynValueKind::Uuid) => {
             #[cfg(feature = "value")]
             {
@@ -535,28 +496,16 @@ fn serialize_dynamic<W: Write + ?Sized>(
             }
             Err(SerializeError::UnsupportedDynamicKind(format!("{kind:?}")))
         }
-        // `DynValueKind` is non_exhaustive: refuse kinds this crate does not
-        // know rather than guess an encoding for them.
+        // Refuse future kinds rather than guess an encoding.
         other => Err(SerializeError::UnsupportedDynamicKind(format!("{other:?}"))),
     }
 }
 
 /// Render a dynamic datetime as RFC 3339-style text.
 ///
-/// `parts` is the `(year, month, day, hour, minute, second, nanos, kind)`
-/// tuple surfaced by the dynamic-value vtable. Date and time fields are
-/// zero-padded; fractional seconds appear only when `nanos` is non-zero, with
-/// trailing zeros trimmed; a zero UTC offset renders as `Z`, any other as
-/// `±HH:MM`. The local kinds drop the parts they do not carry: no offset
-/// suffix for a local date-time, date only for a local date, time only for a
-/// local time.
-///
-/// A negative (BCE, proleptic Gregorian) year renders as a `-` followed by
-/// its magnitude, zero-padded to four digits (`-5` → `-0005`) — `{year:04}`
-/// alone would zero-pad the *whole* signed value including the sign
-/// character, producing a three-digit magnitude (`-005`). A year at or
-/// beyond `10000` simply prints all its digits, as the zero-padding is a
-/// minimum width, not a truncation.
+/// Render the vtable's datetime tuple in the format specified for dynamic
+/// datetimes. Negative years pad the magnitude separately so `-5` becomes
+/// `-0005`; years at least `10000` are not truncated.
 #[allow(clippy::type_complexity)] // the vtable's datetime tuple, taken as-is
 fn datetime_text(
     parts: (i32, u8, u8, u8, u8, u8, u32, DynDateTimeKind),
@@ -587,8 +536,7 @@ fn datetime_text(
         DynDateTimeKind::LocalDateTime => format!("{date}T{time}"),
         DynDateTimeKind::LocalDate => date,
         DynDateTimeKind::LocalTime => time,
-        // `DynDateTimeKind` is non_exhaustive: refuse unknown kinds rather
-        // than emit text whose meaning this crate cannot vouch for.
+        // Refuse future kinds rather than emit ambiguous text.
         other => {
             return Err(SerializeError::UnsupportedDynamicKind(format!(
                 "DateTime({other:?})"
@@ -600,12 +548,9 @@ fn datetime_text(
 /// The textual form of a `facet_value::Value` QName or UUID, or `None` when
 /// `peek` is not a `facet_value::Value` holding one of those kinds.
 ///
-/// A UUID renders as canonical hyphenated lowercase hex (8-4-4-4-12). A QName
-/// renders in Clark notation — `{namespace}local` — or as the bare local name
-/// when it has no namespace. An empty-string namespace is treated the same as
-/// no namespace: Clark notation reserves the empty-braces form for "no
-/// namespace", so `VQName::new("", local)` and `VQName::new_local(local)`
-/// must render — and therefore hash to — the same blob.
+/// UUIDs use canonical lowercase hyphenated hex; QNames use Clark notation
+/// only for non-empty namespaces. Empty and absent namespaces therefore hash
+/// to the same blob.
 #[cfg(feature = "value")]
 fn value_special_text(peek: Peek<'_, '_>) -> Result<Option<String>, SerializeError> {
     use std::fmt::Write as _;
@@ -620,7 +565,6 @@ fn value_special_text(peek: Peek<'_, '_>) -> Result<Option<String>, SerializeErr
             if matches!(i, 4 | 6 | 8 | 10) {
                 s.push('-');
             }
-            // Writing to a String is infallible.
             let _ = write!(s, "{byte:02x}");
         }
         return Ok(Some(s));
@@ -681,10 +625,8 @@ impl FloatScalar for f64 {
 
 /// Canonical blob text of a float.
 ///
-/// Every NaN payload collapses to `nan` and negative zero to positive zero, so
-/// numerically equal values always produce byte-identical blobs — and thus
-/// equal object ids. Shared by the typed scalar path ([`scalar_bytes`]) and
-/// the dynamic number path ([`serialize_dynamic`]).
+/// Normalizes NaN and negative zero so equivalent values share one blob and
+/// object id. Used by typed scalars and dynamic numbers.
 pub(crate) fn float_text<F: FloatScalar>(v: F) -> Vec<u8> {
     if v.is_nan() {
         return b"nan".to_vec();
@@ -695,19 +637,10 @@ pub(crate) fn float_text<F: FloatScalar>(v: F) -> Vec<u8> {
 
 /// Write `content` as a leaf blob, with exactly one trailing `\n` appended.
 ///
-/// Every leaf blob — a scalar ([`scalar_bytes`]), a byte sequence, a unit
-/// enum variant's name blob, and their dynamic/schema-directed counterparts —
-/// goes through this function, per `serialization.design.leaves.encoding`.
-/// The rule is "exactly one, always present", not "at most one": the byte is
-/// appended unconditionally, even when `content` already ends in `\n`, which
-/// is what makes the transform exactly invertible by
-/// [`crate::de::strip_leaf_newline`] on read. Without the unconditional
-/// append, `"x"` and `"x\n"` would collide on the same blob and the
-/// transform would not be lossless.
-///
-/// The [presence marker](crate::marker) is a different, structural object —
-/// not a value leaf — and MUST NOT be routed through this function; it stays
-/// the literal empty blob.
+/// Appends exactly one newline to every value leaf, unconditionally. This
+/// preserves the distinction between content ending in `\n` and content that
+/// does not; the structural presence marker is intentionally excluded and
+/// remains the empty blob.
 pub(crate) fn write_leaf_blob<W: Write + ?Sized>(
     store: &W,
     content: &[u8],
@@ -730,12 +663,10 @@ fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, SerializeError> {
         return Err(SerializeError::UnsupportedScalar(shape.type_identifier));
     }
 
-    // Strings: verbatim UTF-8 bytes
     if let Some(s) = peek.as_str() {
         return Ok(s.as_bytes().to_vec());
     }
 
-    // Use Display for everything else, with special float/bool/char handling
     if let facet::Type::Primitive(pt) = shape.ty {
         use facet::{NumericType, PrimitiveType, TextualType};
         match pt {
@@ -749,7 +680,6 @@ fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, SerializeError> {
                 return Ok(v.encode_utf8(&mut buf).as_bytes().to_vec());
             }
             PrimitiveType::Textual(TextualType::Str) => {
-                // handled above by as_str(); shouldn't reach here
                 if let Some(s) = peek.as_str() {
                     return Ok(s.as_bytes().to_vec());
                 }
@@ -765,10 +695,8 @@ fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, SerializeError> {
                 }
             }
             PrimitiveType::Numeric(NumericType::Integer { .. }) => {
-                // Every integer width is its `Display` form, which `Peek` forwards
-                // to the underlying value. Dispatching on layout size and calling
-                // `get::<iN>()` would reject `isize`/`usize`, which share a size
-                // with `i64`/`u64` but are a distinct type to `Peek::get`.
+                // Display also handles `isize`/`usize`, which are distinct from
+                // same-sized fixed-width types to `Peek::get`.
                 return Ok(peek.to_string().into_bytes());
             }
             _ => {}
