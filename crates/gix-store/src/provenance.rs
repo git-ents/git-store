@@ -6,11 +6,9 @@ use facet_git_tree::ObjectId;
 
 use crate::error::Error;
 
-/// The schema commit a data commit records in its `Schema:` trailer — a label
-/// for `git log`, not an object to follow. It is not reachable from the data
-/// commit and may not be present in this repository at all; that is exactly
-/// why the schema also travels in the commit's own `schema/` subtree, which
-/// is what every read uses.
+/// Identifies the schema version associated with a stored value.
+///
+/// The label is metadata for history; reads use the schema bound to the value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaLabel(ObjectId);
 

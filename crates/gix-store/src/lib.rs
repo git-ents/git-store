@@ -1,17 +1,13 @@
-//! Store *anything* in Git as a real tree the stock plumbing can read.
+//! Store structured values in Git with versioned schemas.
 //!
-//! A kind is a published [`Schema`]; its entities are commit chains whose
-//! tree is a `{value/, schema/}` split, so the schema an entity was written
-//! against travels with it through any fetch. [`Store`] is generic over a
-//! [`RefStore`] and a `gix_object` `Find`/`Write` object database, with
-//! [`RepoStore`] as the specialization over a real `gix::Repository`.
+//! Values remain readable against the schema bound to each stored version, and
+//! schema migrations are applied when values are read without rewriting the
+//! stored objects. [`Store`] works with configurable ref and object backends;
+//! [`RepoStore`] provides the integration for a `gix::Repository`.
 //!
-//! [`tree`] is the tree and schema format used by this crate.
-//! [`Store::kind`] hands out a [`Kind`] typed to a `Facet`-derived Rust type;
-//! [`Store::dynamic`] hands out one that reads and writes
-//! [`facet_value::Value`] under the kind's published schema instead.
-//! [`Store::with_signer`] covers every commit the store writes with a
-//! [`Signer`]'s opaque bytes, which the store carries and never interprets.
+//! [`tree`] documents the tree format used by this crate. [`Store::kind`]
+//! provides typed access, while [`Store::dynamic`] provides access through
+//! [`facet_value::Value`].
 #![forbid(unsafe_code)]
 
 mod document;

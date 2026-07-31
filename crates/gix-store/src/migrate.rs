@@ -1,12 +1,7 @@
-//! Migrations as they live in a repository: derived when a schema advances,
-//! stored in the advancing schema commit's own tree, and applied at read time.
+//! Schema migrations are applied when values are read.
 //!
-//! Placing a migration in the schema commit rather than at a ref of its own is
-//! what keeps it travelling: a value's commit binds its schema tree, the
-//! schema commit carrying that tree also carries the migration off its
-//! predecessor, so fetching one data ref brings the schema *and* the lineage
-//! needed to upcast it. A separate migration ref would reintroduce exactly the
-//! "data does not travel" failure the `{schema/, value/}` split exists to fix.
+//! Existing Git objects are preserved; newer schema versions are used to
+//! transform older values in memory.
 
 use facet_git_tree::{Edge, Migration, ObjectId, Schema, apply_chain};
 use facet_value::Value;

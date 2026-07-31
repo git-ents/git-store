@@ -38,12 +38,9 @@ impl Default for Layout {
 /// A content-addressed store layered over a [`RefStore`] and an object
 /// database.
 ///
-/// Every kind is a published [`Schema`](facet_git_tree::Schema); every
-/// entity is a commit chain whose tree is `{value/, schema/}` — the encoded
-/// entity, and the tree of the schema it was validated against. Binding the
-/// schema by subtree rather than by parent or trailer keeps it reachable by
-/// ordinary tree traversal, so a fetch of just the data ref brings the schema
-/// along for free.
+/// Stored values retain the schema version they were validated against. Reads
+/// use that bound schema, and schema migrations transform values at read time
+/// without rewriting existing Git objects.
 pub struct Store<R, O> {
     refs: R,
     objects: O,
