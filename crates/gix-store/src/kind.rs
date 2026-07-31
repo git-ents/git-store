@@ -303,8 +303,21 @@ where
     }
 
     /// Decode every entity published under this kind, ascending by name.
-    pub fn entries(&self) -> Result<Vec<(RefPath, Entry<E::Value>)>, Error> {
-        self.list_entries()?
+    pub fn entries(&self) -> Result<NamedEntries<E::Value>, Error> {
+        self.entries_from(self.list_entries()?)
+    }
+
+    /// [`entries`](Self::entries) narrowed to the entities nested under
+    /// `group`, the bulk form of [`list_under`](Self::list_under).
+    pub fn entries_under(&self, group: &RefPath) -> Result<NamedEntries<E::Value>, Error> {
+        self.entries_from(self.list_entries_in(self.group_prefix(group))?)
+    }
+
+    fn entries_from(
+        &self,
+        entries: Vec<(RefPath, ObjectId)>,
+    ) -> Result<NamedEntries<E::Value>, Error> {
+        entries
             .into_iter()
             .map(|(name, commit)| Ok((name, self.get_entry_at(commit)?)))
             .collect()
@@ -337,13 +350,17 @@ where
     /// scanning only that subtree's refs instead of every entity of the kind.
     /// Names come back in full, `group` included.
     pub fn list_under(&self, group: &RefPath) -> Result<Vec<RefPath>, Error> {
-        let prefix = group
+        self.list_in(self.group_prefix(group))
+    }
+
+    /// The ref prefix the entities nested under `group` live beneath.
+    fn group_prefix(&self, group: &RefPath) -> RefPrefix {
+        group
             .segments()
             .iter()
             .fold(self.entities.clone(), |prefix, segment| {
                 prefix.child(segment)
-            });
-        self.list_in(prefix)
+            })
     }
 
     fn list_in(&self, prefix: RefPrefix) -> Result<Vec<RefPath>, Error> {
@@ -436,6 +453,10 @@ pub struct Entry<V> {
     /// [`gix::objs::CommitRef::message_summary`].
     pub message: String,
 }
+
+/// Named entries as the bulk readers return them: entity name paired with the
+/// [`Entry`] read at that name, ascending by name.
+pub type NamedEntries<V> = Vec<(RefPath, Entry<V>)>;
 
 /// A kind's schema ref.
 pub struct KindSchema<'s, R, O> {

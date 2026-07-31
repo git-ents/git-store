@@ -21,7 +21,7 @@ mod store;
 pub use document::{DocumentBuilder, DocumentError};
 pub use encoding::{Dynamic, Encoding, Typed};
 pub use error::{Error, Subtree};
-pub use kind::{Entry, Kind, KindSchema, Put, entity_name, entity_name_under};
+pub use kind::{Entry, Kind, KindSchema, NamedEntries, Put, entity_name, entity_name_under};
 pub use provenance::SchemaLabel;
 pub use store::{Layout, RepoStore, Store};
 
