@@ -157,9 +157,7 @@ where
     /// [`get_entry`](Self::get_entry) for one data commit directly, read
     /// entirely out of that commit's own tree.
     pub fn get_entry_at(&self, commit: ObjectId) -> Result<Entry<E::Value>, Error> {
-        let (root, message) = self.store.commit_tree_and_summary(commit)?;
-        let (value_tree, schema_tree) = self.store.split(root, commit)?;
-        let doc = Schema::read_pinned(&schema_tree, self.store.objects())?;
+        let (value_tree, _schema_tree, doc, message) = self.read_bound(commit)?;
         let value = E::read(&value_tree, &doc, self.store.objects())?;
         Ok(Entry {
             value,
@@ -204,9 +202,7 @@ where
 
     /// [`get_entry_migrated`](Self::get_entry_migrated) for one data commit.
     pub fn get_entry_at_migrated(&self, commit: ObjectId) -> Result<Entry<Value>, Error> {
-        let (root, message) = self.store.commit_tree_and_summary(commit)?;
-        let (value_tree, schema_tree) = self.store.split(root, commit)?;
-        let doc = Schema::read_pinned(&schema_tree, self.store.objects())?;
+        let (value_tree, schema_tree, doc, message) = self.read_bound(commit)?;
         let value = deserialize_value_with_schema(&value_tree, &doc, self.store.objects())?;
         let value = self.schema().upcast(&value, &schema_tree)?;
         Ok(Entry {
@@ -214,6 +210,13 @@ where
             commit,
             message,
         })
+    }
+
+    fn read_bound(&self, commit: ObjectId) -> Result<(ObjectId, ObjectId, Schema, String), Error> {
+        let (root, message) = self.store.commit_tree_and_summary(commit)?;
+        let (value_tree, schema_tree) = self.store.split(root, commit)?;
+        let doc = Schema::read_pinned(&schema_tree, self.store.objects())?;
+        Ok((value_tree, schema_tree, doc, message))
     }
 
     /// An entity's commits, tip-first along first parents; empty when absent.
