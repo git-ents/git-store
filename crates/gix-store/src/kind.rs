@@ -380,41 +380,39 @@ where
     /// remove-plus-add pair be recognised as the rename it actually is.
     pub fn write(&self, doc: &Schema, hints: &Hints) -> Result<ObjectId, Error> {
         self.check_identity_subtrees(doc)?;
-        let previous = match self
-            .store
-            .refs()
-            .read(&self.reference)
-            .map_err(Error::backend)?
-        {
-            Some(tip) => {
-                let tree = self.store.commit_tree(tip)?;
-                // A tip pinned to a schema-schema this binary does not
-                // recognize is refused: publishing over it would silently
-                // replace a document whose meaning was never established
-                // here. A tip that is unpinned or otherwise unreadable stays
-                // overwritable — republishing is the migration path those
-                // errors name.
-                if let Err(err @ SchemaPinError::Unrecognized { .. }) =
-                    Schema::read_pin(&tree, self.store.objects())
-                {
-                    return Err(err.into());
-                }
-                Schema::read_pinned(&tree, self.store.objects()).ok()
-            }
-            None => None,
-        };
-        let mut tree = doc.write_pinned(self.store.objects())?;
-        // An edge this build can derive completely is recorded; a partial one
-        // is not, and the gap surfaces at read time as MigrationMissing
-        // naming the commit, rather than as a silently lossy upcast here.
-        if let Some(previous) = previous
-            && let Derivation::Complete(migration) = derive(&previous, doc, hints)
-        {
-            let written = migration.write_pinned(self.store.objects())?;
-            tree = self.store.bind_migration(tree, written)?;
-        }
         let message = format!("schema {}\n", self.kind);
-        self.store.commit_forward(&self.reference, &message, tree)
+        self.store
+            .commit_forward(&self.reference, &message, |parent| {
+                let previous = match parent {
+                    Some(tip) => {
+                        let tree = self.store.commit_tree(tip)?;
+                        // A tip pinned to a schema-schema this binary does not
+                        // recognize is refused: publishing over it would silently
+                        // replace a document whose meaning was never established
+                        // here. A tip that is unpinned or otherwise unreadable stays
+                        // overwritable — republishing is the migration path those
+                        // errors name.
+                        if let Err(err @ SchemaPinError::Unrecognized { .. }) =
+                            Schema::read_pin(&tree, self.store.objects())
+                        {
+                            return Err(err.into());
+                        }
+                        Schema::read_pinned(&tree, self.store.objects()).ok()
+                    }
+                    None => None,
+                };
+                let mut tree = doc.write_pinned(self.store.objects())?;
+                // An edge this build can derive completely is recorded; a partial one
+                // is not, and the gap surfaces at read time as MigrationMissing
+                // naming the commit, rather than as a silently lossy upcast here.
+                if let Some(previous) = previous
+                    && let Derivation::Complete(migration) = derive(&previous, doc, hints)
+                {
+                    let written = migration.write_pinned(self.store.objects())?;
+                    tree = self.store.bind_migration(tree, written)?;
+                }
+                Ok(tree)
+            })
     }
 
     /// Refuse a schema whose identity- or key-bearing subtree leaves the
@@ -499,7 +497,7 @@ where
         let default = || format!("store {}/{name}", kind.name);
         let (message, tree) = self.build(default)?;
         kind.store
-            .commit_forward(&kind.reference(name), &message, tree)
+            .commit_forward(&kind.reference(name), &message, |_| Ok(tree))
     }
 
     fn build(self, default_summary: impl FnOnce() -> String) -> Result<(String, ObjectId), Error> {

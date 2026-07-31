@@ -282,16 +282,17 @@ where
         Ok((value, schema))
     }
 
-    /// Commit `tree` forward over the current tip of `name`, retrying on a
-    /// lost compare-and-swap race.
+    /// Build and commit a tree forward over the current tip of `name`,
+    /// retrying on a lost compare-and-swap race.
     pub(crate) fn commit_forward(
         &self,
         name: &RefName,
         message: &str,
-        tree: ObjectId,
+        mut build_tree: impl FnMut(Option<ObjectId>) -> Result<ObjectId, Error>,
     ) -> Result<ObjectId, Error> {
         loop {
             let parent = self.refs.read(name).map_err(Error::backend)?;
+            let tree = build_tree(parent)?;
             let commit = self.write_commit(message, tree, parent)?;
             let edit = match parent {
                 Some(expected) => RefEdit::Update {
