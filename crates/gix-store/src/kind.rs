@@ -292,6 +292,22 @@ where
         self.list_in(self.entities.clone())
     }
 
+    /// The entity names and commit IDs published under this kind, ascending.
+    ///
+    /// The commit IDs are the values of the entity refs, so callers can decode
+    /// entries without resolving each ref a second time.
+    pub fn list_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
+        self.list_entries_in(self.entities.clone())
+    }
+
+    /// Decode every entity published under this kind, ascending by name.
+    pub fn entries(&self) -> Result<Vec<(RefPath, Entry<E::Value>)>, Error> {
+        self.list_entries()?
+            .into_iter()
+            .map(|(name, commit)| Ok((name, self.get_entry_at(commit)?)))
+            .collect()
+    }
+
     /// [`list`](Self::list) narrowed to the entities nested under `group`,
     /// scanning only that subtree's refs instead of every entity of the kind.
     /// Names come back in full, `group` included.
@@ -306,19 +322,29 @@ where
     }
 
     fn list_in(&self, prefix: RefPrefix) -> Result<Vec<RefPath>, Error> {
-        let mut names: Vec<RefPath> = self
+        Ok(self
+            .list_entries_in(prefix)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect())
+    }
+
+    fn list_entries_in(&self, prefix: RefPrefix) -> Result<Vec<(RefPath, ObjectId)>, Error> {
+        let mut entries: Vec<(RefPath, ObjectId)> = self
             .store
             .refs()
             .prefixed(&prefix)
             .map_err(Error::backend)?
             .into_iter()
-            .filter_map(|(name, _)| name.relative_to(&self.entities))
+            .filter_map(|(name, commit)| {
+                name.relative_to(&self.entities).map(|name| (name, commit))
+            })
             .collect();
         // `prefixed` is ascending by *ref name*, which orders `a/b` against
         // `a-b` by the separator byte; `RefPath` orders segment by segment.
         // Sort so the result agrees with the type it is returned as.
-        names.sort();
-        Ok(names)
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Ok(entries)
     }
 
     /// Delete an entity's ref. Returns whether it existed.
