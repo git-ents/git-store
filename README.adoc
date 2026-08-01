@@ -1,0 +1,50 @@
+= 🫙 `git-store`
+:author: Joey Carpinelli
+:email: joseph.carpinelli@icloud.com
+:description: Typed documents stored as Git trees, thanks to `facet.rs` reflection in Rust.
+
+== Motivation
+
+// Storing documents which relate to code alongside code is desirable.
+
+== History of Metadata in Git
+
+// Discuss chronologically...
+//
+// . `git-notes`
+// . `git-metadata`
+// . `git-bug`
+// . `git-appraise`
+// . `git-branchless`
+// . `radicle`
+// . Gerrit
+//
+// Or, alternatively, categorize the above projects...
+//
+// . Fan-out Indices as Refs
+// . JSON-like storage in Blobs
+// . Project Maintenance via Remote Helpers
+
+== Review of Data Storage
+
+// Chapter of Designing Data Intensive Applications, including...
+//
+// . Storage
+// . Queries
+// . Wire Format
+//
+// Also, include a kind of chronology from the textbook.
+// When building a database solution, you want the following properties...
+//
+// . Schema Evolution
+// . Stable Wire Format
+// . Support for Multiple Programming Languages
+
+== Typed Documents via Reflection
+
+// Present the following pieces...
+//
+// . Reflection in Rust
+// . Dynamic Encodings in Rust
+// . Stable Codec
+// . Schema Evolution as Commit Merges
