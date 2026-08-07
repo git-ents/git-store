@@ -1,0 +1,1 @@
+Adversarial review of the gix-store and git-store crates (facet-git-tree internals assumed sound). Focus: concurrency of the ref-CAS write paths, the materialized per-kind index, migration chain walking, and the CLI surface.
