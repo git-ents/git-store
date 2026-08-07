@@ -1,0 +1,31 @@
+
+pub reviewed(B).
+pub unreviewed(Rev, B).
+pub blocked(Rev).
+pub mergeable(Rev).
+
+active_member(M)  :- member(M), !revoked(M).
+review_claim(C)   :- claim(C), kind(C, review).
+
+approved_by(B, M) :- review_claim(C), target(C, B), signer(C, M),
+                     verdict(C, approve), active_member(M).
+rejected(B)       :- review_claim(C), target(C, B), verdict(C, reject),
+                     signer(C, M), active_member(M).
+reviewed(B)       :- approved_by(B, _).
+
+reach(Rev, Rev) :- commit(Rev).
+reach(Rev, C)   :- reach(Rev, X), parent(X, C).
+
+has_parent(C)         :- parent(C, _).
+introduced(Rev, B, C) :- reach(Rev, C), tree_entry(C, P, B),
+                         parent(C, Pc), !tree_entry(Pc, P, B).
+introduced(Rev, B, C) :- reach(Rev, C), tree_entry(C, P, B), !has_parent(C).
+authored(Rev, B, M)   :- introduced(Rev, B, C), author(C, M).
+self_approved(Rev, B, M) :- authored(Rev, B, M), approved_by(B, M).
+
+unreviewed(Rev, B) :- tree_entry(Rev, _, B), !reviewed(B).
+blocked(Rev)       :- unreviewed(Rev, _).
+blocked(Rev)       :- tree_entry(Rev, _, B), rejected(B).
+blocked(Rev)       :- tree_entry(Rev, _, B), self_approved(Rev, B, _).
+mergeable(Rev)     :- commit(Rev), !blocked(Rev).
+
