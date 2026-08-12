@@ -1,12 +1,13 @@
 use facet::{Def, Shape, Type, UserType};
 
-use crate::RawTree;
+use crate::{RawBlob, RawTree};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShapeClass {
     TransparentPointer,
     TransparentNewtype,
     RawTree,
+    RawBlob,
     Dynamic,
     Scalar,
     Bytes,
@@ -50,6 +51,9 @@ pub(crate) fn classify(shape: &'static Shape) -> ShapeClass {
     let shape = collapse_shape(shape);
     if shape.is_type::<RawTree>() {
         return ShapeClass::RawTree;
+    }
+    if shape.is_type::<RawBlob>() {
+        return ShapeClass::RawBlob;
     }
     if matches!(shape.def, Def::DynamicValue(_)) {
         return ShapeClass::Dynamic;

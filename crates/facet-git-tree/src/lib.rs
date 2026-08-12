@@ -16,6 +16,7 @@ mod error;
 mod marker;
 pub mod migration;
 pub mod normal_form;
+mod raw_blob;
 mod raw_tree;
 pub mod schema;
 mod ser;
@@ -39,6 +40,7 @@ pub use normal_form::{
     IDENTITY_DEF_PREFIX, Key, NormalForm, check_identity_subtrees, check_universe,
     check_universe_at, identity_subtrees,
 };
+pub use raw_blob::RawBlob;
 pub use raw_tree::RawTree;
 pub use schema::pin::SchemaSchema;
 #[cfg(feature = "value")]

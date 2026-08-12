@@ -9,7 +9,7 @@ use crate::de::MAX_DEPTH;
 use crate::error::SerializeError;
 use crate::schema::scalar_node;
 use crate::store::ObjectStore;
-use crate::{EntryKind, EntryMode, ObjectId, RawTree, TreeEntry};
+use crate::{EntryKind, EntryMode, ObjectId, RawBlob, RawTree, TreeEntry};
 
 /// Collapse a `facet` reflection error to [`SerializeError::Reflect`].
 ///
@@ -88,6 +88,10 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
         ShapeClass::RawTree => {
             let rt = peek.get::<RawTree>().map_err(reflect)?;
             Ok((rt.oid(), EntryKind::Tree))
+        }
+        ShapeClass::RawBlob => {
+            let rb = peek.get::<RawBlob>().map_err(reflect)?;
+            Ok((rb.oid(), EntryKind::Blob))
         }
         ShapeClass::Dynamic => serialize_dynamic(peek, store, depth),
         ShapeClass::Scalar => serialize_leaf(peek, store),

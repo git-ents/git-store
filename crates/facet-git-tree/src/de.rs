@@ -10,7 +10,7 @@ use gix_object::{Data, Find, Kind};
 pub(crate) use crate::classify::collapse_shape;
 use crate::classify::{ShapeClass, classify, is_byte_seq};
 use crate::error::{DeserializeError, KeyError};
-use crate::{EntryKind, ObjectId, RawTree};
+use crate::{EntryKind, ObjectId, RawBlob, RawTree};
 
 /// Collapse a `facet` reflection error to [`DeserializeError::Reflect`].
 ///
@@ -362,6 +362,18 @@ fn deser_into<'facet, F: Find + ?Sized>(
             return Err(DeserializeError::NotATree(*oid));
         }
         return partial.set(RawTree::new(*oid)).map_err(reflect);
+    }
+
+    // RawBlob: capture the child entry's object id without decoding its
+    // contents. Verify that the referenced object is a blob so malformed or
+    // foreign trees fail fast with `NotABlob`.
+    if matches!(classify(shape), ShapeClass::RawBlob) {
+        let mut buf = Vec::new();
+        let data = find_object(oid, &mut buf, store)?;
+        if data.kind != Kind::Blob {
+            return Err(DeserializeError::NotABlob(*oid));
+        }
+        return partial.set(RawBlob::new(*oid)).map_err(reflect);
     }
 
     // Dynamic value (`Def::DynamicValue`, e.g. `facet_value::Value`): the
