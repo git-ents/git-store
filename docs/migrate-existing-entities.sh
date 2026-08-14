@@ -1,16 +1,70 @@
 #!/usr/bin/env bash
-# Purpose: republish the current live non-issue documents into canonical refs.
-# Date: 2026-08-14
-# Existing aliases and history are never deleted.
+# Migration anchor: 2026-08-14, design-alignment non-issue entity backfill.
+# This is the exact plumbing transcript for the live repositories. It never
+# deletes old aliases, publication commits, or schema history.
+#
+# Each legacy value is explicitly decoded, encoded against the current schema,
+# bound into a self-contained document, and published with the old publication
+# commit as its first parent. The CLI intentionally has no migrate workflow;
+# this Bash composition is the workflow.
 
 set -euo pipefail
 
 GIT_STORE="${GIT_STORE:-git store}"
 
 store() {
-  # Allow GIT_STORE to name a shell function or contain a command with arguments.
+  # GIT_STORE may be a command plus arguments, e.g. `git store` or
+  # `/path/to/git-store`.
   # shellcheck disable=SC2086
   $GIT_STORE "$@"
+}
+
+normalize_schema() {
+  local data_prefix=$1
+  local kind=$2
+
+  # A strict inspection is the feature probe. Legacy schema documents are
+  # explicitly opted into, then immediately republished in the current format.
+  if store --data-prefix "$data_prefix" --schema-prefix refs/schema \
+    schema inspect "$kind" --at "refs/schema/$kind" >/dev/null 2>&1; then
+    return
+  fi
+
+  store --data-prefix "$data_prefix" --schema-prefix refs/schema \
+    schema get "$kind" --legacy-leaves \
+    | store --data-prefix "$data_prefix" --schema-prefix refs/schema \
+      schema put "$kind"
+}
+
+migrate_document() {
+  local data_prefix=$1
+  local kind=$2
+  local parent=$3
+  local legacy_document=$4
+
+  local value_json value_tree document_tree
+  value_json=$(store --data-prefix "$data_prefix" --schema-prefix refs/schema \
+    get "$legacy_document" --legacy-leaves)
+  value_tree=$(printf '%s\n' "$value_json" \
+    | store --data-prefix "$data_prefix" --schema-prefix refs/schema \
+      value encode --schema "refs/schema/$kind")
+  document_tree=$(store --data-prefix "$data_prefix" --schema-prefix refs/schema \
+    document bind "$value_tree" --schema "refs/schema/$kind")
+
+  store --data-prefix "$data_prefix" --schema-prefix refs/schema \
+    document inspect "$document_tree"
+
+  # The derived root is the entity identity. This makes the transcript safe to
+  # resume after a successful publication without overwriting anything.
+  if git show-ref --verify --quiet \
+    "refs/${data_prefix#refs/}/$kind/$document_tree"; then
+    printf 'already published %s/%s/%s\n' "$data_prefix" "$kind" "$document_tree" >&2
+    return
+  fi
+
+  store --data-prefix "$data_prefix" --schema-prefix refs/schema \
+    document publish "$kind" "$document_tree" \
+    --parent "$parent" --expected absent
 }
 
 repository_root=$(git rev-parse --show-toplevel)
@@ -19,131 +73,65 @@ repository_name=$(basename "$repository_root")
 case "$repository_name" in
 git-store)
   # Source alias: refs/forge/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08
-  # Canonical root: refs/forge/review/d8a60c419fae0d7ee474d5b507a49bce2951ca73
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect d8a60c419fae0d7ee474d5b507a49bce2951ca73
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish review d8a60c419fae0d7ee474d5b507a49bce2951ca73 \
-    --parent 1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08 \
-    --expected absent
+  # Legacy document root: d8a60c419fae0d7ee474d5b507a49bce2951ca73
+  # Canonical root is derived after re-encoding under current review schema.
+  normalize_schema refs/forge review
+  migrate_document refs/forge review \
+    1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08 \
+    d8a60c419fae0d7ee474d5b507a49bce2951ca73
 
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/0c968682dc05c1eafda06b5c71e0677b2574fbe8
-  # Canonical root: refs/forge/comment/0dc9213fcf347778ca531d1897e3348cfd920cf4
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect 0dc9213fcf347778ca531d1897e3348cfd920cf4
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment 0dc9213fcf347778ca531d1897e3348cfd920cf4 \
-    --parent 0c968682dc05c1eafda06b5c71e0677b2574fbe8 \
-    --expected absent
-
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/1777e0242a9ec45e1aa5cb40c5d6279a76d73df4
-  # Canonical root: refs/forge/comment/a0fc118dcf1cd139428ba6ef829f43c63d6994ca
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect a0fc118dcf1cd139428ba6ef829f43c63d6994ca
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment a0fc118dcf1cd139428ba6ef829f43c63d6994ca \
-    --parent 1777e0242a9ec45e1aa5cb40c5d6279a76d73df4 \
-    --expected absent
-
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/35c1bc853aa91880193ea1c47fe5e0cbb694fd4a
-  # Canonical root: refs/forge/comment/79421d97a565d0e0d0e5728b35697eada4f6bafc
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect 79421d97a565d0e0d0e5728b35697eada4f6bafc
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment 79421d97a565d0e0d0e5728b35697eada4f6bafc \
-    --parent 35c1bc853aa91880193ea1c47fe5e0cbb694fd4a \
-    --expected absent
-
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/6c23a057d2f9d00ab4c7d78da70665effebc09
-  # Canonical root: refs/forge/comment/3f549a0c82e17a408740ac69232ab5e73f17eb80
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect 3f549a0c82e17a408740ac69232ab5e73f17eb80
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment 3f549a0c82e17a408740ac69232ab5e73f17eb80 \
-    --parent 6c23a057d2f9d00ab4c7d78da70665effebc09 \
-    --expected absent
-
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/72300fbc8e16d3feb88ea6dc2fa7bbc5a03b1780
-  # Canonical root: refs/forge/comment/63bfb2a8c39a514b2320b4ba016a5b8e71721d68
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect 63bfb2a8c39a514b2320b4ba016a5b8e71721d68
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment 63bfb2a8c39a514b2320b4ba016a5b8e71721d68 \
-    --parent 72300fbc8e16d3feb88ea6dc2fa7bbc5a03b1780 \
-    --expected absent
-
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/9c16a6a2933a7e72dd9ebe51d7f3ee9d9d6a8b7d
-  # Canonical root: refs/forge/comment/53896aa32383ee44782ff3eadc57304d9ebc1f6f
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect 53896aa32383ee44782ff3eadc57304d9ebc1f6f
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment 53896aa32383ee44782ff3eadc57304d9ebc1f6f \
-    --parent 9c16a6a2933a7e72dd9ebe51d7f3ee9d9d6a8b7d \
-    --expected absent
-
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/b495599ab78aaf7772f0014b6a8bca4ef40f2740
-  # Canonical root: refs/forge/comment/846e71adba9fd478f9c4ccf1f43324e5674c670c
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect 846e71adba9fd478f9c4ccf1f43324e5674c670c
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment 846e71adba9fd478f9c4ccf1f43324e5674c670c \
-    --parent b495599ab78aaf7772f0014b6a8bca4ef40f2740 \
-    --expected absent
-
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/bd020a37cd60fc44ee12fb5ee8af5584f03a61ac
-  # Canonical root: refs/forge/comment/e40679a67a921a37bad757a845e52b87405776ac
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect e40679a67a921a37bad757a845e52b87405776ac
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment e40679a67a921a37bad757a845e52b87405776ac \
-    --parent bd020a37cd60fc44ee12fb5ee8af5584f03a61ac \
-    --expected absent
-
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/e8615241699c068f5bfc3bee376d990a926606e0
-  # Canonical root: refs/forge/comment/f508c09d097ea8b7b6f71b0284591a0cc517ffd1
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect f508c09d097ea8b7b6f71b0284591a0cc517ffd1
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment f508c09d097ea8b7b6f71b0284591a0cc517ffd1 \
-    --parent e8615241699c068f5bfc3bee376d990a926606e0 \
-    --expected absent
-
-  # Source alias: refs/forge/comment/review/1044d4ed268836b5d39d0b3ad11e4d3bfbd32d08/f869717358423a0a42fd4d3dc5046bfa99ce0df4
-  # Canonical root: refs/forge/comment/265c223328ac474270c5869bb877db21a036ed53
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect 265c223328ac474270c5869bb877db21a036ed53
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish comment 265c223328ac474270c5869bb877db21a036ed53 \
-    --parent f869717358423a0a42fd4d3dc5046bfa99ce0df4 \
-    --expected absent
+  # Source aliases are nested under the review subject. They remain in place;
+  # the new canonical refs are direct refs/forge/comment/<document-tree> refs.
+  normalize_schema refs/forge comment
+  migrate_document refs/forge comment \
+    0c968682dc05c1eafda06b5c71e0677b2574fbe8 \
+    0dc9213fcf347778ca531d1897e3348cfd920cf4
+  migrate_document refs/forge comment \
+    1777e0242a9ec45e1aa5cb40c5d6279a76d73df4 \
+    a0fc118dcf1cd139428ba6ef829f43c63d6994ca
+  migrate_document refs/forge comment \
+    35c1bc853aa91880193ea1c47fe5e0cbb694fd4a \
+    79421d97a565d0e0d0e5728b35697eada4f6bafc
+  migrate_document refs/forge comment \
+    6c23a057d2f9d00ab4c7d78da70665effdfebc09 \
+    3f549a0c82e17a408740ac69232ab5e73f17eb80
+  migrate_document refs/forge comment \
+    72300fbc8e16d3feb88ea6dc2fa7bbc5a03b1780 \
+    63bfb2a8c39a514b2320b4ba016a5b8e71721d68
+  migrate_document refs/forge comment \
+    9c16a6a2933a7e72dd9ebe51d7f3ee9d9d6a8b7d \
+    53896aa32383ee44782ff3eadc57304d9ebc1f6f
+  migrate_document refs/forge comment \
+    b495599ab78aaf7772f0014b6a8bca4ef40f2740 \
+    846e71adba9fd478f9c4ccf1f43324e5674c670c
+  migrate_document refs/forge comment \
+    bd020a37cd60fc44ee12fb5ee8af5584f03a61ac \
+    e40679a67a921a37bad757a845e52b87405776ac
+  migrate_document refs/forge comment \
+    e8615241699c068f5bfc3bee376d990a926606e0 \
+    f508c09d097ea8b7b6f71b0284591a0cc517ffd1
+  migrate_document refs/forge comment \
+    f869717358423a0a42fd4d3dc5046bfa99ce0df4 \
+    265c223328ac474270c5869bb877db21a036ed53
 
   # Source alias: refs/meta/rules/review
-  # Canonical root: refs/meta/rules/33053f7f8c4fca3040dcb85d1dc780315a5398dc
-  store --data-prefix refs/meta \
-    document inspect 33053f7f8c4fca3040dcb85d1dc780315a5398dc
-  store --data-prefix refs/meta \
-    document publish rules 33053f7f8c4fca3040dcb85d1dc780315a5398dc \
-    --parent aa17bc7c79ed4bd992ee664a56dbce362bf6a65e \
-    --expected absent
+  normalize_schema refs/meta rules
+  migrate_document refs/meta rules \
+    aa17bc7c79ed4bd992ee664a56dbce362bf6a65e \
+    33053f7f8c4fca3040dcb85d1dc780315a5398dc
   ;;
 git-forge)
   # Source alias: refs/forge/member/503bd6f4150c1edd020219847dcb3197bff91aea
-  # Canonical root: refs/forge/member/6d5d32330aa0721159f71ed7fc429376a5d3477c
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document inspect 6d5d32330aa0721159f71ed7fc429376a5d3477c
-  store --data-prefix refs/forge --schema-prefix refs/schema \
-    document publish member 6d5d32330aa0721159f71ed7fc429376a5d3477c \
-    --parent 503bd6f4150c1edd020219847dcb3197bff91aea \
-    --expected absent
+  normalize_schema refs/forge member
+  migrate_document refs/forge member \
+    503bd6f4150c1edd020219847dcb3197bff91aea \
+    6d5d32330aa0721159f71ed7fc429376a5d3477c
 
   # Source alias: refs/meta/rules/review
-  # Canonical root: refs/meta/rules/33053f7f8c4fca3040dcb85d1dc780315a5398dc
-  store --data-prefix refs/meta \
-    document inspect 33053f7f8c4fca3040dcb85d1dc780315a5398dc
-  store --data-prefix refs/meta \
-    document publish rules 33053f7f8c4fca3040dcb85d1dc780315a5398dc \
-    --parent adb116625b808d65a2f55139168d9461beb57526 \
-    --expected absent
+  normalize_schema refs/meta rules
+  migrate_document refs/meta rules \
+    adb116625b808d65a2f55139168d9461beb57526 \
+    33053f7f8c4fca3040dcb85d1dc780315a5398dc
   ;;
 *)
   printf 'run this script from the git-store or git-forge repository\n' >&2
