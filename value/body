@@ -1,0 +1,65 @@
+**What**
+Every scalar leaf is its own Git object and every sequence is one flat tree with
+one entry per element. There is no fanout, no packing step, and no batching of
+writes.
+
+**Where**
+`crates/facet-git-tree/src/ser.rs:120-126` (every scalar writes a blob),
+`ser.rs:623-639` (`serialize_sequence`, flat), `ser.rs:167-170` (one
+`store.write` per tree).
+
+**Why it matters**
+Measured on a 5000-element list of short strings - roughly 35 KB of actual data -
+stored through `git store put`:
+
+```
+write:     2.0 s
+read:      0.4 s
+objects:   5097 loose
+on disk:   20.5 MB          (count-objects -v: size 20516)
+list tree: 160 KB           (a single tree object with 5000 entries)
+```
+
+That is a ~600x on-disk amplification and two seconds for something `jq` would
+do in milliseconds. The cause is loose objects: each 8-byte blob costs a
+filesystem block plus a directory entry. `git gc` reclaims most of it, but
+nothing in `gix-store` triggers one, so a repository written by this tool grows
+loose indefinitely until the user happens to run maintenance.
+
+The incremental case is genuinely good and worth keeping - changing one element
+of that list added only 4 objects, which is exactly the dedup property the
+README advertises. The problem is the first write and the steady-state
+footprint, not the delta.
+
+The flat 160 KB tree is the other half: it is rewritten in full on every change
+to any element, and it scales linearly. A 100k-element list means a 3.2 MB tree
+object per version. Git itself hit this problem with large directories and the
+usual answer is fanout (`ab/cdef...` two-level splitting, as Git uses for loose
+object paths and as packed refs avoid entirely).
+
+None of this is a correctness issue and none of it will show on stage with a
+recipe. It matters because "treat a Git repository as a general-purpose
+structured datastore" invites the question "at what scale", and the honest
+current answer is "small", which is fine if it is stated rather than
+discovered.
+
+**Options**
+- Option A - document the cost model and the intended scale in the README, and
+  have `gix-store` opportunistically pack or advise `git gc` after a large
+  write. Cheapest, and turns a surprise into a stated boundary.
+- Option B - write objects through a pack-writing path rather than loose, for
+  writes above a threshold. Trade-off: real work against the `gix` odb API, and
+  it complicates the "any `Find`/`Write` backend" contract that
+  `facet-git-tree` is careful about.
+- Option C - shard large sequences into a fanout tree (`00/0000`, `00/0001`,
+  ...) above some element count. Bounds tree-object size and rewrite cost.
+  Trade-off: an encoding change, and it makes `git ls-tree` output worse for
+  exactly the mid-size lists where it is currently still readable - directly at
+  odds with the legibility pitch.
+
+**Recommendation**
+Option A before the talk - a "Scale" section stating the intended envelope
+(thousands of entities, hundreds of fields, not millions of list elements) is
+honest and pre-empts the question. Medium confidence on C ever being worth it;
+the legibility cost is real and this format is optimized for being read by
+humans, not for holding a million rows.
