@@ -1,0 +1,63 @@
+**What**
+`Schema::Struct(Vec<FieldSchema>)` has no required/optional marker. Both the
+schema-directed writer and the schema-driven reader skip a field whose entry is
+absent, so a value missing most of its fields conforms.
+
+**Where**
+`crates/facet-git-tree/src/schema/mod.rs:127-132` (`FieldSchema` has only
+`name` and `schema`), `crates/facet-git-tree/src/schema/read.rs:268-274`
+(`read_struct` skips missing), `docs/specification.adoc`
+`serialization.schema-directed` ("a field absent from the object is skipped").
+
+**Why it matters**
+Reproduced against the shipped `task` schema, whose four fields are all
+non-optional. Piping the single-field object `{"summary": "x"}` at it:
+
+```
+$ git store put task t3 -F partial.json
+64e7087ecbc08add3d7744121b69cf66d3f52624
+$ git store get task t3
+{
+  "summary": "x"
+}
+```
+
+`done`, `priority`, and `tags` are simply gone, and the write reported success.
+This undercuts the central promise: the reason to publish a schema and pay for
+`refs/schema/<kind>` is that a stored entity is guaranteed to have the declared
+shape. It is not.
+
+Note the asymmetry this creates with the typed decoder. A tree missing a
+non-`Option` field cannot be materialized as the Rust struct - `Partial::build`
+fails and the caller gets a `DeserializeError::Reflect("build failed: ...")`
+with no indication of which field. So the same tree round-trips fine through
+the dynamic path and is unreadable through the typed path. A tree written by
+`git store` may therefore be unreadable by the Rust type its schema was derived
+from, which is precisely the fidelity guarantee `schema_of` is supposed to
+provide.
+
+`Schema::Optional(Box<Schema>)` already exists and is generated for `Option<T>`,
+so the information is present in a derived schema - it is just not *enforced*.
+The write path treats `Bool` and `Optional(Bool)` identically when the key is
+absent, which makes the distinction decorative.
+
+**Options**
+- Option A - require every non-`Optional` field to be present on write. Purely
+  a tightening of the writer, no format change, and it makes `Optional` mean
+  something. Trade-off: breaks any existing partial data, and the specs
+  "matching the read paths leniency" sentence has to change (which is fine -
+  the read leniency exists to tolerate schema drift, a different concern).
+- Option B - add `required: bool` (or `default: Option<Value>`) to
+  `FieldSchema`. More expressive, and defaults would give schema evolution a
+  real story for added fields. Trade-off: semver-major on
+  `schema.representation`.
+- Option C - keep the leniency but make the read path fill absent non-Optional
+  fields with a typed zero value, so at least reads are total. Trade-off: makes
+  up data, which is worse than either alternative.
+
+**Recommendation**
+Option A now, Option B when the schema format next breaks (and if the
+`Schema:`-trailer-to-DAG-edge change happens, that is a natural moment to break
+it once). High confidence: right now `Optional` is the only field-level
+modifier in the format and it has no observable effect on writes, which is a
+strong sign the model is missing a piece.
