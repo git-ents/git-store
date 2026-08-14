@@ -93,7 +93,7 @@ impl MigrationSchema {
 
 /// Hex text for [`MigrationSchema::GENESIS`]'s tree id, kept as a named
 /// constant so it stays human-checkable against the golden-oid test.
-const GENESIS_HEX: &str = "f7f20e16f50e0363863d6322abe6c49a24706711";
+const GENESIS_HEX: &str = "3bb02643cb414a075d29045a74f23428771368a8";
 
 /// The current generation's own migration-schema document —
 /// `schema_of::<Migration>()`, unconditionally describable since it is this

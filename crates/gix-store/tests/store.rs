@@ -10,14 +10,16 @@ use std::convert::Infallible;
 
 use facet::Facet;
 use facet_git_tree::{
-    Constant, DeserializeError, GitObject, Hints, ObjectStore, SchemaPinError, Target, TreeEntry,
-    schema_of,
+    Constant, DeserializeError, GitObject, Hints, Node, ObjectStore, SchemaPinError, StructField,
+    Target, TreeEntry, schema_of,
 };
 use facet_value::value;
+use gix::bstr::ByteSlice;
 use gix_refstore::RefEdit;
 use gix_store::{
-    ApplyError, Committer, Entry, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix,
-    RefSegment, RefStore, Store, Subtree, entity_name, entity_name_under,
+    ApplyError, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
+    EntityState, Entry, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix, RefSegment,
+    RefStore, Store, Subtree, TargetSchema, entity_id_name, entity_name, entity_name_under,
 };
 
 fn seg(s: &str) -> RefSegment {
@@ -55,6 +57,30 @@ fn write_blob(objects: &ObjectStore, data: &[u8]) -> ObjectId {
         },
     )
     .expect("write blob")
+}
+
+fn bound_document(
+    store: &Store<MemoryRefStore, ObjectStore>,
+    value: &facet_value::Value,
+    doc: &facet_git_tree::Schema,
+) -> ObjectId {
+    let schema_tree = doc.write_pinned(store.objects()).expect("write schema");
+    let value_tree = facet_git_tree::serialize_value_with_schema(value, doc, store.objects())
+        .expect("write value");
+    let mut entries = vec![
+        TreeEntry {
+            mode: gix::objs::tree::EntryKind::Tree.into(),
+            filename: "schema".into(),
+            oid: schema_tree,
+        },
+        TreeEntry {
+            mode: gix::objs::tree::EntryKind::Tree.into(),
+            filename: "value".into(),
+            oid: value_tree,
+        },
+    ];
+    entries.sort();
+    gix::objs::Write::write(store.objects(), &gix::objs::Tree { entries }).expect("write document")
 }
 
 /// Write a commit directly against the store's own object database and point
@@ -105,6 +131,12 @@ struct Counter {
     n: u32,
 }
 
+#[derive(Facet)]
+struct CounterWithLabel {
+    n: u32,
+    label: String,
+}
+
 /// A kind whose own top-level field names collide with the two the
 /// `{schema/, value/}` split uses, so the split cannot be confused with the
 /// value it wraps.
@@ -115,10 +147,128 @@ struct Colliding {
 }
 
 #[test]
+fn embedded_document_decodes_without_a_kind_or_publication_ref() {
+    let store = store();
+    let doc = schema_of::<Counter>().unwrap().with_kind("orphan").unwrap();
+    let expected = value!({ "n": 7 });
+    let tree = bound_document(&store, &expected, &doc);
+
+    assert_eq!(store.decode(tree).unwrap(), expected);
+    assert_eq!(gix_store::decode(tree, store.objects()).unwrap(), expected);
+}
+
+#[test]
+fn explicit_schema_value_codecs_round_trip_without_a_kind_handle() {
+    let store = store();
+    let doc = schema_of::<Counter>()
+        .unwrap()
+        .with_kind("counter")
+        .unwrap();
+    let schema_tree = doc.write_pinned(store.objects()).unwrap();
+    let expected = value!({ "n": 7 });
+
+    let value_tree = store.encode_value(&expected, schema_tree).unwrap();
+    assert_eq!(
+        store.decode_value(value_tree, schema_tree).unwrap(),
+        expected
+    );
+    assert!(matches!(
+        store.encode_value(&value!({ "n": "wrong" }), schema_tree),
+        Err(Error::SchemaWrite(_))
+    ));
+}
+
+#[test]
+fn binding_and_inspection_describe_a_prepared_document() {
+    let store = store();
+    let doc = schema_of::<Counter>()
+        .unwrap()
+        .with_kind("counter")
+        .unwrap();
+    let schema_tree = doc.write_pinned(store.objects()).unwrap();
+    let value_tree = store
+        .encode_value(&value!({ "n": 7 }), schema_tree)
+        .unwrap();
+    let prepared = store.bind_document(value_tree, schema_tree).unwrap();
+    assert!(store.kinds().unwrap().is_empty());
+
+    assert_eq!(
+        store.inspect_document(prepared.document_tree()).unwrap(),
+        DocumentInspection::Bound(prepared)
+    );
+    assert_eq!(
+        store.inspect_document(value_tree).unwrap().kind(),
+        DocumentKind::LegacyValueRoot
+    );
+}
+
+#[test]
+fn inspection_reports_malformed_envelopes_without_guessing() {
+    let store = store();
+    let value_tree = store
+        .encode_value(
+            &value!({ "n": 7 }),
+            schema_of::<Counter>()
+                .unwrap()
+                .write_pinned(store.objects())
+                .unwrap(),
+        )
+        .unwrap();
+    let malformed = gix::objs::Write::write(
+        store.objects(),
+        &gix::objs::Tree {
+            entries: vec![TreeEntry {
+                mode: gix::objs::tree::EntryKind::Tree.into(),
+                filename: "value".into(),
+                oid: value_tree,
+            }],
+        },
+    )
+    .unwrap();
+
+    let DocumentInspection::Malformed { found, reason, .. } =
+        store.inspect_document(malformed).unwrap()
+    else {
+        panic!("expected malformed document metadata");
+    };
+    assert_eq!(found, vec!["value"]);
+    assert!(matches!(
+        reason,
+        DocumentShapeError::UnexpectedEntries { found } if found == vec!["value"]
+    ));
+}
+
+#[test]
+fn schema_snapshots_are_owned_and_independent_of_publication_progress() {
+    let store = store();
+    let schema = store.dynamic(seg("counter")).schema();
+    let first = schema_of::<Counter>().unwrap();
+    let first_published = first.clone().with_kind("counter").unwrap();
+    let first_commit = schema.put(&first).unwrap();
+    let first_snapshot = schema.current_snapshot().unwrap();
+
+    let second = schema_of::<CounterWithLabel>().unwrap();
+    let second_published = second.clone().with_kind("counter").unwrap();
+    let second_commit = schema.put(&second).unwrap();
+    let current = schema.current_snapshot().unwrap();
+    let historical = schema.snapshot_at(first_commit).unwrap();
+
+    assert_eq!(first_snapshot.commit(), first_commit);
+    assert_eq!(first_snapshot.schema, first_published);
+    assert_eq!(historical.commit(), first_commit);
+    assert_eq!(historical.schema_tree(), first_snapshot.schema_tree());
+    assert_eq!(current.commit(), second_commit);
+    assert_eq!(current.schema, second_published);
+    assert_ne!(current.schema_tree(), first_snapshot.schema_tree());
+    assert_eq!(historical.schema, first_snapshot.schema);
+}
+
+#[test]
 fn store_retrieve_list_and_schema_roundtrip() {
     let store = store();
 
     let doc = schema_of::<Recipe>().unwrap();
+    let expected = doc.clone().with_kind("recipe").unwrap();
     store.dynamic(seg("recipe")).schema().put(&doc).unwrap();
     assert_eq!(
         store
@@ -127,7 +277,7 @@ fn store_retrieve_list_and_schema_roundtrip() {
             .get()
             .unwrap()
             .as_ref(),
-        Some(&doc)
+        Some(&expected)
     );
 
     let carbonara = value!({ "title": "Carbonara", "serves": 4, "steps": ["boil", "fry"] });
@@ -242,9 +392,6 @@ fn old_versions_stay_readable_after_schema_evolves() {
         .schema()
         .put(&schema_of::<V2>().unwrap())
         .unwrap();
-
-    // The old commit reads back through its own `schema/` subtree.
-    assert_eq!(store.dynamic(seg("thing")).get_at(old_commit).unwrap(), v1);
     // A new value conforming to v2 stores and reads under the evolved schema.
     let v2 = value!({ "name": "new", "rank": 1 });
     store.dynamic(seg("thing")).put(&entity("b"), &v2).unwrap();
@@ -252,6 +399,117 @@ fn old_versions_stay_readable_after_schema_evolves() {
         store.dynamic(seg("thing")).get(&entity("b")).unwrap(),
         Some(v2)
     );
+
+    let current_schema_ref = RefName::new("refs/schema/thing").unwrap();
+    let current_schema_commit = store
+        .refs()
+        .read(&current_schema_ref)
+        .unwrap()
+        .expect("the evolved schema ref should exist");
+    store
+        .refs()
+        .apply(RefEdit::Delete {
+            name: current_schema_ref,
+            expected: current_schema_commit,
+        })
+        .unwrap();
+
+    // The old commit reads back through its own `schema/` subtree, even when
+    // the current schema publication ref is unavailable.
+    assert_eq!(store.dynamic(seg("thing")).schema().get().unwrap(), None);
+    assert_eq!(store.dynamic(seg("thing")).get_at(old_commit).unwrap(), v1);
+
+    let document_tree = match store.objects().get(&old_commit).unwrap() {
+        GitObject::Commit(commit) => commit.tree,
+        other => panic!("expected a commit, got {other:?}"),
+    };
+    assert_eq!(store.decode(document_tree).unwrap(), v1);
+}
+
+#[test]
+fn explicit_target_migration_uses_captured_schema_history() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let old = kind.put(&entity("old"), &value!({ "n": 1 })).unwrap();
+
+    let mut evolved = schema_of::<Counter>().unwrap();
+    let Node::Struct(fields) = evolved.defs.get_mut("Counter").unwrap() else {
+        panic!("Counter schema should have a struct definition");
+    };
+    fields.insert(
+        "label".into(),
+        StructField {
+            node: Node::String,
+            has_default: true,
+        },
+    );
+    let hints = Hints::new().defaulted(
+        Target::Def("Counter".into()),
+        "label",
+        Constant::Text("migrated".into()),
+    );
+    kind.schema().write(&evolved, &hints).unwrap();
+
+    let target = TargetSchema::new(
+        kind.schema().get().unwrap().unwrap(),
+        kind.schema().history().unwrap(),
+    );
+    assert_eq!(
+        kind.get_at_migrated_to(old, &target).unwrap(),
+        value!({ "n": 1, "label": "migrated" })
+    );
+
+    // The explicit target is self-contained. The live schema ref may disappear
+    // after a caller has captured the target and its history.
+    let schema_ref = RefName::new("refs/schema/counter").unwrap();
+    let schema_tip = store.refs().read(&schema_ref).unwrap().unwrap();
+    store
+        .refs()
+        .apply(RefEdit::Delete {
+            name: schema_ref,
+            expected: schema_tip,
+        })
+        .unwrap();
+    assert_eq!(
+        kind.get_at_migrated_to(old, &target).unwrap(),
+        value!({ "n": 1, "label": "migrated" })
+    );
+
+    let unavailable = TargetSchema::new(target.schema().clone(), vec![target.history()[0]]);
+    let err = kind.get_at_migrated_to(old, &unavailable).unwrap_err();
+    assert!(
+        matches!(err, Error::TargetSchemaNotInHistory { .. }),
+        "expected an explicit target-history error, got {err:?}"
+    );
+}
+
+#[test]
+fn tombstone_migrated_read_bypasses_an_unavailable_target() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let id = kind.put_entity(&value!({ "n": 1 })).unwrap();
+    let tombstone = match kind.delete_entity(id).unwrap() {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected tombstone, got {other:?}"),
+    };
+
+    let target = TargetSchema::new(schema_of::<Counter>().unwrap(), Vec::new());
+    let schema_ref = RefName::new("refs/schema/counter").unwrap();
+    let schema_tip = store.refs().read(&schema_ref).unwrap().unwrap();
+    store
+        .refs()
+        .apply(RefEdit::Delete {
+            name: schema_ref,
+            expected: schema_tip,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        kind.read_at_migrated_to(tombstone, &target).unwrap(),
+        EntityState::Deleted(entry) if entry.commit == tombstone
+    ));
 }
 
 #[test]
@@ -304,10 +562,10 @@ fn custom_layout_roundtrips_store_retrieve_and_history() {
             .len(),
         2
     );
-    assert_eq!(
-        store.dynamic(seg("module")).list().unwrap(),
-        vec![entity("a")]
-    );
+    let listed = store.dynamic(seg("module")).list().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.contains(&entity("a")));
+    assert!(listed.iter().any(|name| name != &entity("a")));
     assert_eq!(store.kinds().unwrap(), vec![seg("module")]);
 
     // Refs actually landed under the custom namespace, not the default one.
@@ -334,11 +592,8 @@ fn custom_layout_roundtrips_store_retrieve_and_history() {
     );
 }
 
-/// [`gix_store::provenance::SchemaLabel`] (via [`Store::provenance`]): the
-/// `Schema:` trailer is still written and still parses, but it is provenance
-/// only, distinct from [`gix_store::Kind::get_at`], which never consults it.
 #[test]
-fn schema_provenance_reads_the_trailer_written_at_store_time() {
+fn new_schema_and_data_commits_have_no_schema_or_provenance_trailers() {
     let store = store();
 
     let schema_commit = store
@@ -351,10 +606,44 @@ fn schema_provenance_reads_the_trailer_written_at_store_time() {
         .put(&entity("c"), &value!({ "n": 1 }))
         .unwrap();
 
-    assert_eq!(
-        store.provenance(data_commit).unwrap().recorded(),
-        schema_commit
+    for commit in [schema_commit, data_commit] {
+        let gix::objs::Object::Commit(commit) = store.objects().get(&commit).unwrap() else {
+            panic!("not a commit");
+        };
+        assert!(
+            commit
+                .message
+                .as_bytes()
+                .split(|&byte| byte == b'\n')
+                .all(|line| {
+                    !line.starts_with(b"Schema:")
+                        && !line.starts_with(b"Schema-Version:")
+                        && !line.starts_with(b"Ents-Ref:")
+                })
+        );
+        assert!(commit.extra_headers.is_empty());
+    }
+}
+
+#[test]
+fn legacy_schema_and_provenance_trailers_are_ignored() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let value = value!({ "n": 1 });
+    let original = kind.put(&entity("original"), &value).unwrap();
+    let gix::objs::Object::Commit(commit) = store.objects().get(&original).unwrap() else {
+        panic!("not a commit");
+    };
+
+    let legacy = commit_ref(
+        &store,
+        "refs/store/counter/legacy",
+        "legacy\n\nSchema: not-an-object-id\nSchema-Version: conflicting\nEnts-Ref: refs/schema/other\n",
+        commit.tree,
+        None,
     );
+    assert_eq!(kind.get_at(legacy).unwrap(), value);
 }
 
 /// A commit whose tree is not the `{schema/, value/}` split — anything not
@@ -551,6 +840,224 @@ fn store_anonymous_binds_the_schema_by_subtree() {
 }
 
 #[test]
+fn listing_prefers_aliases_per_entity_without_hiding_canonical_only_entities() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+
+    let canonical_only = kind.put_entity(&value!({ "n": 1 })).unwrap();
+    let alias = entity("legacy/with-alias");
+    let aliased = kind.put_with_alias(&alias, &value!({ "n": 2 })).unwrap();
+
+    let names = kind.list().unwrap();
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&entity_id_name(canonical_only)));
+    assert!(names.contains(&alias));
+    assert!(!names.contains(&entity_id_name(aliased)));
+}
+
+#[test]
+fn delete_name_only_tombstones_the_current_alias_target() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let alias = entity("legacy/history");
+    let first = value!({ "n": 1 });
+    let first_id = kind.put_with_alias(&alias, &first).unwrap();
+    let second_id = kind.put_with_alias(&alias, &value!({ "n": 2 })).unwrap();
+
+    let before = kind.list().unwrap();
+    assert_eq!(before.len(), 2);
+    assert!(before.contains(&alias));
+    assert!(before.contains(&entity_id_name(first_id)));
+
+    let tombstone_commit = match kind.delete_name(&alias).unwrap() {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected deletion of the current alias target, got {other:?}"),
+    };
+    assert!(matches!(
+        kind.read(&alias).unwrap(),
+        EntityState::Deleted(entry) if entry.commit == tombstone_commit
+    ));
+    assert_eq!(kind.get_entity(first_id).unwrap(), Some(first));
+    assert!(matches!(
+        kind.read_entity(second_id).unwrap(),
+        EntityState::Deleted(entry) if entry.commit == tombstone_commit
+    ));
+    assert_eq!(kind.list().unwrap(), vec![entity_id_name(first_id)]);
+}
+
+#[test]
+fn delete_name_promotes_an_alias_only_entity_to_a_tombstone() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let alias = entity("legacy/only");
+    let id = kind.put_with_alias(&alias, &value!({ "n": 1 })).unwrap();
+    assert!(kind.remove(&entity_id_name(id)).unwrap());
+
+    let deleted = kind.delete_name(&alias).unwrap();
+    let tombstone_commit = match deleted {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected alias-only deletion, got {other:?}"),
+    };
+    assert!(
+        matches!(kind.read(&alias).unwrap(), EntityState::Deleted(entry) if entry.commit == tombstone_commit)
+    );
+    assert!(
+        matches!(kind.read_entity(id).unwrap(), EntityState::Deleted(entry) if entry.commit == tombstone_commit)
+    );
+    assert!(kind.list().unwrap().is_empty());
+
+    match kind.delete_name(&alias).unwrap() {
+        DeleteResult::AlreadyDeleted(entry) => assert_eq!(entry.commit, tombstone_commit),
+        other => panic!("repeated alias deletion must be idempotent, got {other:?}"),
+    }
+}
+
+#[test]
+fn delete_name_tombstones_canonical_and_alias_refs_together() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let alias = entity("legacy/current");
+    let id = kind.put_with_alias(&alias, &value!({ "n": 1 })).unwrap();
+
+    let tombstone_commit = match kind.delete_name(&alias).unwrap() {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected deletion, got {other:?}"),
+    };
+    assert!(
+        matches!(kind.read_entity(id).unwrap(), EntityState::Deleted(entry) if entry.commit == tombstone_commit)
+    );
+    assert!(
+        matches!(kind.read(&alias).unwrap(), EntityState::Deleted(entry) if entry.commit == tombstone_commit)
+    );
+    assert!(
+        matches!(kind.delete(id).unwrap(), DeleteResult::AlreadyDeleted(entry) if entry.commit == tombstone_commit)
+    );
+    assert!(
+        matches!(kind.delete_name(&alias).unwrap(), DeleteResult::AlreadyDeleted(entry) if entry.commit == tombstone_commit)
+    );
+}
+
+#[test]
+fn delete_name_repairs_a_historical_alias_target_without_deleting_new_content() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let alias = entity("legacy/history");
+    let first = value!({ "n": 1 });
+    let first_id = kind.put_with_alias(&alias, &first).unwrap();
+    let first_commit = kind.get_entry(&alias).unwrap().unwrap().commit;
+    let second = value!({ "n": 2 });
+    let second_id = kind.put_with_alias(&alias, &second).unwrap();
+    let second_commit = kind.get_entry(&alias).unwrap().unwrap().commit;
+    assert_ne!(first_id, second_id);
+
+    // Simulate a fetched/rewound compatibility alias that still names the
+    // historical publication while both canonical refs remain authoritative.
+
+    let alias_ref = kind.reference(&alias);
+    store
+        .refs()
+        .apply(RefEdit::Update {
+            name: alias_ref,
+            expected: second_commit,
+            new: first_commit,
+        })
+        .unwrap();
+
+    let tombstone_commit = match kind.delete_name(&alias).unwrap() {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected historical alias deletion, got {other:?}"),
+    };
+    assert!(
+        matches!(kind.read(&alias).unwrap(), EntityState::Deleted(entry) if entry.commit == tombstone_commit)
+    );
+    assert!(
+        matches!(kind.read_entity(first_id).unwrap(), EntityState::Deleted(entry) if entry.commit == tombstone_commit)
+    );
+    assert_eq!(kind.get_entity(second_id).unwrap(), Some(second));
+}
+
+#[test]
+fn ordinary_reads_and_canonical_recognition_reject_cross_kind_documents() {
+    let store = store();
+    let counter = store.dynamic(seg("counter"));
+    let foreign = store.dynamic(seg("foreign"));
+    counter
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+    foreign
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+    let foreign_id = foreign.put_entity(&value!({ "n": 1 })).unwrap();
+    let foreign_commit = foreign
+        .get_entry_entity(foreign_id)
+        .unwrap()
+        .unwrap()
+        .commit;
+
+    let alias = RefName::new("refs/store/counter/out-of-band").unwrap();
+    store
+        .refs()
+        .apply(RefEdit::Create {
+            name: alias,
+            new: foreign_commit,
+        })
+        .unwrap();
+    assert!(matches!(
+        counter.get(&entity("out-of-band")),
+        Err(Error::KindMismatch { .. })
+    ));
+
+    let canonical = RefName::new(format!("refs/store/counter/{foreign_id}")).unwrap();
+    store
+        .refs()
+        .apply(RefEdit::Create {
+            name: canonical,
+            new: foreign_commit,
+        })
+        .unwrap();
+    assert!(counter.list_entries().unwrap().is_empty());
+}
+
+#[test]
+fn ordinary_reads_reject_cross_kind_tombstones() {
+    let store = store();
+    let counter = store.dynamic(seg("counter"));
+    let foreign = store.dynamic(seg("foreign"));
+    counter
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+    foreign
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+    let foreign_id = foreign.put_entity(&value!({ "n": 1 })).unwrap();
+    let tombstone = match foreign.delete(foreign_id).unwrap() {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected foreign tombstone, got {other:?}"),
+    };
+    store
+        .refs()
+        .apply(RefEdit::Create {
+            name: RefName::new("refs/store/counter/foreign-tombstone").unwrap(),
+            new: tombstone,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        counter.read(&entity("foreign-tombstone")),
+        Err(Error::KindMismatch { .. })
+    ));
+}
+
+#[test]
 fn delete_removes_an_entity() {
     let store = store();
 
@@ -570,6 +1077,147 @@ fn delete_removes_an_entity() {
         None
     );
     assert!(!store.dynamic(seg("counter")).remove(&entity("c")).unwrap());
+}
+
+#[test]
+fn typed_delete_is_distinct_idempotent_and_restorable() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let value = value!({ "n": 1 });
+    let id = kind.put_entity(&value).unwrap();
+    let live_commit = kind.get_entry_entity(id).unwrap().unwrap().commit;
+
+    let deleted = kind.delete_entity(id).unwrap();
+    let tombstone_commit = match &deleted {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected a new tombstone, got {other:?}"),
+    };
+    assert_ne!(tombstone_commit, live_commit);
+    match kind.read_entity(id).unwrap() {
+        EntityState::Deleted(entry) => {
+            assert_eq!(entry.commit, tombstone_commit);
+            assert_eq!(entry.tombstone.entity_id(), Some(id));
+            assert_eq!(entry.tombstone.kind, "counter");
+        }
+        other => panic!("expected deleted state, got {other:?}"),
+    }
+    assert_eq!(kind.get_entity(id).unwrap(), None);
+    assert!(kind.list().unwrap().is_empty());
+    assert_eq!(
+        kind.list_entries().unwrap(),
+        vec![(entity_id_name(id), tombstone_commit)]
+    );
+
+    // The migrated reader classifies the embedded tombstone before looking
+    // for schema history, so deleting the schema ref does not affect it.
+    let schema_ref = RefName::new("refs/schema/counter").unwrap();
+    let schema_tip = store.refs().read(&schema_ref).unwrap().unwrap();
+    store
+        .refs()
+        .apply(RefEdit::Delete {
+            name: schema_ref,
+            expected: schema_tip,
+        })
+        .unwrap();
+    assert!(matches!(
+        kind.read_migrated(&entity_id_name(id)).unwrap(),
+        EntityState::Deleted(_)
+    ));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+
+    match kind.delete(id).unwrap() {
+        DeleteResult::AlreadyDeleted(entry) => assert_eq!(entry.commit, tombstone_commit),
+        other => panic!("repeated delete must be idempotent, got {other:?}"),
+    }
+
+    // The same complete document identity can be explicitly restored. A new
+    // publication commit replaces the tombstone and retains its history.
+    assert_eq!(kind.put_entity(&value).unwrap(), id);
+    match kind.read_entity(id).unwrap() {
+        EntityState::Present(entry) => {
+            assert_eq!(entry.value, value);
+            assert_ne!(entry.commit, tombstone_commit);
+        }
+        other => panic!("expected restored value, got {other:?}"),
+    }
+}
+
+#[test]
+fn restoring_a_deleted_entity_restores_aliases_and_materialized_views() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let alias = entity("legacy/counter");
+    let second_alias = entity("legacy/alternate-counter");
+    let value = value!({ "n": 1 });
+    let id = kind.put_with_alias(&alias, &value).unwrap();
+    assert_eq!(kind.put_with_alias(&second_alias, &value).unwrap(), id);
+
+    let tombstone_commit = match kind.delete_entity(id).unwrap() {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected a new tombstone, got {other:?}"),
+    };
+    for name in [&alias, &second_alias] {
+        assert!(matches!(
+            kind.read(name).unwrap(),
+            EntityState::Deleted(entry) if entry.commit == tombstone_commit
+        ));
+    }
+    assert!(kind.list().unwrap().is_empty());
+    assert!(kind.entries().unwrap().is_empty());
+
+    let restored_id = kind.put_entity(&value).unwrap();
+    assert_eq!(restored_id, id);
+    let restored_commit = match kind.read_entity(id).unwrap() {
+        EntityState::Present(entry) => entry.commit,
+        other => panic!("expected the canonical entity to be restored, got {other:?}"),
+    };
+    for name in [&alias, &second_alias] {
+        match kind.read(name).unwrap() {
+            EntityState::Present(entry) => {
+                assert_eq!(entry.commit, restored_commit);
+                assert_eq!(entry.value, value);
+            }
+            other => panic!("expected all aliases to be restored, got {other:?}"),
+        }
+    }
+
+    // Canonical views remain canonical, while the compatibility listing keeps
+    // exposing the named aliases rather than duplicating the entity.
+    assert_eq!(
+        kind.list().unwrap(),
+        vec![second_alias.clone(), alias.clone()]
+    );
+    assert_eq!(
+        kind.list_entries().unwrap(),
+        vec![(entity_id_name(id), restored_commit)]
+    );
+    let entries = kind.entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, entity_id_name(id));
+    assert_eq!(entries[0].1.commit, restored_commit);
+    assert_eq!(entries[0].1.value, value);
+
+    // A later named write observes the restored alias and moves only that
+    // alias to the new canonical identity.
+    let next_value = value!({ "n": 2 });
+    let next_id = kind.put_with_alias(&alias, &next_value).unwrap();
+    assert_ne!(next_id, id);
+    assert_eq!(kind.get(&alias).unwrap(), Some(next_value));
+    assert_eq!(kind.get(&second_alias).unwrap(), Some(value.clone()));
+    assert_eq!(kind.get_entity(id).unwrap(), Some(value));
+}
+
+#[test]
+fn hard_deleted_canonical_refs_remain_absent_not_deleted() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let id = kind.put_entity(&value!({ "n": 1 })).unwrap();
+    assert!(kind.remove(&entity_id_name(id)).unwrap());
+    assert!(matches!(kind.read_entity(id).unwrap(), EntityState::Absent));
+    assert!(matches!(kind.delete(id).unwrap(), DeleteResult::Absent));
 }
 
 // --- typed API ---
@@ -669,9 +1317,9 @@ fn typed_put_against_a_mismatched_published_schema_fails_as_a_schema_read_error(
 }
 
 #[test]
-fn put_message_sets_the_commit_summary_and_keeps_the_schema_trailer() {
+fn put_message_sets_the_commit_summary_without_schema_trailer() {
     let store = store();
-    let schema_commit = store
+    store
         .dynamic(seg("counter"))
         .schema()
         .put(&schema_of::<Counter>().unwrap())
@@ -687,10 +1335,35 @@ fn put_message_sets_the_commit_summary_and_keeps_the_schema_trailer() {
         panic!("expected a commit");
     };
     let message = String::from_utf8_lossy(&commit_obj.message).into_owned();
-    assert_eq!(
-        message,
-        format!("bump the counter\n\nSchema: {schema_commit}\n")
-    );
+    assert_eq!(message, "bump the counter\n");
+}
+
+#[test]
+fn put_message_rejects_reserved_schema_and_provenance_trailers() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+
+    let values = [value!({ "n": 0 }), value!({ "n": 1 }), value!({ "n": 2 })];
+    for (index, trailer) in ["Schema:", "Schema-Version:", "Ents-Ref:"]
+        .into_iter()
+        .enumerate()
+    {
+        let name = entity(&format!("reserved-{index}"));
+        let err = kind
+            .write(&values[index])
+            .message(format!("ordinary summary\n\n{trailer} legacy"))
+            .at(&name)
+            .expect_err("reserved trailer messages must not write a commit");
+        match err {
+            Error::ReservedTrailer { trailer: actual } => assert_eq!(actual, trailer),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(
+            kind.history(&name).unwrap().is_empty(),
+            "rejected message must not publish a ref"
+        );
+    }
 }
 
 /// [`gix_store::Kind::get_entry`]/[`gix_store::Kind::get_entry_at`]: the
@@ -744,9 +1417,102 @@ fn get_entry_carries_the_commit_and_message_the_value_was_written_with() {
     assert_eq!(earlier.message, "store counter/c");
 }
 
-/// [`gix_store::kind::Put::anonymous`] derives an entity's name from its own
-/// commit id, so writing identical content twice must not be treated as a
-/// name collision — it lands on the same commit both times.
+/// [`gix_store::kind::Put::anonymous`] derives the canonical entity ref from
+/// the complete document tree, so writing identical content twice is
+/// idempotent even though the compatibility API returns a commit id.
+#[test]
+fn content_identity_deduplicates_across_aliases_and_indexes_only_canonical_refs() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let value = value!({ "n": 1 });
+
+    let first = kind
+        .write(&value)
+        .message("first metadata")
+        .with_alias(&entity("first"))
+        .unwrap();
+    let second = kind
+        .write(&value)
+        .message("different metadata")
+        .with_alias(&entity("second"))
+        .unwrap();
+
+    assert_eq!(first, second, "the bound frame is the identity input");
+    let canonical = kind.entity_reference(first);
+    assert_eq!(
+        store.refs().read(&canonical).unwrap(),
+        kind.get_entry_entity(first)
+            .unwrap()
+            .map(|entry| entry.commit)
+    );
+    assert_eq!(kind.list_entries().unwrap().len(), 1);
+    assert_eq!(
+        kind.list_entries().unwrap()[0].0.to_string(),
+        first.to_string()
+    );
+    assert_eq!(kind.get(&entity("first")).unwrap(), Some(value.clone()));
+    assert_eq!(kind.get(&entity("second")).unwrap(), Some(value));
+}
+
+#[test]
+fn schema_changes_change_the_entity_id_even_for_the_same_value() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let first = kind.put_entity(&value!({ "n": 1 })).unwrap();
+
+    kind.schema()
+        .put(&schema_of::<CounterWithLabel>().unwrap())
+        .unwrap();
+    let second = kind
+        .put_entity(&value!({ "n": 1, "label": "new" }))
+        .unwrap();
+
+    assert_ne!(
+        first, second,
+        "the complete bound frame includes the schema"
+    );
+    assert!(
+        kind.list_entries()
+            .unwrap()
+            .iter()
+            .any(|(name, _)| name.to_string() == first.to_string())
+    );
+    assert!(
+        kind.list_entries()
+            .unwrap()
+            .iter()
+            .any(|(name, _)| name.to_string() == second.to_string())
+    );
+}
+
+#[test]
+fn repeated_content_does_not_create_a_commit_for_new_metadata() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let value = value!({ "n": 1 });
+
+    let first = kind
+        .write(&value)
+        .message("one")
+        .with_alias(&entity("one"))
+        .unwrap();
+    let first_commit = kind.get_entry_entity(first).unwrap().unwrap().commit;
+    let second = kind
+        .write(&value)
+        .message("two")
+        .with_alias(&entity("two"))
+        .unwrap();
+    let second_commit = kind.get_entry_entity(second).unwrap().unwrap().commit;
+
+    assert_eq!(first, second);
+    assert_eq!(first_commit, second_commit);
+    assert_eq!(kind.history(&entity("one")).unwrap(), vec![first_commit]);
+    assert_eq!(kind.history(&entity("two")).unwrap(), vec![second_commit]);
+}
+
 #[test]
 fn anonymous_write_of_identical_content_twice_is_idempotent() {
     let store = store();
@@ -770,9 +1536,9 @@ fn anonymous_write_of_identical_content_twice_is_idempotent() {
     assert_eq!(first, second);
 }
 
-/// An anonymous entity is named by its commit id *in full*, so two unrelated
-/// values collide only when their commits do. A truncation would put the
-/// entity namespace's collision odds far below the object database's own.
+/// The compatibility `entity_name` helper still resolves the old anonymous
+/// commit-named alias, while the canonical ref is based on the complete bound
+/// document tree rather than the publication commit.
 #[test]
 fn anonymous_names_an_entity_by_its_whole_commit_id() {
     let store = store();
@@ -793,10 +1559,9 @@ fn anonymous_names_an_entity_by_its_whole_commit_id() {
     assert_eq!(store.dynamic(seg("counter")).list().unwrap(), vec![name]);
 }
 
-/// [`gix_store::kind::Put::anonymous_under`] names the entity
-/// `<group>/<commit-oid>`, so entities of one group list as a nested
-/// `RefPath` and [`entity_name_under`] recovers the same name without string
-/// surgery.
+/// [`gix_store::kind::Put::anonymous_under`] retains the old grouped
+/// commit-named alias, so compatibility reads and `entity_name_under` continue
+/// to work while the canonical identity remains content-derived.
 #[test]
 fn anonymous_under_names_an_entity_by_group_and_whole_commit_id() {
     let store = store();
@@ -898,6 +1663,49 @@ impl Committer for FlakyRefStore {
 
 fn flaky_store() -> Store<FlakyRefStore, ObjectStore> {
     Store::new(FlakyRefStore::new(), ObjectStore::default())
+}
+
+#[test]
+fn delete_retries_over_a_concurrent_update_and_keeps_the_winner_in_history() {
+    let store = flaky_store();
+    let counter = store.kind::<Counter>(seg("counter"));
+    counter.publish().unwrap();
+    let id = counter.put_entity(&Counter { n: 1 }).unwrap();
+    let original = counter.get_entry_entity(id).unwrap().unwrap().commit;
+
+    let gix::objs::Object::Commit(original_object) = store.objects().get(&original).unwrap() else {
+        panic!("expected a commit");
+    };
+    let signature = store.refs().signature().unwrap();
+    let winner = gix::objs::Commit {
+        tree: original_object.tree,
+        parents: vec![original].into(),
+        author: signature.clone(),
+        committer: signature,
+        encoding: None,
+        message: "concurrent update\n".into(),
+        extra_headers: Vec::new(),
+    };
+    let winner = gix::objs::Write::write(store.objects(), &winner).unwrap();
+    store.refs().push_concurrent(RefEdit::Update {
+        name: counter.entity_reference(id),
+        expected: original,
+        new: winner,
+    });
+
+    let tombstone = counter.delete(id).unwrap();
+    let deleted = match tombstone {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected deletion after retry, got {other:?}"),
+    };
+    assert_eq!(
+        counter.history(&entity_id_name(id)).unwrap(),
+        vec![deleted, winner, original]
+    );
+    assert!(matches!(
+        counter.read_entity(id).unwrap(),
+        EntityState::Deleted(_)
+    ));
 }
 
 /// [`Kind::update`]'s whole reason to exist: `rebuild` must see the entry
@@ -1194,6 +2002,7 @@ fn put_schema_still_republishes_over_an_unpinned_tip() {
     let store = store();
 
     let doc = schema_of::<Counter>().unwrap();
+    let expected = doc.clone().with_kind("counter").unwrap();
     let good_tree = doc.write_pinned(store.objects()).unwrap();
     let stripped = rewrite_tree(store.objects(), good_tree, |entries| {
         entries.retain(|e| e.filename != "schema");
@@ -1218,7 +2027,7 @@ fn put_schema_still_republishes_over_an_unpinned_tip() {
             .get()
             .unwrap()
             .as_ref(),
-        Some(&doc)
+        Some(&expected)
     );
 }
 
@@ -1429,7 +2238,7 @@ fn a_foreign_schema_tree_has_no_chain() {
         .dynamic(seg("other"))
         .get_at_migrated(commit)
         .unwrap_err();
-    assert!(matches!(err, Error::SchemaNotInHistory { .. }), "{err:?}");
+    assert!(matches!(err, Error::KindMismatch { .. }), "{err:?}");
 }
 
 /// The tree of the commit `id` names.

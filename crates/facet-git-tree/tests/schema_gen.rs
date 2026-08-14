@@ -54,7 +54,12 @@ fn re(name: &str) -> Node {
 }
 
 fn doc(root: Node, defs: Vec<(&str, Node)>) -> Schema {
+    let kind = match &root {
+        Node::Ref(name) => name.clone(),
+        _ => "anonymous".to_owned(),
+    };
     Schema {
+        kind,
         root,
         defs: defs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
     }
@@ -231,7 +236,14 @@ fn with_optional_schema() -> anyhow::Result<()> {
 /// A `u8` sequence is `Bytes`, not a `List` — mirroring the blob encoding.
 #[test]
 fn byte_seq_schema_is_bytes() -> anyhow::Result<()> {
-    assert_eq!(schema_of::<Vec<u8>>()?, doc(Node::Bytes, vec![]));
+    assert_eq!(
+        schema_of::<Vec<u8>>()?,
+        Schema {
+            kind: "Vec".into(),
+            root: Node::Bytes,
+            defs: BTreeMap::new(),
+        }
+    );
     Ok(())
 }
 
@@ -403,7 +415,12 @@ fn name_collision_disambiguated() -> anyhow::Result<()> {
 /// indistinguishable, exactly as they are indistinguishable on disk.
 #[test]
 fn box_schema_collapses() -> anyhow::Result<()> {
-    assert_eq!(schema_of::<Box<Point>>()?, schema_of::<Point>()?);
+    let boxed = schema_of::<Box<Point>>()?;
+    let point = schema_of::<Point>()?;
+    assert_eq!(boxed.root, point.root);
+    assert_eq!(boxed.defs, point.defs);
+    assert_eq!(boxed.kind, "Box");
+    assert_eq!(point.kind, "Point");
     Ok(())
 }
 
@@ -413,7 +430,14 @@ fn transparent_newtype_schema_collapses() -> anyhow::Result<()> {
     #[derive(Facet)]
     #[facet(transparent)]
     struct Hex(String);
-    assert_eq!(schema_of::<Hex>()?, doc(Node::String, vec![]));
+    assert_eq!(
+        schema_of::<Hex>()?,
+        Schema {
+            kind: "Hex".into(),
+            root: Node::String,
+            defs: BTreeMap::new(),
+        }
+    );
     Ok(())
 }
 

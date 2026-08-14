@@ -364,11 +364,17 @@ Recursion depth MUST be bounded by the same maximum-depth limit that bounds ordi
 
 Their on-disk form is a public contract: any change to the encoded shape of the schema types is a breaking change and MUST be released as a semver-major version, per link:#compatibility.update[compatibility with prior releases].
 
+A schema document also carries its embedded `kind` name. The name is part of
+the schema document and is validated as a Git ref-name segment; it MUST NOT be
+inferred from a publication ref. A publication ref is an authoring/history
+index, not the type definition of an existing bound data document.
+
 The schema types are defined as follows.
 
 [source,rust]
 ----
 pub struct Schema {
+    pub kind: String,
     pub root: Node,
     pub defs: BTreeMap<String, Node>,
 }
@@ -445,7 +451,7 @@ The fixture's schema alone binds only the shape language `Node`/`VariantKind` de
 The recursion bottoms out at a root generation, whose tree is written with no pin spliced in.
 Absence of a `schema` entry therefore means "this is the root of the tower", and is legitimate ONLY when the tree's own object id is one the reader recognizes as a root generation.
 A reader MUST reject an unpinned tree whose own id it does not recognize as a root: that is a truncated or hand-written document, not the bottom.
-A reader MUST carry the recognized generations as compiled-in constants; the genesis tree of this format version is `5896cb1c8ff662027c9a54232a5364a5072b60c1`.
+A reader MUST carry the recognized generations as compiled-in constants; the genesis tree of this format version is `ea875f69726986da822cdb2670a089eddd09b6ce`.
 
 Generation N's own tree MUST pin generation N−1 under its own `schema` entry.
 Ancestry through those entries is what restores the ordering a version number gave and a bare object id does not; there is one generation today, so the chain has length zero, but the format reserves the shape.
@@ -455,13 +461,24 @@ The read is `git ls-tree <tree> schema` — one tree entry lookup, strictly chea
 This ordering is load-bearing, for the same reason the old `version` pre-read was: a document written by a newer binary may contain a `Node` variant the reader has never heard of, and a typed deserialize attempted first fails with an opaque reflection error before the check is ever reached.
 
 An object-id pin admits equality only.
+
+A reader that supports the current self-hosted schema contract cannot repair a
+historical schema object that predates the embedded `kind` field by guessing a
+name from `refs/schema/<publication>`. Such a schema needs an explicit
+compatibility conversion or republishing before it can serve as the embedded
+schema of newly written self-contained documents.
 A reader MUST NOT infer that an unrecognized pin is newer or older than what it speaks, and the diagnostic MUST say what it honestly knows: this document was written against schema-schema `<oid>`, which I do not recognize; I speak `<the recognized set>`.
 
 Publishing a schema is governed by the same refusal as reading one: a writer MUST NOT replace a published schema pinned to a schema-schema it does not recognize, since overwriting a document whose meaning was never established asserts the same guarantee that reading it would have.
 A published schema that is unpinned or otherwise unreadable MUST remain replaceable, republishing being the remedy those conditions name.
 
-`version` bound `Schema`'s own on-disk shape and the value codec a schema of that version describes together, in lockstep: a reader that rejected an unrecognized version thereby also refused to misread a value written by a newer codec, with no separate value-format version needed anywhere.
-The `codec` entry above is what lets the schema-schema pin cover the same ground: `Schema`'s shape and the codec's spelling of every construct it can produce both live inside the generation's own tree, so either changing moves the generation id, exactly as an unrecognized `version` once would have refused both at once.
+The schema-schema pin binds `Schema`'s own on-disk shape and the value codec it
+describes together, in lockstep: a reader that rejects an unrecognized pin
+refuses to misread a value written by a newer codec, with no caller-supplied
+version field required. The `codec` entry above is what lets the pin cover the
+same ground: `Schema`'s shape and the codec's spelling of every construct it
+can produce both live inside the generation's own tree, so either changing
+moves the generation id.
 --
 
 [role="requirement", id="schema.generation"]
@@ -746,4 +763,111 @@ A bound schema tree absent from that history MUST be refused — there is no cha
 .Structural Equality
 --
 If two data instances serialize to the same Git tree, they MUST be considered equal for purposes of data retention.
+--
+
+=== `git-store` Plumbing Boundary
+
+The serialization layer is intentionally separate from the repository plumbing
+layer. `facet-git-tree` remains oid-in/oid-out; `gix-store` and `git-store`
+compose those objects with schemas, documents, refs, commits, and indexes.
+
+[role="requirement", id="plumbing.schema.explicit"]
+.Explicit Schema Selection
+--
+The unbound value operations MUST accept an explicit schema tree or a Git
+revision that resolves to one. The CLI spellings are
+`git store value encode --schema <schema-tree-or-commit>` and
+`git store value decode <value-tree> --schema <schema-tree-or-commit>`.
+`git store document bind <value-tree> --schema <schema-tree-or-commit>` MUST
+use that same explicit schema to construct the bound document root.
+
+These operations MUST NOT infer a schema from a kind ref, schema history,
+commit trailers, or a caller-selected entity name. A bound document MUST carry
+exactly `schema/` and `value/` at its root, with the schema subtree being the
+one used to validate the value subtree.
+--
+
+[role="requirement", id="plumbing.schema.history"]
+.Historical Schema Addressing
+--
+`git store schema get <kind> --at <commit>` and
+`git store schema inspect <kind> --at <commit>` MUST address the named schema
+publication commit directly. Omitting `--at` from `schema get` selects the
+current publication. Historical inspection MUST report the publication commit
+OID and the schema-tree OID; it MUST NOT replace the historical selection with
+the current schema.
+--
+
+[role="requirement", id="plumbing.inspect"]
+.Ref and Object Inspection
+--
+The CLI MUST provide Git-shaped inspection without a migration-specific
+traversal workflow: `ref list`, `ref resolve`, `object inspect`, and
+`object tree`. Ref output MUST use full ref names and object output MUST use
+stable full object IDs. These commands MUST not mutate refs or objects.
+--
+
+[role="requirement", id="plumbing.output"]
+.Machine Output and Diagnostics
+--
+Additive plumbing commands MUST support human-readable text and machine-readable
+JSON and NDJSON output through `--format text|json|ndjson`; `--json` MAY be a
+compact-JSON shorthand. Successful records MUST be written to stdout, and
+failure diagnostics MUST be written to stderr. Machine output MUST use stable
+object IDs and full ref names rather than abbreviated display values.
+
+The current CLI exit categories are `1` for other operational errors, `2` for
+invalid arguments or object shape, `3` for missing refs, objects, schemas, or
+entities, `4` for compare-and-swap conflicts, and `5` for schema, value, or
+document failures. A failed command MUST NOT emit a success record.
+--
+
+[role="requirement", id="plumbing.cas"]
+.Explicit Compare-and-Swap Publication
+--
+`git store document publish <kind> <document-tree> --expected <absent|OID>` MUST
+perform a one-shot compare-and-swap. Without an alias, the expectation applies
+to the canonical entity ref; with `--alias <name>`, it applies to that alias.
+The canonical ref, optional alias, and materialized per-kind index MUST advance
+in one ref-store batch or none of them may advance.
+
+A stale expectation MUST fail with the compare-and-swap exit category and MUST
+NOT be retried by the CLI. Objects written before a lost publication MAY remain
+unreachable. Traversal, batching, retry, resume, and conflict policy belong to
+the calling script or program.
+--
+
+[role="requirement", id="plumbing.identity"]
+.Content-Derived Entity Identity
+--
+The `EntityId` of a bound document MUST be the object ID of its complete root
+`{schema/, value/}` tree. Both the encoded value and the embedded schema
+therefore contribute to identity. The canonical ref MUST be
+`refs/store/<kind>/<entity-id>`.
+
+A caller-selected name MUST be represented only as a compatibility alias and
+MUST NOT be treated as the entity identity or as the source of truth. The
+per-kind index is a materialized cache of canonical entity refs; entity refs
+remain authoritative and a reader MUST be able to fall back when the index is
+missing, malformed, or stale.
+--
+
+[role="requirement", id="plumbing.tombstone"]
+.Typed Entity Deletion
+--
+`git store entity delete <kind> <entity-id>` MUST publish a typed tombstone
+rather than prune the canonical ref. The tombstone MUST use the bound
+`{schema/, value/}` frame and carry an explicit deleted state, kind, and
+original `EntityId`. A repeated deletion MUST be distinguishable from an
+absent entity.
+--
+
+[role="requirement", id="plumbing.migration-boundary"]
+.Manual Migration Boundary
+--
+The CLI MUST NOT provide or imply a hard-coded `migrate` workflow. Bash, Git,
+or the calling program owns traversal, source and target schema selection,
+transforms, batching, retry/resume, and policy. The CLI plumbing MAY construct
+new objects and publish them under explicit CAS expectations, but base reads and
+inspection MUST NOT silently rewrite stored objects.
 --

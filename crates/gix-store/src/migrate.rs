@@ -12,6 +12,42 @@ use crate::error::Error;
 use crate::kind::KindSchema;
 use crate::store::Store;
 
+/// A schema selected as the destination for an explicit migrated read.
+///
+/// `history` is tip-first, as returned by [`KindSchema::history`]. Keeping the
+/// schema document and its history together makes the migration target
+/// independent of the store's live schema ref: callers may capture it before a
+/// ref is deleted, or supply a history received through another channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetSchema {
+    schema: Schema,
+    history: Vec<ObjectId>,
+}
+
+impl TargetSchema {
+    /// Select `schema` and its tip-first schema-commit `history` as a
+    /// migration target.
+    ///
+    /// The first commit should contain `schema`, and every following commit
+    /// should be its first-parent predecessor. The target document is checked
+    /// against the tip when a migrated value is read; an empty history is
+    /// accepted here so callers can construct a target before choosing a
+    /// history, and reads report it clearly.
+    pub fn new(schema: Schema, history: Vec<ObjectId>) -> Self {
+        Self { schema, history }
+    }
+
+    /// The selected destination schema document.
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    /// The selected schema history, tip-first.
+    pub fn history(&self) -> &[ObjectId] {
+        &self.history
+    }
+}
+
 /// The tree entry a schema commit records its migration under.
 pub(crate) const ENTRY: &str = "migration";
 
@@ -64,15 +100,53 @@ where
         }
     }
 
-    /// Upcast `value` — read against the schema stored at `schema_tree` — to
-    /// this kind's current schema.
+    /// Build a target snapshot from this kind's current schema ref.
     ///
-    /// Walks the schema ref's history to locate `schema_tree`, then applies
-    /// each recorded migration from there forward. Never writes an object:
-    /// the stored value keeps its tree hash, and with it every attestation
-    /// made about it.
-    pub(crate) fn upcast(&self, value: &Value, schema_tree: &ObjectId) -> Result<Value, Error> {
-        let steps = self.steps_from(schema_tree)?;
+    /// This is the compatibility convenience used by the current-schema
+    /// migrated-read methods. Callers that must not consult the live ref can
+    /// construct [`TargetSchema`] directly and use the `*_migrated_to` APIs.
+    pub fn current_target(&self) -> Result<TargetSchema, Error> {
+        let history = self.history()?;
+        let tip = history.first().copied().ok_or_else(|| Error::NoSchema {
+            kind: self.kind.clone(),
+        })?;
+        let tree = self.store.commit_tree(tip)?;
+        let schema = Schema::read_pinned(&tree, self.store.objects())?;
+        Ok(TargetSchema::new(schema, history))
+    }
+
+    /// Upcast using the live current schema ref for the compatibility API.
+    ///
+    /// This deliberately retains the historical error variant for a source
+    /// schema absent from the current published history.
+    pub(crate) fn upcast_current(
+        &self,
+        value: &Value,
+        schema_tree: &ObjectId,
+    ) -> Result<Value, Error> {
+        let steps = self.steps_from_current(schema_tree)?;
+        let chain: Vec<Edge<'_>> = steps
+            .iter()
+            .map(|step| Edge {
+                from: &step.from,
+                migration: &step.migration,
+            })
+            .collect();
+        Ok(apply_chain(value, &chain)?)
+    }
+
+    /// Upcast `value` — read against the schema stored at `schema_tree` — to an
+    /// explicitly selected target schema and history.
+    ///
+    /// No schema ref is consulted. Never writes an object: the stored value
+    /// keeps its tree hash, and with it every attestation made about it.
+    pub(crate) fn upcast_to(
+        &self,
+        value: &Value,
+        schema_tree: &ObjectId,
+        target: &TargetSchema,
+    ) -> Result<Value, Error> {
+        let steps = self.steps_from(schema_tree, target)?;
         let chain: Vec<Edge<'_>> = steps
             .iter()
             .map(|step| Edge {
@@ -84,13 +158,62 @@ where
     }
 
     /// The migrations between the schema commit holding `schema_tree` and the
-    /// current tip, oldest edge first.
-    fn steps_from(&self, schema_tree: &ObjectId) -> Result<Vec<Step>, Error> {
+    /// current published tip, oldest edge first.
+    fn steps_from_current(&self, schema_tree: &ObjectId) -> Result<Vec<Step>, Error> {
         let history = self.history()?;
-        // A value written against the tip needs no upcast at all.
         if let Some(tip) = history.first()
             && self.store.commit_tree(*tip)? == *schema_tree
         {
+            return Ok(Vec::new());
+        }
+        let mut steps = Vec::new();
+        for pair in history.windows(2) {
+            let (newer, older) = (pair[0], pair[1]);
+            let older_tree = self.store.commit_tree(older)?;
+            steps.push(Step {
+                from: Schema::read_pinned(&older_tree, self.store.objects())?,
+                migration: self.migration_at(newer)?.ok_or(Error::MigrationMissing {
+                    kind: self.kind.clone(),
+                    commit: newer,
+                })?,
+            });
+            if older_tree == *schema_tree {
+                steps.reverse();
+                return Ok(steps);
+            }
+        }
+        Err(Error::SchemaNotInHistory {
+            kind: self.kind.clone(),
+            schema_tree: *schema_tree,
+        })
+    }
+
+    /// The migrations between the source schema tree and an explicit target,
+    /// oldest edge first.
+    fn steps_from(
+        &self,
+        schema_tree: &ObjectId,
+        target: &TargetSchema,
+    ) -> Result<Vec<Step>, Error> {
+        let history = target.history();
+        let tip = history
+            .first()
+            .copied()
+            .ok_or_else(|| Error::TargetHistoryEmpty {
+                kind: self.kind.clone(),
+            })?;
+        let target_tree = self.store.commit_tree(tip)?;
+        let stored_target = self.store.schema(target_tree)?;
+        if stored_target.as_ref() != target.schema() || target.schema().kind != self.kind.as_str() {
+            return Err(Error::TargetSchemaMismatch {
+                kind: self.kind.clone(),
+                commit: tip,
+                schema_tree: target_tree,
+            });
+        }
+
+        // A value written against the selected tip needs no upcast at all.
+        if target_tree == *schema_tree {
             return Ok(Vec::new());
         }
         // `history` is tip-first, so each window is (newer, older) and the
@@ -111,7 +234,7 @@ where
                 return Ok(steps);
             }
         }
-        Err(Error::SchemaNotInHistory {
+        Err(Error::TargetSchemaNotInHistory {
             kind: self.kind.clone(),
             schema_tree: *schema_tree,
         })

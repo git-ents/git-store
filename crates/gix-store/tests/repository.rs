@@ -9,11 +9,15 @@ use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Barrier};
 
 use facet::Facet;
 use facet_git_tree::schema_of;
 use facet_value::value;
-use gix_store::{Layout, RefPath, RefPrefix, RefSegment, RepoStore, SignatureBytes, Signer};
+use gix_store::{
+    DeleteResult, EntityState, Layout, RefPath, RefPrefix, RefSegment, RepoStore, SignatureBytes,
+    Signer,
+};
 use test_support::init_repo;
 
 fn seg(s: &str) -> RefSegment {
@@ -178,6 +182,132 @@ fn fetched_data_ref_reads_back_without_any_schema_ref() {
 }
 
 #[test]
+fn fetched_tombstone_is_deleted_without_schema_ref_or_index() {
+    let origin_dir = tempfile::tempdir().unwrap();
+    init_repo(origin_dir.path());
+    let origin = gix::open(origin_dir.path()).unwrap();
+    let origin_store = RepoStore::open(&origin);
+    let kind = origin_store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let id = kind.put_entity(&value!({ "n": 1 })).unwrap();
+    let tombstone_commit = match kind.delete(id).unwrap() {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected a new tombstone, got {other:?}"),
+    };
+
+    // The tombstone is a normal bound frame, not an empty tree.
+    let root = origin
+        .find_commit(tombstone_commit)
+        .unwrap()
+        .tree()
+        .unwrap();
+    let names: Vec<_> = root
+        .iter()
+        .map(|entry| entry.unwrap().inner.filename.to_string())
+        .collect();
+    assert_eq!(names, vec!["schema", "value"]);
+
+    let consumer_dir = tempfile::tempdir().unwrap();
+    init_repo(consumer_dir.path());
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(consumer_dir.path())
+        .arg("fetch")
+        .arg(origin_dir.path())
+        .arg(format!("refs/store/counter/{id}:refs/store/counter/{id}"))
+        .status()
+        .expect("run git fetch");
+    assert!(status.success(), "git fetch failed");
+
+    let consumer = gix::open(consumer_dir.path()).unwrap();
+    assert!(
+        consumer
+            .try_find_reference("refs/schema/counter")
+            .unwrap()
+            .is_none()
+    );
+
+    match RepoStore::open(&consumer)
+        .dynamic(seg("counter"))
+        .read_entity(id)
+        .unwrap()
+    {
+        EntityState::Deleted(entry) => {
+            assert_eq!(entry.commit, tombstone_commit);
+            assert_eq!(entry.tombstone.entity_id(), Some(id));
+        }
+        other => panic!("expected fetched tombstone, got {other:?}"),
+    }
+}
+
+#[test]
+fn concurrent_restore_and_delete_keep_canonical_and_alias_refs_consistent() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let repo = gix::open(dir.path()).unwrap();
+    let store = RepoStore::open(&repo);
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let alias = entity("legacy/counter");
+    let value = value!({ "n": 1 });
+    let id = kind.put_with_alias(&alias, &value).unwrap();
+    assert!(matches!(kind.delete(id).unwrap(), DeleteResult::Deleted(_)));
+
+    let barrier = Arc::new(Barrier::new(2));
+    let path = dir.path();
+    std::thread::scope(|scope| {
+        let restore_barrier = Arc::clone(&barrier);
+        scope.spawn(move || {
+            let repo = gix::open(path).unwrap();
+            let store = RepoStore::open(&repo);
+            restore_barrier.wait();
+            store
+                .dynamic(seg("counter"))
+                .put_entity(&value!({ "n": 1 }))
+                .unwrap();
+        });
+
+        let delete_barrier = Arc::clone(&barrier);
+        scope.spawn(move || {
+            let repo = gix::open(path).unwrap();
+            let store = RepoStore::open(&repo);
+            delete_barrier.wait();
+            let _ = store.dynamic(seg("counter")).delete(id).unwrap();
+        });
+    });
+
+    match kind.read_entity(id).unwrap() {
+        EntityState::Present(entry) => {
+            match kind.read(&alias).unwrap() {
+                EntityState::Present(alias_entry) => {
+                    assert_eq!(alias_entry.commit, entry.commit);
+                }
+                other => panic!("a live canonical entity must have a live alias, got {other:?}"),
+            }
+            assert_eq!(kind.list().unwrap(), vec![alias.clone()]);
+            assert_eq!(kind.entries().unwrap().len(), 1);
+        }
+        EntityState::Deleted(entry) => {
+            match kind.read(&alias).unwrap() {
+                EntityState::Deleted(alias_entry) => {
+                    assert_eq!(alias_entry.commit, entry.commit);
+                }
+                other => {
+                    panic!("a deleted canonical entity must have a deleted alias, got {other:?}")
+                }
+            }
+            assert!(kind.list().unwrap().is_empty());
+            assert!(kind.entries().unwrap().is_empty());
+            assert_eq!(
+                kind.list_entries().unwrap(),
+                vec![(gix_store::entity_id_name(id), entry.commit)]
+            );
+        }
+        other => panic!("restore/delete race must leave an explicit state, got {other:?}"),
+    }
+}
+
+#[test]
 fn concurrent_writers_land_a_linear_history() {
     const THREADS: usize = 3;
     const WRITES: usize = 10;
@@ -244,9 +374,8 @@ fn concurrent_writers_land_a_linear_history() {
 /// The claim subtree binding exists to make true: stock `git` plumbing —
 /// `git ls-tree`, not just [`gix_store`] — can read a data commit. The root
 /// tree has exactly `schema` and `value`, both trees; `value`'s own entries
-/// are the stored struct's field names; and the commit message still ends
-/// with a human-readable `Schema: <oid>` trailer naming the schema commit,
-/// even though no reader needs it.
+/// are the stored struct's field names; and newly written commits contain no
+/// schema or provenance trailers.
 #[test]
 fn committed_tree_has_the_plumbing_shape_stock_git_expects() {
     let dir = tempfile::tempdir().unwrap();
@@ -280,6 +409,12 @@ fn committed_tree_has_the_plumbing_shape_stock_git_expects() {
         schema_entry.inner.mode.is_tree(),
         "schema entry must be a tree"
     );
+    let schema_commit_obj = repo.find_commit(schema_commit).unwrap();
+    assert_eq!(
+        schema_entry.object_id(),
+        schema_commit_obj.tree().unwrap().id().detach(),
+        "the document must embed the exact schema tree used to publish the schema"
+    );
     let value_entry = root.find_entry("value").unwrap();
     assert!(
         value_entry.inner.mode.is_tree(),
@@ -297,11 +432,22 @@ fn committed_tree_has_the_plumbing_shape_stock_git_expects() {
         vec!["serves".to_owned(), "steps".to_owned(), "title".to_owned()]
     );
 
+    let schema_message = repo
+        .find_commit(schema_commit)
+        .unwrap()
+        .message_raw_sloppy()
+        .to_string();
     let message = commit_obj.message_raw_sloppy().to_string();
-    assert!(
-        message.ends_with(&format!("Schema: {schema_commit}\n")),
-        "commit message should end with the Schema: trailer, got {message:?}"
-    );
+    for (kind, message) in [("schema", schema_message), ("data", message)] {
+        assert!(
+            !message.lines().any(|line| {
+                line.starts_with("Schema:")
+                    || line.starts_with("Schema-Version:")
+                    || line.starts_with("Ents-Ref:")
+            }),
+            "{kind} commit should contain no schema/provenance trailers, got {message:?}"
+        );
+    }
 }
 
 /// Signs by shelling out to `ssh-keygen -Y sign`, so the bytes on the commit are

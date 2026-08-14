@@ -62,7 +62,12 @@ fn re(name: &str) -> Node {
 }
 
 fn doc(root: Node, defs: Vec<(&str, Node)>) -> Schema {
+    let kind = match &root {
+        Node::Ref(name) => name.clone(),
+        _ => "anonymous".to_owned(),
+    };
     Schema {
+        kind,
         root,
         defs: defs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
     }

@@ -331,6 +331,14 @@ pub enum SchemaError {
     /// pointer shape) has no schema.
     #[error("smart pointer {0} has no pointee shape")]
     MissingPointee(&'static str),
+    /// The embedded kind name is not a valid Git ref-name segment.
+    #[error("invalid embedded schema kind name {name:?}: {reason}")]
+    InvalidKindName {
+        /// The offending name.
+        name: String,
+        /// The first violated ref-name rule.
+        reason: &'static str,
+    },
     /// Schema generation exceeded the maximum supported nesting depth.
     ///
     /// Mirrors [`DeserializeError::MaxDepth`]: data nested deeper than the
@@ -371,10 +379,43 @@ pub enum SchemaPinError {
     /// Writing the document, or the schema-schema tree it pins, failed.
     #[error(transparent)]
     Serialize(#[from] SerializeError),
-    /// Reading the pin entry, or the document itself, failed exactly as an
-    /// ordinary typed deserialize would.
+    /// The embedded kind name failed the Git ref-segment validation.
+    #[error(transparent)]
+    Schema(#[from] SchemaError),
+    /// A tree identified as the pre-`kind` generation does not have the exact
+    /// historical `{root, defs}` representation expected by that reader.
+    #[error("legacy schema tree {tree} has invalid pre-kind representation: {reason}")]
+    LegacyFormat {
+        /// The schema tree that failed the compatibility check.
+        tree: ObjectId,
+        /// The violated compatibility invariant.
+        reason: &'static str,
+    },
+    /// Reading the pin entry, or the document itself, failed exactly as
+    /// an ordinary typed deserialize would.
     #[error(transparent)]
     Deserialize(#[from] DeserializeError),
+    /// The canonical schema document did not survive the fixed-point check.
+    #[error("schema fixed point failed during {stage}: expected {expected}, observed {observed}")]
+    FixedPoint {
+        /// The operation that produced the unexpected digest.
+        stage: &'static str,
+        /// The compile-time or canonical expected digest.
+        expected: ObjectId,
+        /// The digest produced by this build.
+        observed: ObjectId,
+    },
+    /// The canonical schema document could not be decoded during bootstrap.
+    #[error("schema fixed point decode failed: expected {expected}, observed {observed}: {source}")]
+    FixedPointDecode {
+        /// The compile-time canonical digest expected by this build.
+        expected: ObjectId,
+        /// The tree presented to the normal schema reader.
+        observed: ObjectId,
+        /// The underlying decode failure.
+        #[source]
+        source: DeserializeError,
+    },
 }
 
 /// An error produced by the migration-schema pin

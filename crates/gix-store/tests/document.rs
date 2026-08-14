@@ -9,6 +9,7 @@ use gix_store::{DocumentBuilder, DocumentError};
 
 fn schema() -> Schema {
     Schema {
+        kind: "document".to_owned(),
         root: Node::Struct(BTreeMap::from([
             (
                 "name".to_owned(),

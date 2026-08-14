@@ -13,21 +13,26 @@
 //!
 //! Named, ref-addressed, versioned entities — the pre-S1 shape of this CLI
 //! — remain reachable: `list`, `log`, `rm`, and the `schema` subgroup mirror
-//! git porcelain over them, and any entity ref (`refs/store/<kind>/<name>`)
+//! git porcelain over them, and any entity ref under the selected data prefix
 //! is itself a valid `<tree-ish>` for `get`/`check`. `put`/`get` also accept
-//! their old two-argument forms as a hidden compatibility path (see
+//! their old two-argument forms as an explicit compatibility path (see
 //! [`PutArgs`] and [`Command::Get`]).
 
 mod interactive;
 
+use std::fmt;
 use std::io::{IsTerminal, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
-use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
-use facet_value::{Value, from_value};
-use gix_store::{Dynamic, GixRefStore, Kind, ObjectId, RefPath, RefSegment, RepoStore};
+use clap::{Parser, Subcommand, ValueEnum};
+use facet_git_tree::{Node, Schema, SchemaSchema, VariantKind, validate_with_schema};
+use facet_value::{VArray, VObject, Value, from_value};
+use gix_store::{
+    ApplyError, DeleteResult, DocumentInspection, Dynamic, EntityId, EntityState, Expectation,
+    GixRefStore, Kind, Layout, ObjectId, PublishOptions, RefName, RefPath, RefPrefix, RefSegment,
+    RefStore, RepoStore,
+};
 
 /// A handle on one kind, over the CLI's own repo-backed store.
 pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, GixRefStore<'r>, &'r gix::OdbHandle>;
@@ -39,8 +44,124 @@ pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, GixRefStore<'r>, &'r gix::Od
     version
 )]
 struct Cli {
+    /// Output format for additive plumbing commands.
+    #[arg(long, global = true, value_enum, conflicts_with = "json")]
+    format: Option<OutputFormat>,
+    /// Use compact JSON output.
+    #[arg(long, global = true, conflicts_with = "format")]
+    json: bool,
+    /// Ref namespace containing data kinds and compatibility entity aliases.
+    #[arg(
+        long,
+        global = true,
+        default_value = "refs/store",
+        value_name = "PREFIX"
+    )]
+    data_prefix: String,
+    /// Ref namespace containing published kind schemas.
+    #[arg(
+        long,
+        global = true,
+        default_value = "refs/schema",
+        value_name = "PREFIX"
+    )]
+    schema_prefix: String,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
+    Ndjson,
+}
+
+impl OutputFormat {
+    fn from_cli(format: Option<Self>, json: bool) -> Self {
+        if json {
+            Self::Json
+        } else {
+            format.unwrap_or(Self::Text)
+        }
+    }
+
+    fn machine(self) -> bool {
+        !matches!(self, Self::Text)
+    }
+}
+
+/// The stable machine-facing class of a CLI failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitClass {
+    Cas,
+    NotFound,
+    Schema,
+    Invalid,
+    Other,
+}
+
+impl ExitClass {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Cas => 4,
+            Self::NotFound => 3,
+            Self::Schema => 2,
+            Self::Invalid => 1,
+            Self::Other => 0,
+        }
+    }
+
+    fn code(self) -> i32 {
+        match self {
+            Self::Cas => 4,
+            Self::NotFound => 3,
+            Self::Schema => 5,
+            Self::Invalid => 2,
+            Self::Other => 1,
+        }
+    }
+
+    fn prefer(self, other: Self) -> Self {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// A CLI-owned typed context: its display text is for people, while `class` is
+/// the independent machine-facing classification used for the process exit.
+#[derive(Debug)]
+struct ClassifiedContext {
+    class: ExitClass,
+    message: String,
+}
+
+impl ClassifiedContext {
+    fn new(class: ExitClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ClassifiedContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ClassifiedContext {}
+
+fn cli_error(class: ExitClass, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ClassifiedContext::new(class, message))
+}
+
+fn cli_context(class: ExitClass, message: impl Into<String>) -> ClassifiedContext {
+    ClassifiedContext::new(class, message)
 }
 
 #[derive(Subcommand)]
@@ -50,10 +171,10 @@ enum Command {
     /// (parsed as JSON) when given, else from `-F <file>`, stdin, or
     /// `$EDITOR`.
     ///
-    /// Hidden compatibility: when a second argument is given and does *not*
-    /// parse as JSON, it is taken as the old `put <kind> <name>` form —
-    /// committing forward at `refs/store/<kind>/<name>` and printing the
-    /// commit id instead.
+    /// Compatibility: pass `--legacy-name` to use the old `put <kind> <name>`
+    /// form, committing forward under the selected data prefix and printing
+    /// the commit id instead. Without the switch, a positional value must be
+    /// valid JSON and malformed input is rejected without touching a ref.
     Put(PutArgs),
     /// Decode a document back to JSON from any tree-ish of the
     /// `{value/, schema/}` shape `put` compiles — a bare tree hash, or any
@@ -65,10 +186,15 @@ enum Command {
     Get {
         #[arg(num_args = 1..=2, value_name = "TREE-ISH")]
         args: Vec<String>,
+        /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
+        #[arg(long)]
+        legacy_leaves: bool,
     },
     /// Check whether a tree-ish's value conforms to a schema, without
     /// decoding it. Exits non-zero, with a diagnostic, when it does not.
     Check { tree_ish: String, schema: String },
+    /// Validate the repository's supported object format and schema bootstrap.
+    Doctor,
     /// List kinds, or the entity names within a kind.
     #[command(visible_alias = "ls")]
     List { kind: Option<String> },
@@ -81,20 +207,50 @@ enum Command {
         #[command(subcommand)]
         command: SchemaCommand,
     },
+    /// Inspect and resolve Git refs.
+    Ref {
+        #[command(subcommand)]
+        command: RefCommand,
+    },
+    /// Inspect Git objects and trees.
+    Object {
+        #[command(subcommand)]
+        command: ObjectCommand,
+    },
+    /// Encode and decode unbound values with explicit schemas.
+    Value {
+        #[command(subcommand)]
+        command: ValueCommand,
+    },
+    /// Inspect and compose bound documents.
+    Document {
+        #[command(subcommand)]
+        command: DocumentCommand,
+    },
+    /// Operate on canonical content-derived entity identities.
+    Entity {
+        #[command(subcommand)]
+        command: EntityCommand,
+    },
 }
 
 /// Arguments for `put`.
 #[derive(clap::Args)]
 struct PutArgs {
-    /// The schema: a schema published at `refs/schema/<schema>`.
+    /// The schema: a schema published under the selected schema prefix.
     schema: String,
-    /// An inline JSON value, or — for the hidden old form — an entity name.
+    /// An inline JSON value, or — with `--legacy-name` — an entity name.
     value: Option<String>,
+    /// Explicitly use the old ref-addressed `put <kind> <name>` behavior.
+    /// Without this switch, a non-JSON positional value is an error.
+    #[arg(long)]
+    legacy_name: bool,
     /// JSON file to store; stdin or `$EDITOR` is used when omitted.
     #[arg(short = 'F', long = "file", value_name = "FILE")]
     file: Option<PathBuf>,
-    /// Commit message for the hidden old (named) form (a `Schema:` trailer is
-    /// always added). Has no effect on a pure compile.
+    /// Commit message for the `--legacy-name` form. Reserved legacy trailer
+    /// lines (`Schema:`, `Schema-Version:`, or `Ents-Ref:`) are rejected. Has
+    /// no effect on a pure compile.
     #[arg(short = 'm', long = "message", value_name = "MSG")]
     message: Option<String>,
     /// Edit the content in `$VISUAL`/`$EDITOR` before storing.
@@ -105,6 +261,79 @@ struct PutArgs {
     /// editor.
     #[arg(short = 'i', long = "interactive", conflicts_with_all = ["file", "edit"])]
     interactive: bool,
+}
+
+#[derive(Subcommand)]
+enum RefCommand {
+    /// List refs, optionally narrowed by full prefix and kind.
+    List {
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Resolve a full ref to its object id.
+    Resolve { reference: String },
+}
+
+#[derive(Subcommand)]
+enum ObjectCommand {
+    /// Inspect an object or revision.
+    Inspect { object_ish: String },
+    /// List the direct entries of a tree or tree-ish.
+    Tree { tree_ish: String },
+}
+
+#[derive(Subcommand)]
+enum ValueCommand {
+    /// Decode an unbound value tree under an explicit schema tree or commit.
+    Decode {
+        value_tree: String,
+        #[arg(long)]
+        schema: String,
+        /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
+        #[arg(long)]
+        legacy_leaves: bool,
+    },
+    /// Encode JSON from stdin or a file under an explicit schema.
+    Encode {
+        #[arg(long)]
+        schema: String,
+        #[arg(short = 'F', long = "file", value_name = "FILE")]
+        file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DocumentCommand {
+    /// Inspect the root shape of a document tree.
+    Inspect { document_tree_ish: String },
+    /// Bind an encoded value tree to a schema tree.
+    Bind {
+        value_tree_ish: String,
+        #[arg(long)]
+        schema: String,
+    },
+    /// Publish a prepared document using an explicit compare-and-swap.
+    Publish {
+        kind: String,
+        document_tree_ish: String,
+        #[arg(long)]
+        alias: Option<String>,
+        #[arg(long)]
+        expected: String,
+        /// Parent commit for a newly written publication commit.
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(short = 'm', long = "message")]
+        message: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EntityCommand {
+    /// Publish a canonical tombstone for an entity id.
+    Delete { kind: String, entity_id: String },
 }
 
 #[derive(Subcommand)]
@@ -120,8 +349,25 @@ enum SchemaCommand {
         #[arg(short = 'i', long = "interactive", conflicts_with = "file")]
         interactive: bool,
     },
-    /// Print a kind's current schema as JSON.
-    Get { kind: String },
+    /// Print a kind's current or historical schema as JSON.
+    Get {
+        kind: String,
+        /// Address the schema publication commit directly.
+        #[arg(long)]
+        at: Option<String>,
+        /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
+        #[arg(long)]
+        legacy_leaves: bool,
+    },
+    /// Inspect a schema publication commit directly.
+    Inspect {
+        kind: String,
+        #[arg(long)]
+        at: String,
+        /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
+        #[arg(long)]
+        legacy_leaves: bool,
+    },
     /// Show a kind's field layout, human-readable (all kinds when omitted).
     Show { kind: Option<String> },
     /// List kinds that have a published schema.
@@ -131,7 +377,14 @@ enum SchemaCommand {
     Log { kind: String },
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("{error:#}");
+        std::process::exit(error_exit_code(&error));
+    }
+}
+
+fn run() -> Result<()> {
     // Install signal handlers before any lock is taken, so an interrupted
     // write cleans up gix-refstore's per-ref lock file (a gix_tempfile under
     // `<git-dir>/gix-refstore-locks/`) instead of leaving a stale one that
@@ -147,25 +400,46 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
-    let mut repo = gix::discover(".").context("not inside a git repository")?;
+    let output = OutputFormat::from_cli(cli.format, cli.json);
+    let layout = layout_from_cli(&cli.data_prefix, &cli.schema_prefix)?;
+    let mut repo = match gix::discover(".") {
+        Ok(repo) => repo,
+        Err(error) => {
+            if raw_repository_object_format(Path::new("."))
+                .is_some_and(|format| format.eq_ignore_ascii_case("sha256"))
+            {
+                bail!(
+                    "unsupported Git object format: expected sha1, observed sha256; this build's schema codec and fixed-point digest are SHA-1-only"
+                );
+            }
+            return Err(error).context("not inside a git repository");
+        }
+    };
     repo.object_cache_size_if_unset(4 * 1024 * 1024);
-    let store = RepoStore::open(&repo);
+    let store = RepoStore::open_with_layout(&repo, layout);
 
     match cli.command {
         // Bare `git store` lists kinds — a read-only default, like `git remote`.
         None => print_lines(store.kinds()?),
         Some(Command::Put(args)) => put(&store, args)?,
-        Some(Command::Get { args }) => match <[String; 1]>::try_from(args) {
+        Some(Command::Get {
+            args,
+            legacy_leaves,
+        }) => match <[String; 1]>::try_from(args) {
             // `get <tree-ish>`: decode any tree of the `{value/, schema/}`
             // shape directly, whatever it was reached through.
             Ok([tree_ish]) => {
                 let tree = resolve_tree(&repo, &tree_ish)?;
                 // `decode` reads entirely out of `tree`'s own embedded
-                // schema, so which kind this handle is opened on is
-                // irrelevant — any placeholder name will do.
-                let value = document_handle(&store)
-                    .decode(tree)
-                    .with_context(|| format!("{tree_ish} is not a document"))?;
+                // schema and does not consult any kind or schema ref.
+                let value = if legacy_leaves {
+                    store.decode_legacy(tree)
+                } else {
+                    store.decode(tree)
+                }
+                .with_context(|| {
+                    cli_context(ExitClass::Schema, format!("{tree_ish} is not a document"))
+                })?;
                 println!("{}", to_json(&value)?);
             }
             // Hidden old form: `get <kind> <name>`.
@@ -175,7 +449,7 @@ fn main() -> Result<()> {
                 let (name, rev) = split_name_rev(&name);
                 let handle = store.dynamic(segment("kind", &kind)?);
                 let name_seg = entity(name)?;
-                let value = match rev {
+                let state = match rev {
                     Some(rev) => {
                         let oid = resolve_at(&repo, &handle, &name_seg, rev)?;
                         // Only read a commit that is actually a version of
@@ -184,11 +458,19 @@ fn main() -> Result<()> {
                         if !handle.history(&name_seg)?.contains(&oid) {
                             bail!("{rev} is not a version of {kind}/{name}");
                         }
-                        handle.get_at(oid)?
+                        handle.read_at(oid)?
                     }
-                    None => handle
-                        .get(&name_seg)?
-                        .with_context(|| format!("no entity {kind}/{name}"))?,
+                    None => handle.read(&name_seg)?,
+                };
+                let value = match state {
+                    EntityState::Present(entry) => entry.value,
+                    EntityState::Deleted(_) => bail!("entity {kind}/{name} is deleted"),
+                    EntityState::Absent => {
+                        return Err(cli_error(
+                            ExitClass::NotFound,
+                            format!("no entity {kind}/{name}"),
+                        ));
+                    }
                 };
                 println!("{}", to_json(&value)?);
             }
@@ -199,10 +481,20 @@ fn main() -> Result<()> {
                 .dynamic(segment("schema", &schema)?)
                 .schema()
                 .get()?
-                .with_context(|| format!("no schema published for {schema:?}"))?;
-            validate_with_schema(&tree, &doc, store.objects())
-                .with_context(|| format!("{tree_ish} does not conform to {schema:?}"))?;
+                .with_context(|| {
+                    cli_context(
+                        ExitClass::NotFound,
+                        format!("no schema published for {schema:?}"),
+                    )
+                })?;
+            validate_with_schema(&tree, &doc, store.objects()).with_context(|| {
+                cli_context(
+                    ExitClass::Schema,
+                    format!("{tree_ish} does not conform to {schema:?}"),
+                )
+            })?;
         }
+        Some(Command::Doctor) => doctor(&repo, &store)?,
         Some(Command::List { kind: Some(kind) }) => {
             print_lines(store.dynamic(segment("kind", &kind)?).list()?)
         }
@@ -216,8 +508,16 @@ fn main() -> Result<()> {
         }
         Some(Command::Rm { kind, name }) => {
             let name_seg = entity(&name)?;
-            if !store.dynamic(segment("kind", &kind)?).remove(&name_seg)? {
-                bail!("no entity {kind}/{name}");
+            let handle = store.dynamic(segment("kind", &kind)?);
+            match handle.delete_name(&name_seg)? {
+                DeleteResult::Deleted(_) => println!("deleted {kind}/{name}"),
+                DeleteResult::AlreadyDeleted(_) => println!("already deleted {kind}/{name}"),
+                DeleteResult::Absent => {
+                    return Err(cli_error(
+                        ExitClass::NotFound,
+                        format!("no entity {kind}/{name}"),
+                    ));
+                }
             }
         }
         Some(Command::Schema { command }) => match command {
@@ -228,19 +528,47 @@ fn main() -> Result<()> {
             } => {
                 let handle = store.dynamic(segment("kind", &kind)?);
                 let doc = if interactive {
-                    interactive::build_schema()?
+                    interactive::build_schema(&kind)?
                 } else {
                     schema_doc_from_json(&read_source(file.as_ref())?)?
                 };
                 println!("{}", handle.schema().put(&doc)?);
             }
-            SchemaCommand::Get { kind } => {
-                let doc = store
-                    .dynamic(segment("kind", &kind)?)
-                    .schema()
-                    .get()?
-                    .with_context(|| format!("no schema published for kind {kind:?}"))?;
-                println!("{}", to_json(&doc)?);
+            SchemaCommand::Get {
+                kind,
+                at,
+                legacy_leaves,
+            } => {
+                let handle = store.dynamic(segment("kind", &kind)?);
+                let snapshot = match at {
+                    Some(at) => {
+                        let commit = resolve_commit(&repo, &at)?;
+                        if legacy_leaves {
+                            handle.schema().snapshot_at_legacy(commit)?
+                        } else {
+                            handle.schema().snapshot_at(commit)?
+                        }
+                    }
+                    None => {
+                        if legacy_leaves {
+                            handle.schema().current_snapshot_legacy()?
+                        } else {
+                            handle.schema().current_snapshot()?
+                        }
+                    }
+                };
+                if output.machine() {
+                    emit_record(output, schema_record(&snapshot)?)?;
+                } else {
+                    println!("{}", to_json(&snapshot.schema)?);
+                }
+            }
+            SchemaCommand::Inspect {
+                kind,
+                at,
+                legacy_leaves,
+            } => {
+                schema_inspect(&repo, &store, &kind, &at, legacy_leaves, output)?;
             }
             SchemaCommand::Show { kind } => {
                 let kinds = match kind {
@@ -260,27 +588,797 @@ fn main() -> Result<()> {
                 store.dynamic(segment("kind", &kind)?).schema().history()?,
             )?,
         },
+        Some(Command::Ref { command }) => match command {
+            RefCommand::List { prefix, kind } => {
+                ref_list(&store, prefix.as_deref(), kind.as_deref(), output)?
+            }
+            RefCommand::Resolve { reference } => ref_resolve(&store, &reference, output)?,
+        },
+        Some(Command::Object { command }) => match command {
+            ObjectCommand::Inspect { object_ish } => object_inspect(&repo, &object_ish, output)?,
+            ObjectCommand::Tree { tree_ish } => object_tree(&repo, &tree_ish, output)?,
+        },
+        Some(Command::Value { command }) => match command {
+            ValueCommand::Decode {
+                value_tree,
+                schema,
+                legacy_leaves,
+            } => value_decode(&repo, &store, &value_tree, &schema, legacy_leaves, output)?,
+            ValueCommand::Encode { schema, file } => {
+                value_encode(&repo, &store, &schema, file.as_ref(), output)?
+            }
+        },
+        Some(Command::Document { command }) => match command {
+            DocumentCommand::Inspect { document_tree_ish } => {
+                document_inspect(&repo, &store, &document_tree_ish, output)?
+            }
+            DocumentCommand::Bind {
+                value_tree_ish,
+                schema,
+            } => document_bind(&repo, &store, &value_tree_ish, &schema, output)?,
+            DocumentCommand::Publish {
+                kind,
+                document_tree_ish,
+                alias,
+                expected,
+                parent,
+                message,
+            } => document_publish(
+                &repo,
+                &store,
+                DocumentPublishRequest {
+                    kind: &kind,
+                    document_spec: &document_tree_ish,
+                    alias: alias.as_deref(),
+                    expected: &expected,
+                    parent: parent.as_deref(),
+                    message: message.as_deref(),
+                },
+                output,
+            )?,
+        },
+        Some(Command::Entity { command }) => match command {
+            EntityCommand::Delete { kind, entity_id } => {
+                entity_delete(&store, &kind, &entity_id, output)?
+            }
+        },
     }
     Ok(())
+}
+
+fn error_exit_code(error: &anyhow::Error) -> i32 {
+    let mut class = ExitClass::Other;
+    for cause in error.chain() {
+        if let Some(context) = cause.downcast_ref::<ClassifiedContext>() {
+            class = class.prefer(context.class);
+        }
+        if cause
+            .downcast_ref::<ApplyError<<GixRefStore<'static> as RefStore>::Error>>()
+            .is_some()
+        {
+            class = class.prefer(ExitClass::Cas);
+        }
+        if let Some(store_error) = cause.downcast_ref::<gix_store::Error>() {
+            class = class.prefer(store_error_exit_class(store_error));
+        }
+        if cause
+            .downcast_ref::<facet_git_tree::SchemaReadError>()
+            .is_some()
+            || cause
+                .downcast_ref::<facet_git_tree::SchemaWriteError>()
+                .is_some()
+            || cause
+                .downcast_ref::<facet_git_tree::SchemaPinError>()
+                .is_some()
+            || cause
+                .downcast_ref::<facet_git_tree::MigrationError>()
+                .is_some()
+            || cause
+                .downcast_ref::<facet_git_tree::MigrationPinError>()
+                .is_some()
+        {
+            class = class.prefer(ExitClass::Schema);
+        }
+        if let Some(error) = cause.downcast_ref::<facet_git_tree::DeserializeError>() {
+            class = class.prefer(deserialize_exit_class(error));
+        }
+        if let Some(error) = cause.downcast_ref::<facet_git_tree::SerializeError>()
+            && matches!(error, facet_git_tree::SerializeError::Key(_))
+        {
+            class = class.prefer(ExitClass::Invalid);
+        }
+        if cause.downcast_ref::<facet_git_tree::KeyError>().is_some() {
+            class = class.prefer(ExitClass::Invalid);
+        }
+    }
+    class.code()
+}
+
+fn store_error_exit_class(error: &gix_store::Error) -> ExitClass {
+    match error {
+        gix_store::Error::NoSchema { .. }
+        | gix_store::Error::MissingObject { .. }
+        | gix_store::Error::SubtreeMissing { .. } => ExitClass::NotFound,
+        gix_store::Error::NotACommit { .. }
+        | gix_store::Error::NotATree { .. }
+        | gix_store::Error::InvalidTrailer { .. } => ExitClass::Invalid,
+        gix_store::Error::NotSubtreeBound { .. }
+        | gix_store::Error::MissingTrailer { .. }
+        | gix_store::Error::KindMismatch { .. }
+        | gix_store::Error::IdentityUniverse { .. }
+        | gix_store::Error::Schema(_)
+        | gix_store::Error::SchemaWrite(_)
+        | gix_store::Error::SchemaRead(_)
+        | gix_store::Error::SchemaPin(_)
+        | gix_store::Error::MigrationPin(_)
+        | gix_store::Error::Migration(_)
+        | gix_store::Error::SchemaNotInHistory { .. }
+        | gix_store::Error::TargetHistoryEmpty { .. }
+        | gix_store::Error::TargetSchemaMismatch { .. }
+        | gix_store::Error::TargetSchemaNotInHistory { .. }
+        | gix_store::Error::MigrationMissing { .. } => ExitClass::Schema,
+        gix_store::Error::ReservedTrailer { .. }
+        | gix_store::Error::NameTaken { .. }
+        | gix_store::Error::EntityIdCollision { .. }
+        | gix_store::Error::Deleted { .. }
+        | gix_store::Error::TombstoneSchemaMismatch
+        | gix_store::Error::InvalidTombstone
+        | gix_store::Error::Signer(_)
+        | gix_store::Error::Fingerprint(_)
+        | gix_store::Error::Backend(_)
+        | gix_store::Error::Serialize(_)
+        | gix_store::Error::Deserialize(_) => ExitClass::Other,
+    }
+}
+
+fn deserialize_exit_class(error: &facet_git_tree::DeserializeError) -> ExitClass {
+    match error {
+        facet_git_tree::DeserializeError::NotFound(_) => ExitClass::NotFound,
+        facet_git_tree::DeserializeError::NotATree(_)
+        | facet_git_tree::DeserializeError::InvalidOrdinal(_) => ExitClass::Invalid,
+        _ => ExitClass::Other,
+    }
+}
+
+fn json_record() -> VObject {
+    let mut record = VObject::new();
+    record.insert("status", "ok");
+    record.insert("code", "ok");
+    record
+}
+
+fn oid_value(oid: ObjectId) -> Value {
+    oid.to_string().into()
+}
+
+fn string_array<I>(items: I) -> Value
+where
+    I: IntoIterator,
+    I::Item: Into<String>,
+{
+    let mut array = VArray::new();
+    for item in items {
+        array.push(item.into());
+    }
+    array.into()
+}
+
+fn emit_record(format: OutputFormat, record: VObject) -> Result<()> {
+    if !format.machine() {
+        bail!("internal error: attempted machine output in text mode")
+    }
+    let value: Value = record.into();
+    println!(
+        "{}",
+        facet_json::to_string(&value).map_err(|e| anyhow::anyhow!("encoding JSON: {e}"))?
+    );
+    Ok(())
+}
+
+fn resolve_commit(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
+    let id = repo.rev_parse_single(spec).with_context(|| {
+        cli_context(
+            ExitClass::NotFound,
+            format!("cannot resolve commit {spec:?}"),
+        )
+    })?;
+    let object = id.object().with_context(|| {
+        cli_context(
+            ExitClass::NotFound,
+            format!("cannot resolve commit {spec:?}"),
+        )
+    })?;
+    if object.kind != gix::objs::Kind::Commit {
+        return Err(cli_error(
+            ExitClass::Invalid,
+            format!("{spec:?} is not a commit"),
+        ));
+    }
+    Ok(id.detach())
+}
+
+/// Resolve an explicit schema argument as either a schema tree or publication
+/// commit. No kind ref, name lookup, or commit trailer is consulted.
+fn resolve_schema_tree(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
+    resolve_tree(repo, spec)
+}
+
+fn schema_record(snapshot: &gix_store::SchemaSnapshot) -> Result<VObject> {
+    let schema_json = facet_json::to_string(&snapshot.schema)
+        .map_err(|e| anyhow::anyhow!("encoding schema JSON: {e}"))?;
+    let schema: Value = facet_json::from_str(&schema_json)
+        .map_err(|e| anyhow::anyhow!("encoding schema JSON: {e}"))?;
+    let mut record = json_record();
+    record.insert("kind", snapshot.schema.kind.clone());
+    record.insert("commit", oid_value(snapshot.commit));
+    record.insert("schema_tree", oid_value(snapshot.schema_tree));
+    record.insert("schema", schema);
+    Ok(record)
+}
+
+fn schema_inspect(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    kind: &str,
+    at: &str,
+    legacy_leaves: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    let segment = segment("kind", kind)?;
+    let commit = resolve_commit(repo, at)?;
+    let schema = store.dynamic(segment).schema();
+    let snapshot = if legacy_leaves {
+        schema.snapshot_at_legacy(commit)?
+    } else {
+        schema.snapshot_at(commit)?
+    };
+    if format.machine() {
+        emit_record(format, schema_record(&snapshot)?)
+    } else {
+        println!("kind: {}", snapshot.schema.kind);
+        println!("commit: {}", snapshot.commit);
+        println!("schema tree: {}", snapshot.schema_tree);
+        print_type(kind, &snapshot.schema);
+        Ok(())
+    }
+}
+
+fn layout_from_cli(data: &str, schema: &str) -> Result<Layout> {
+    Ok(Layout {
+        data: RefPrefix::new(data).with_context(|| {
+            cli_context(
+                ExitClass::Invalid,
+                format!("invalid data ref prefix {data:?}"),
+            )
+        })?,
+        schema: RefPrefix::new(schema).with_context(|| {
+            cli_context(
+                ExitClass::Invalid,
+                format!("invalid schema ref prefix {schema:?}"),
+            )
+        })?,
+    })
+}
+
+fn ref_list(
+    store: &RepoStore<'_>,
+    prefix: Option<&str>,
+    kind: Option<&str>,
+    format: OutputFormat,
+) -> Result<()> {
+    let prefix = RefPrefix::new(prefix.unwrap_or("refs"))?;
+    let kind_prefixes = match kind {
+        Some(kind) => {
+            let kind = segment("kind", kind)?;
+            Some((
+                store.layout().data.child(&kind),
+                store.layout().schema.join(&kind),
+            ))
+        }
+        None => None,
+    };
+    let mut refs = store.refs().prefixed(&prefix)?;
+    refs.retain(|(name, _)| {
+        kind_prefixes
+            .as_ref()
+            .is_none_or(|(data_kind, schema_ref)| name.is_under(data_kind) || name == schema_ref)
+    });
+    if format.machine() {
+        if matches!(format, OutputFormat::Ndjson) {
+            for (name, oid) in refs {
+                let mut record = json_record();
+                record.insert("ref", name.to_string());
+                record.insert("oid", oid_value(oid));
+                emit_record(format, record)?;
+            }
+            Ok(())
+        } else {
+            let mut values = VArray::new();
+            for (name, oid) in &refs {
+                let mut item = VObject::new();
+                item.insert("ref", name.to_string());
+                item.insert("oid", oid_value(*oid));
+                values.push(item);
+            }
+            let mut record = json_record();
+            record.insert("refs", values);
+            emit_record(format, record)
+        }
+    } else {
+        for (name, oid) in refs {
+            println!("{name} {oid}");
+        }
+        Ok(())
+    }
+}
+
+fn ref_resolve(store: &RepoStore<'_>, reference: &str, format: OutputFormat) -> Result<()> {
+    let reference = RefName::new(reference).with_context(|| {
+        cli_context(
+            ExitClass::Invalid,
+            format!("invalid full ref {reference:?}"),
+        )
+    })?;
+    let oid = store
+        .refs()
+        .read(&reference)?
+        .with_context(|| cli_context(ExitClass::NotFound, format!("ref {reference} not found")))?;
+    if format.machine() {
+        let mut record = json_record();
+        record.insert("ref", reference.to_string());
+        record.insert("oid", oid_value(oid));
+        emit_record(format, record)
+    } else {
+        println!("{oid}");
+        Ok(())
+    }
+}
+
+fn object_inspect(repo: &gix::Repository, spec: &str, format: OutputFormat) -> Result<()> {
+    let id = repo
+        .rev_parse_single(spec)
+        .with_context(|| {
+            cli_context(
+                ExitClass::NotFound,
+                format!("cannot resolve object {spec:?}"),
+            )
+        })?
+        .detach();
+    let object = repo
+        .find_object(id)
+        .with_context(|| cli_context(ExitClass::NotFound, format!("object {id} is not present")))?;
+    let kind = format!("{:?}", object.kind).to_ascii_lowercase();
+    if format.machine() {
+        let mut record = json_record();
+        record.insert("oid", oid_value(id));
+        record.insert("kind", kind);
+        record.insert("size", object.data.len() as u64);
+        emit_record(format, record)
+    } else {
+        println!("{kind} {id} {}", object.data.len());
+        Ok(())
+    }
+}
+
+fn object_tree(repo: &gix::Repository, spec: &str, format: OutputFormat) -> Result<()> {
+    let tree_id = resolve_tree(repo, spec)?;
+    let tree = repo
+        .find_object(tree_id)
+        .with_context(|| {
+            cli_context(
+                ExitClass::NotFound,
+                format!("tree {tree_id} is not present"),
+            )
+        })?
+        .try_into_tree()
+        .with_context(|| cli_context(ExitClass::Invalid, format!("{spec:?} is not a tree-ish")))?;
+    let mut entries = Vec::new();
+    for entry in tree.iter() {
+        let entry = entry?;
+        entries.push((
+            String::from_utf8_lossy(entry.filename()).into_owned(),
+            entry.object_id(),
+            format!("{:?}", entry.kind()).to_ascii_lowercase(),
+            entry.mode().as_str().to_owned(),
+        ));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    if format.machine() {
+        if matches!(format, OutputFormat::Ndjson) {
+            for (name, oid, kind, mode) in entries {
+                let mut record = json_record();
+                record.insert("tree", oid_value(tree_id));
+                record.insert("name", name);
+                record.insert("oid", oid_value(oid));
+                record.insert("kind", kind);
+                record.insert("mode", mode);
+                emit_record(format, record)?;
+            }
+            Ok(())
+        } else {
+            let mut values = VArray::new();
+            for (name, oid, kind, mode) in entries {
+                let mut item = VObject::new();
+                item.insert("name", name);
+                item.insert("oid", oid_value(oid));
+                item.insert("kind", kind);
+                item.insert("mode", mode);
+                values.push(item);
+            }
+            let mut record = json_record();
+            record.insert("tree", oid_value(tree_id));
+            record.insert("entries", values);
+            emit_record(format, record)
+        }
+    } else {
+        for (name, oid, kind, mode) in entries {
+            println!("{mode} {oid} {kind} {name}");
+        }
+        Ok(())
+    }
+}
+
+fn value_decode(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    value_spec: &str,
+    schema_spec: &str,
+    legacy_leaves: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    let value_tree = resolve_tree(repo, value_spec)?;
+    let schema_tree = resolve_schema_tree(repo, schema_spec)?;
+    let value = if legacy_leaves {
+        store.decode_value_legacy(value_tree, schema_tree)
+    } else {
+        store.decode_value(value_tree, schema_tree)
+    }?;
+    if format.machine() {
+        let mut record = json_record();
+        record.insert("value_tree", oid_value(value_tree));
+        record.insert("schema_tree", oid_value(schema_tree));
+        record.insert("value", value);
+        emit_record(format, record)
+    } else {
+        println!("{}", to_json(&value)?);
+        Ok(())
+    }
+}
+
+fn value_encode(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    schema_spec: &str,
+    file: Option<&PathBuf>,
+    format: OutputFormat,
+) -> Result<()> {
+    let schema_tree = resolve_schema_tree(repo, schema_spec)?;
+    let json = read_source(file)?;
+    let value: Value = facet_json::from_str(&json)
+        .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))?;
+    let value_tree = store.encode_value(&value, schema_tree)?;
+    if format.machine() {
+        let mut record = json_record();
+        record.insert("schema_tree", oid_value(schema_tree));
+        record.insert("value_tree", oid_value(value_tree));
+        emit_record(format, record)
+    } else {
+        println!("{value_tree}");
+        Ok(())
+    }
+}
+
+fn document_inspect(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    spec: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    let document_tree = resolve_tree(repo, spec)?;
+    let inspection = store.inspect_document(document_tree)?;
+    if format.machine() {
+        let mut record = json_record();
+        record.insert("document_tree", oid_value(document_tree));
+        match inspection {
+            DocumentInspection::Bound(prepared) => {
+                record.insert("kind", "bound");
+                record.insert("value_tree", oid_value(prepared.value_tree()));
+                record.insert("schema_tree", oid_value(prepared.schema_tree()));
+            }
+            DocumentInspection::LegacyValueRoot { value_tree } => {
+                record.insert("kind", "legacy_value_root");
+                record.insert("value_tree", oid_value(value_tree));
+            }
+            DocumentInspection::Malformed { found, reason, .. } => {
+                record.insert("kind", "malformed");
+                record.insert("found", string_array(found));
+                record.insert("reason", reason.to_string());
+            }
+        }
+        emit_record(format, record)
+    } else {
+        match inspection {
+            DocumentInspection::Bound(prepared) => {
+                println!("bound document {document_tree}");
+                println!("  value: {}", prepared.value_tree());
+                println!("  schema: {}", prepared.schema_tree());
+            }
+            DocumentInspection::LegacyValueRoot { value_tree } => {
+                println!("legacy value root {value_tree}");
+            }
+            DocumentInspection::Malformed { found, reason, .. } => {
+                println!("malformed document {document_tree}: {reason}");
+                println!("  found: {}", found.join(", "));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn document_bind(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    value_spec: &str,
+    schema_spec: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    let value_tree = resolve_tree(repo, value_spec)?;
+    let schema_tree = resolve_schema_tree(repo, schema_spec)?;
+    let prepared = store.bind_document(value_tree, schema_tree)?;
+    if format.machine() {
+        let mut record = json_record();
+        record.insert("document_tree", oid_value(prepared.document_tree()));
+        record.insert("value_tree", oid_value(prepared.value_tree()));
+        record.insert("schema_tree", oid_value(prepared.schema_tree()));
+        emit_record(format, record)
+    } else {
+        println!("{}", prepared.document_tree());
+        Ok(())
+    }
+}
+
+fn parse_expectation(value: &str) -> Result<Expectation> {
+    if value.eq_ignore_ascii_case("absent") {
+        Ok(Expectation::Absent)
+    } else {
+        Ok(Expectation::Exactly(value.parse().with_context(|| {
+            cli_context(
+                ExitClass::Invalid,
+                format!("invalid expected object id {value:?}"),
+            )
+        })?))
+    }
+}
+
+struct DocumentPublishRequest<'a> {
+    kind: &'a str,
+    document_spec: &'a str,
+    alias: Option<&'a str>,
+    expected: &'a str,
+    parent: Option<&'a str>,
+    message: Option<&'a str>,
+}
+
+fn document_publish(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    request: DocumentPublishRequest<'_>,
+    format: OutputFormat,
+) -> Result<()> {
+    let DocumentPublishRequest {
+        kind,
+        document_spec,
+        alias,
+        expected,
+        parent,
+        message,
+    } = request;
+    let document_tree = resolve_tree(repo, document_spec)?;
+    let prepared = match store.inspect_document(document_tree)? {
+        DocumentInspection::Bound(prepared) => prepared,
+        DocumentInspection::LegacyValueRoot { .. } => {
+            return Err(cli_error(
+                ExitClass::Schema,
+                format!("{document_spec:?} is an unbound value tree; bind it before publishing"),
+            ));
+        }
+        DocumentInspection::Malformed { reason, .. } => {
+            return Err(cli_error(
+                ExitClass::Schema,
+                format!("{document_spec:?} is not a publishable document: {reason}"),
+            ));
+        }
+    };
+    let expected = parse_expectation(expected)?;
+    let mut options = PublishOptions::new(message.unwrap_or("publish prepared document"))
+        .with_expectation(expected);
+    if let Some(parent) = parent {
+        options = options.with_parent(resolve_commit(repo, parent)?);
+    }
+    if let Some(alias) = alias {
+        options = options.with_alias(entity(alias)?);
+    }
+    let publication = store
+        .dynamic(segment("kind", kind)?)
+        .publish_prepared(&prepared, options)
+        .map_err(|error| {
+            if matches!(error, gix_store::Error::Backend(_)) {
+                // `gix-store` intentionally erases backend error parameters at
+                // its public boundary. This command supplies an explicit CAS,
+                // so classify that stable public variant without parsing text.
+                cli_error(ExitClass::Cas, error.to_string())
+            } else {
+                error.into()
+            }
+        })?;
+    if format.machine() {
+        let mut record = json_record();
+        record.insert("kind", kind);
+        record.insert("id", publication.entity_id().to_string());
+        record.insert("commit", oid_value(publication.commit()));
+        record.insert("document_tree", oid_value(document_tree));
+        emit_record(format, record)
+    } else {
+        println!("{}", publication.entity_id());
+        Ok(())
+    }
+}
+
+fn entity_delete(
+    store: &RepoStore<'_>,
+    kind: &str,
+    entity_text: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    let id: EntityId = entity_text.parse().with_context(|| {
+        cli_context(
+            ExitClass::Invalid,
+            format!("invalid canonical entity id {entity_text:?}"),
+        )
+    })?;
+    let result = store.dynamic(segment("kind", kind)?).delete_entity(id)?;
+    let (status, code, commit) = match result {
+        DeleteResult::Deleted(entry) => ("deleted", "deleted", Some(entry.commit)),
+        DeleteResult::AlreadyDeleted(entry) => {
+            ("already_deleted", "already_deleted", Some(entry.commit))
+        }
+        DeleteResult::Absent => {
+            return Err(cli_error(
+                ExitClass::NotFound,
+                format!("no entity {kind}/{id}"),
+            ));
+        }
+    };
+    if format.machine() {
+        let mut record = json_record();
+        record.insert("status", status);
+        record.insert("code", code);
+        record.insert("kind", kind);
+        record.insert("id", id.to_string());
+        if let Some(commit) = commit {
+            record.insert("commit", oid_value(commit));
+        }
+        emit_record(format, record)
+    } else {
+        println!("{status} {kind}/{id}");
+        Ok(())
+    }
 }
 
 /// Validate a CLI argument as a [`RefSegment`], with context naming which
 /// argument it was.
 fn segment(what: &str, value: &str) -> Result<RefSegment> {
-    RefSegment::new(value).with_context(|| format!("invalid {what} {value:?}"))
+    RefSegment::new(value)
+        .with_context(|| cli_context(ExitClass::Invalid, format!("invalid {what} {value:?}")))
 }
 
 /// Validate an entity-name argument, which may name a nested entity
 /// (`<a>/<b>`) as well as a flat one.
 fn entity(value: &str) -> Result<RefPath> {
-    RefPath::new(value).with_context(|| format!("invalid name {value:?}"))
+    RefPath::new(value)
+        .with_context(|| cli_context(ExitClass::Invalid, format!("invalid name {value:?}")))
 }
 
-/// A [`Dynamic`] handle whose kind name is irrelevant — only [`Kind::decode`]
-/// and [`Kind::compile`] read/write independent of it, since a document's
-/// schema travels inline with it rather than through a kind's own ref.
-fn document_handle<'s, 'r>(store: &'s RepoStore<'r>) -> DynKind<'s, 'r> {
-    store.dynamic(RefSegment::new("_").expect("\"_\" is a valid ref segment"))
+/// Read the object format without asking gix to parse the repository config.
+///
+/// This is used only when discovery fails: gix builds without SHA-256 support
+/// reject the `extensions.objectFormat` key before the doctor command can
+/// report the more useful unsupported-format diagnostic.
+fn raw_repository_object_format(start: &Path) -> Option<String> {
+    let git_dir = raw_git_dir(start)?;
+    let config = std::fs::read_to_string(git_dir.join("config")).ok()?;
+    let mut in_extensions = false;
+
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_extensions = line.eq_ignore_ascii_case("[extensions]");
+            continue;
+        }
+        if !in_extensions {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("objectformat") {
+            return Some(value.trim().to_owned());
+        }
+    }
+    None
+}
+
+/// Find the Git directory at or above `start` without parsing its config.
+fn raw_git_dir(start: &Path) -> Option<PathBuf> {
+    let mut dir = std::fs::canonicalize(start).ok()?;
+    loop {
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git);
+        }
+        if dot_git.is_file() {
+            let gitdir_file = std::fs::read_to_string(&dot_git).ok()?;
+            let gitdir = gitdir_file
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+                .trim()
+                .to_owned();
+            let git_dir = PathBuf::from(gitdir);
+            return Some(if git_dir.is_absolute() {
+                git_dir
+            } else {
+                dir.join(git_dir)
+            });
+        }
+        if dir.join("HEAD").is_file()
+            && dir.join("config").is_file()
+            && dir.join("objects").is_dir()
+        {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Check invariants that depend on the repository object database rather than
+/// on a particular kind or ref namespace.
+fn doctor(repo: &gix::Repository, store: &RepoStore<'_>) -> Result<()> {
+    let observed = repo.object_hash();
+    // A SHA-256 repository is reported as SHA-1 by gix builds without its
+    // `sha256` feature. Inspect the raw extension as well so this build does
+    // not accidentally accept a repository it cannot encode correctly.
+    let configured_sha256 = repo
+        .config_snapshot()
+        .string("extensions.objectformat")
+        .is_some_and(|format| format.as_ref().eq_ignore_ascii_case(b"sha256"));
+    doctor_with(observed, configured_sha256, || {
+        SchemaSchema::check_fixed_point(store.objects()).map_err(Into::into)
+    })
+}
+
+fn doctor_with(
+    observed: gix::hash::Kind,
+    configured_sha256: bool,
+    fixed_point: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if observed != gix::hash::Kind::Sha1 || configured_sha256 {
+        let observed = if configured_sha256 {
+            "sha256".to_owned()
+        } else {
+            format!("{observed:?}")
+        };
+        bail!(
+            "unsupported Git object format: expected sha1, observed {observed}; this build's schema codec and fixed-point digest are SHA-1-only"
+        );
+    }
+
+    fixed_point()
+        .with_context(|| cli_context(ExitClass::Schema, "schema fixed-point validation failed"))?;
+    println!("git-store doctor: ok (object format: sha1; schema fixed point: valid)");
+    Ok(())
 }
 
 /// Resolve `spec` to a tree: any revision syntax `rev-parse` accepts
@@ -289,12 +1387,12 @@ fn document_handle<'s, 'r>(store: &'s RepoStore<'r>) -> DynKind<'s, 'r> {
 fn resolve_tree(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
     let id = repo
         .rev_parse_single(spec)
-        .with_context(|| format!("cannot resolve {spec:?}"))?;
+        .with_context(|| cli_context(ExitClass::NotFound, format!("cannot resolve {spec:?}")))?;
     let tree = id
         .object()
-        .with_context(|| format!("cannot resolve {spec:?}"))?
+        .with_context(|| cli_context(ExitClass::NotFound, format!("cannot resolve {spec:?}")))?
         .peel_to_kind(gix::objs::Kind::Tree)
-        .with_context(|| format!("{spec:?} is not a tree-ish"))?;
+        .with_context(|| cli_context(ExitClass::Invalid, format!("{spec:?} is not a tree-ish")))?;
     Ok(tree.id)
 }
 
@@ -319,9 +1417,10 @@ fn gathered_json(handle: &DynKind<'_, '_>, file: &Option<PathBuf>, edit: bool) -
 /// `put`: compile `<value>` under `<schema>`, printing the document's tree
 /// hash — a pure operation, advancing no ref.
 ///
-/// The hidden old form (`value` present but not valid JSON) instead commits
-/// forward at `refs/store/<schema>/<value>`, printing the commit id — the
-/// pre-S1 named-entity write path.
+/// The explicit compatibility form (`--legacy-name`) commits forward under
+/// the selected data prefix, printing the commit id — the pre-S1 named-entity
+/// write path. Without that switch, invalid inline JSON is rejected before any
+/// named write can be attempted.
 fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
     let PutArgs {
         schema,
@@ -330,27 +1429,34 @@ fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
         message,
         edit,
         interactive,
+        legacy_name,
     } = args;
 
-    match &value {
-        Some(text) if !interactive && !edit && file.is_none() => {
-            match facet_json::from_str::<Value>(text) {
-                Ok(value) => {
-                    let handle = store.dynamic(segment("schema", &schema)?);
-                    println!("{}", handle.compile(&value)?);
-                }
-                // Not JSON: the hidden old `put <kind> <name>` form.
-                Err(_) => put_named(store, schema, text, file, message, edit, interactive)?,
-            }
-            return Ok(());
+    if legacy_name {
+        let name = value
+            .as_deref()
+            .context("--legacy-name requires an entity name as the positional value")?;
+        put_named(store, schema, name, file, message, edit, interactive)?;
+        return Ok(());
+    }
+
+    if let Some(value) = value {
+        if file.is_some() || edit || interactive {
+            bail!(
+                "a positional value cannot be combined with -F, --edit, or --interactive; use --legacy-name for a named write"
+            );
         }
-        // A second argument alongside `-F`/`-i` can only be the old form's
-        // entity name — an inline value has nowhere else to come from.
-        Some(name) => {
-            put_named(store, schema, name, file, message, edit, interactive)?;
-            return Ok(());
-        }
-        None => {}
+        let value: Value = facet_json::from_str::<Value>(&value).map_err(|error| {
+            cli_error(
+                ExitClass::Invalid,
+                format!(
+                    "invalid JSON value: {error}; use --legacy-name to explicitly perform a legacy named write"
+                ),
+            )
+        })?;
+        let handle = store.dynamic(segment("schema", &schema)?);
+        println!("{}", handle.compile(&value)?);
+        return Ok(());
     }
 
     let handle = store.dynamic(segment("schema", &schema)?);
@@ -358,14 +1464,16 @@ fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
         interactive::value_for_kind(&handle)?
     } else {
         let json = gathered_json(&handle, &file, edit)?;
-        facet_json::from_str(&json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?
+        facet_json::from_str(&json)
+            .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))?
     };
     println!("{}", handle.compile(&value)?);
     Ok(())
 }
 
-/// The hidden old `put <kind> <name>` form: commit the gathered value forward
-/// at `refs/store/<kind>/<name>`, printing the commit id.
+/// The explicit compatibility `put <kind> <name> --legacy-name` form: commit
+/// the gathered value forward under the selected data prefix, printing the
+/// commit id.
 fn put_named(
     store: &RepoStore<'_>,
     kind: String,
@@ -381,7 +1489,8 @@ fn put_named(
         interactive::value_for_kind(&handle)?
     } else {
         let json = gathered_json(&handle, &file, edit)?;
-        facet_json::from_str(&json).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))?
+        facet_json::from_str(&json)
+            .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))?
     };
     let mut write = handle.write(&value);
     if let Some(summary) = message {
@@ -429,9 +1538,12 @@ fn resolve_at(
     } else {
         rev.to_owned()
     };
-    let id = repo
-        .rev_parse_single(spec.as_str())
-        .with_context(|| format!("cannot resolve revision {rev:?}"))?;
+    let id = repo.rev_parse_single(spec.as_str()).with_context(|| {
+        cli_context(
+            ExitClass::NotFound,
+            format!("cannot resolve revision {rev:?}"),
+        )
+    })?;
     Ok(id.detach())
 }
 
@@ -448,11 +1560,14 @@ fn read_stdin() -> Result<String> {
     Ok(buf)
 }
 
-/// Parse a hand-authored schema JSON document into a [`Schema`].
+/// Parse a hand-authored schema JSON document into a [`Schema`]. The
+/// publication boundary replaces its embedded kind with the selected CLI
+/// kind, so the input may use any valid kind name or the generated default.
 fn schema_doc_from_json(json: &str) -> Result<Schema> {
-    let value: Value =
-        facet_json::from_str(json).map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))?;
-    from_value(value).map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))
+    let value: Value = facet_json::from_str(json)
+        .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid schema JSON: {e}")))?;
+    from_value(value)
+        .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid schema JSON: {e}")))
 }
 
 /// Content from `-F <file>`, or stdin when no file is given.
@@ -468,7 +1583,10 @@ fn read_source(file: Option<&PathBuf>) -> Result<String> {
 fn schema_skeleton(kind: &DynKind<'_, '_>) -> Result<String> {
     match kind.schema().get()? {
         Some(doc) => Ok(pretty_skeleton(&doc)),
-        None => bail!("no schema published for kind {:?}", kind.name().as_str()),
+        None => Err(cli_error(
+            ExitClass::NotFound,
+            format!("no schema published for kind {:?}", kind.name().as_str()),
+        )),
     }
 }
 
@@ -662,5 +1780,38 @@ fn label(schema: &Node) -> String {
         Node::RawTree => "tree".into(),
         Node::Dynamic => "dynamic".into(),
         Node::Ref(name) => name.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_reports_fixed_point_failure_with_context() {
+        let error = doctor_with(gix::hash::Kind::Sha1, false, || {
+            Err(anyhow::anyhow!("injected fixed-point failure"))
+        })
+        .expect_err("the injected fixed-point failure must reach the caller");
+        let message = format!("{error:#}");
+        assert!(message.contains("schema fixed-point validation failed"));
+        assert!(message.contains("injected fixed-point failure"));
+    }
+
+    #[test]
+    fn doctor_rejects_a_configured_sha256_repository() {
+        let error = doctor_with(gix::hash::Kind::Sha1, true, || Ok(())).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("unsupported Git object format"));
+        assert!(message.contains("sha256"));
+    }
+
+    #[test]
+    fn exit_classification_does_not_parse_human_text() {
+        let untyped = anyhow::anyhow!("schema value is invalid");
+        assert_eq!(error_exit_code(&untyped), 1);
+
+        let typed = cli_error(ExitClass::Invalid, "schema value is invalid");
+        assert_eq!(error_exit_code(&typed), 2);
     }
 }

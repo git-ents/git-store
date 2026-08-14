@@ -517,6 +517,7 @@ fn apply_chain_composes_edges_in_series() -> anyhow::Result<()> {
 fn unknown_ref_is_reachable() {
     let value = value!(42);
     let doc = Schema {
+        kind: "test".into(),
         root: Node::Ref("nope".into()),
         defs: Default::default(),
     };
@@ -533,6 +534,7 @@ fn unknown_ref_is_reachable() {
 fn mismatch_is_reachable() {
     let value = value!("not an object");
     let doc = Schema {
+        kind: "test".into(),
         root: Node::Struct(Default::default()),
         defs: Default::default(),
     };

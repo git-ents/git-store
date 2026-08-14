@@ -31,9 +31,10 @@ pub fn value_for_kind(kind: &DynKind<'_, '_>) -> Result<Value> {
 
 /// Build a schema document by prompting for the root type. `defs` stays empty:
 /// nested user types are inlined, a form the encoder accepts directly.
-pub fn build_schema() -> Result<Schema> {
+pub fn build_schema(kind: &str) -> Result<Schema> {
     let root = build_schema_node(prompter().as_mut(), "root type")?;
     Ok(Schema {
+        kind: kind.to_owned(),
         root,
         defs: Default::default(),
     })

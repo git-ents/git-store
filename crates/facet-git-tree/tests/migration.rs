@@ -165,6 +165,7 @@ fn no_attributes_yields_empty_hints_and_unchanged_schema() -> anyhow::Result<()>
     assert_eq!(doc, schema_of::<Person>()?);
 
     let expected = Schema {
+        kind: "Person".into(),
         root: Node::Ref("Person".into()),
         defs: BTreeMap::from([(
             "Person".into(),

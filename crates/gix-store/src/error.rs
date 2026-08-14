@@ -89,13 +89,54 @@ pub enum Error {
         /// The trailer text that failed to parse.
         text: String,
     },
-    /// An anonymous entity's derived name collided with a live ref that does
-    /// not already hold the commit just written.
-    #[error("{name} already exists and points elsewhere")]
+    /// A caller-supplied commit message contains a trailer reserved by the
+    /// store's historical metadata format.
+    #[error(
+        "commit message contains reserved trailer line {trailer:?}; gix-store does not write schema or provenance trailers"
+    )]
+    ReservedTrailer {
+        /// The reserved trailer name found at the start of a message line.
+        trailer: &'static str,
+    },
+    /// An alias attempted to overwrite an immutable canonical entity ref.
+    #[error("{name} is a canonical entity ref and cannot be used as an alias")]
     NameTaken {
-        /// The ref that was already taken.
+        /// The ref that is reserved by another entity.
         name: RefName,
     },
+    /// A canonical ref points at a document tree different from the tree its
+    /// name claims. This indicates an out-of-band ref corruption or collision.
+    #[error("entity id {id} points at document tree {found}, expected {expected}")]
+    EntityIdCollision {
+        /// The derived id encoded by the ref name.
+        id: crate::EntityId,
+        /// The document tree represented by the id.
+        expected: ObjectId,
+        /// The tree actually found at the canonical ref.
+        found: ObjectId,
+    },
+    /// A document or tombstone belongs to a different kind than the handle
+    /// used to read or recognize it.
+    #[error("document kind {found:?} does not match requested kind {expected}")]
+    KindMismatch {
+        /// The kind selected by the caller.
+        expected: RefSegment,
+        /// The kind embedded in the document or tombstone.
+        found: String,
+    },
+    /// A tombstone was found where an ordinary value was requested.
+    #[error("commit {commit} is a deleted entity tombstone")]
+    Deleted {
+        /// The tombstone publication commit.
+        commit: ObjectId,
+    },
+    /// The embedded schema claims to be a tombstone schema but is not the
+    /// canonical tombstone schema this library understands.
+    #[error("embedded tombstone schema is not the canonical gix-store tombstone schema")]
+    TombstoneSchemaMismatch,
+    /// A tombstone document does not carry a valid explicit deletion state.
+    #[error("embedded tombstone value is invalid")]
+    InvalidTombstone,
     /// A schema declares an identity- or key-bearing subtree that leaves the
     /// identity normal form's universe, so it cannot be registered: a value
     /// under it could never be given a stable identity.
@@ -144,6 +185,32 @@ pub enum Error {
         /// The kind whose history was searched.
         kind: RefSegment,
         /// The schema tree bound into the value's own commit.
+        schema_tree: ObjectId,
+    },
+    /// The selected target history contains no schema commits.
+    #[error("selected target schema history for kind {kind} is empty")]
+    TargetHistoryEmpty {
+        /// The kind whose target history was empty.
+        kind: RefSegment,
+    },
+    /// The selected target document does not match the selected history tip.
+    #[error(
+        "selected target schema for kind {kind} does not match schema commit {commit} (tree {schema_tree})"
+    )]
+    TargetSchemaMismatch {
+        /// The kind whose target was invalid.
+        kind: RefSegment,
+        /// The selected target schema commit.
+        commit: ObjectId,
+        /// The tree stored by the selected target commit.
+        schema_tree: ObjectId,
+    },
+    /// The source schema is not present in the explicitly selected target history.
+    #[error("schema tree {schema_tree} is not in the selected target history of kind {kind}")]
+    TargetSchemaNotInHistory {
+        /// The kind whose selected history was searched.
+        kind: RefSegment,
+        /// The schema tree bound into the value.
         schema_tree: ObjectId,
     },
     /// A schema update has no migration from its predecessor, so older values cannot be updated.

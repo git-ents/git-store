@@ -15,14 +15,29 @@
 
 use std::collections::BTreeMap;
 
+use facet::Facet;
 use facet_git_tree::{
-    DeserializeError, EntryKind, Node, ObjectId, ObjectStore, Schema, SchemaPinError, SchemaSchema,
-    StructField, deserialize, schema_of, serialize, serialize_into,
+    DeserializeError, EMPTY_TREE, EntryKind, EntryMode, Node, ObjectId, ObjectStore, Schema,
+    SchemaError, SchemaPinError, SchemaSchema, StructField, TreeEntry, deserialize, schema_of,
+    serialize, serialize_into,
 };
 use gix_object::Write as _;
 
 mod common;
 use common::{Event, Nested, Person, TreeNode, find_entry, splice_codec};
+
+fn splice_empty_schema(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
+    let mut entries = store.get_tree(tree).expect("tree present");
+    entries.push(TreeEntry {
+        mode: EntryMode::from(EntryKind::Tree),
+        filename: "schema".into(),
+        oid: EMPTY_TREE,
+    });
+    entries.sort();
+    store
+        .write(&gix_object::Tree { entries })
+        .expect("tree write")
+}
 
 /// A schema document roundtrips through the crate's own serialize/deserialize.
 #[test]
@@ -42,6 +57,151 @@ fn enum_schema_doc_roundtrips() -> anyhow::Result<()> {
     let back: Schema = deserialize(&root, &store)?;
     assert_eq!(back, doc);
     Ok(())
+}
+
+/// The wire shape used before `Schema.kind` existed. Keeping this fixture in
+/// the test makes the compatibility test independent of the current writer's
+/// `Schema` shape while retaining the historical `Node` representation.
+#[derive(Debug, Facet)]
+struct LegacySchemaDocument {
+    root: Node,
+    defs: BTreeMap<String, Node>,
+}
+
+fn splice_legacy_pin(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
+    let mut entries = store.get_tree(tree).expect("tree present");
+    entries.push(TreeEntry {
+        mode: EntryMode::from(EntryKind::Tree),
+        filename: SchemaSchema::ENTRY.into(),
+        oid: *SchemaSchema::LEGACY.tree(),
+    });
+    entries.sort();
+    store
+        .write(&gix_object::Tree { entries })
+        .expect("tree write")
+}
+
+fn splice_migration_metadata(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
+    let mut entries = store.get_tree(tree).expect("tree present");
+    entries.push(TreeEntry {
+        mode: EntryMode::from(EntryKind::Tree),
+        filename: "migration".into(),
+        oid: EMPTY_TREE,
+    });
+    entries.sort();
+    store
+        .write(&gix_object::Tree { entries })
+        .expect("tree write")
+}
+
+fn splice_unexpected_metadata(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
+    let mut entries = store.get_tree(tree).expect("tree present");
+    entries.push(TreeEntry {
+        mode: EntryMode::from(EntryKind::Tree),
+        filename: "unexpected".into(),
+        oid: EMPTY_TREE,
+    });
+    entries.sort();
+    store
+        .write(&gix_object::Tree { entries })
+        .expect("tree write")
+}
+
+/// A schema written against the generation immediately before `kind` is
+/// decoded through the historical `{root, defs}` shape and gets an explicit
+/// sentinel rather than failing as a missing-field reflection error.
+#[test]
+fn pre_kind_schema_reads_with_explicit_legacy_kind() -> anyhow::Result<()> {
+    let current = schema_of::<Nested>()?;
+    let legacy = LegacySchemaDocument {
+        root: current.root.clone(),
+        defs: current.defs.clone(),
+    };
+    let store = ObjectStore::default();
+    let bare = serialize_into(&legacy, &store)?;
+    let pinned = splice_legacy_pin(&store, &bare);
+    let pinned = splice_migration_metadata(&store, &pinned);
+
+    let generation = Schema::read_pin(&pinned, &store)?;
+    assert_eq!(generation.tree(), SchemaSchema::LEGACY.tree());
+
+    let decoded = Schema::read_pinned_legacy(&pinned, &store)?;
+    assert_eq!(decoded.kind, Schema::LEGACY_KIND);
+    assert_eq!(decoded.root, current.root);
+    assert_eq!(decoded.defs, current.defs);
+    Ok(())
+}
+
+/// A historical bare `{root, defs}` object is accepted by the compatibility
+/// reader, while the lower-level pin check remains strict for unpinned trees.
+#[test]
+fn unpinned_pre_kind_schema_is_read_without_relaxing_read_pin() -> anyhow::Result<()> {
+    let current = schema_of::<Nested>()?;
+    let legacy = LegacySchemaDocument {
+        root: current.root.clone(),
+        defs: current.defs.clone(),
+    };
+    let store = ObjectStore::default();
+    let bare = serialize_into(&legacy, &store)?;
+    let bare = splice_migration_metadata(&store, &bare);
+
+    assert!(matches!(
+        Schema::read_pin(&bare, &store),
+        Err(SchemaPinError::Unpinned(tree)) if tree == bare
+    ));
+    let decoded = Schema::read_pinned_legacy(&bare, &store)?;
+    assert_eq!(decoded.kind, Schema::LEGACY_KIND);
+    assert_eq!(decoded.root, current.root);
+    assert_eq!(decoded.defs, current.defs);
+    Ok(())
+}
+
+#[test]
+fn legacy_schema_rejects_unknown_top_level_entries() -> anyhow::Result<()> {
+    let current = schema_of::<Nested>()?;
+    let legacy = LegacySchemaDocument {
+        root: current.root,
+        defs: current.defs,
+    };
+    let store = ObjectStore::default();
+    let bare = serialize_into(&legacy, &store)?;
+    let pinned = splice_legacy_pin(&store, &bare);
+    let invalid = splice_unexpected_metadata(&store, &pinned);
+
+    assert!(matches!(
+        Schema::read_pinned_legacy(&invalid, &store),
+        Err(SchemaPinError::LegacyFormat { tree, .. }) if tree == invalid
+    ));
+    Ok(())
+}
+
+/// The kind name is part of the content-addressed schema, and the decoder
+/// preserves it from the tree rather than obtaining it from a ref namespace.
+#[test]
+fn embedded_kind_name_changes_content_and_roundtrips() -> anyhow::Result<()> {
+    let base = schema_of::<Person>()?;
+    let left = base.clone().with_kind("recipe")?;
+    let right = base.with_kind("issue")?;
+    let (left_root, left_store) = serialize(&left)?;
+    let (right_root, _right_store) = serialize(&right)?;
+    assert_ne!(left_root, right_root);
+
+    let decoded: Schema = deserialize(&left_root, &left_store)?;
+    assert_eq!(decoded.kind, "recipe");
+    assert_eq!(decoded, left);
+    Ok(())
+}
+
+/// Embedded names use the same single-segment Git ref rules as the higher
+/// storage layer, with the first violated rule reported to the caller.
+#[test]
+fn embedded_kind_name_validation_is_actionable() {
+    let mut doc = schema_of::<Person>().expect("Person schema");
+    let err = doc.set_kind("bad name").unwrap_err();
+    assert!(
+        matches!(&err, SchemaError::InvalidKindName { name, reason } if name == "bad name" && reason.contains("spaces")),
+        "expected actionable kind-name error, got {err:?}"
+    );
 }
 
 /// A recursive schema (with a `Ref` cycle) roundtrips.
@@ -82,8 +242,8 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 /// reproduces to a different, but still deterministic, root id.
 ///
 /// Updated again for the schema-schema pin: `Schema::version` is gone —
-/// `schema_of::<Person>()` itself is unpinned, so this golden id covers only
-/// the bare document (`root`/`defs`, no `version` entry). The pin is a
+/// `schema_of::<Person>()` itself is unpinned, so this golden id covers the
+/// bare document (`kind`/`root`/`defs`, no storage pin). The pin is a
 /// storage-layer splice [`Schema::write_pinned`] adds on top, covered
 /// separately by `genesis_constant_is_real`.
 ///
@@ -96,7 +256,7 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 fn person_schema_golden_oid() -> anyhow::Result<()> {
     let doc = schema_of::<Person>()?;
     let (root, _store) = serialize(&doc)?;
-    assert_eq!(root.to_string(), "a4899ab4d0899c481bd38c0f2056b95eaa92e289");
+    assert_eq!(root.to_string(), "e3d79a02fa322d49db71f976a15ec5fbe5ddf5cc");
     Ok(())
 }
 
@@ -125,6 +285,7 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
             )])),
         );
         Schema {
+            kind: "Recipe".into(),
             root: Node::Ref("Recipe".into()),
             defs,
         }
@@ -189,9 +350,19 @@ fn genesis_constant_is_real() -> anyhow::Result<()> {
     let store = ObjectStore::default();
     let doc = schema_of::<Schema>()?;
     let root = serialize_into(&doc, &store)?;
+    let root = splice_empty_schema(&store, &root);
     let root = splice_codec(&store, &root);
 
     assert_eq!(&root, SchemaSchema::GENESIS.tree());
+    Ok(())
+}
+
+/// The library bootstrap check exercises the full canonical decode/re-encode
+/// path and verifies the materialized generation digest.
+#[test]
+fn canonical_schema_fixed_point_passes() -> anyhow::Result<()> {
+    let store = ObjectStore::default();
+    SchemaSchema::check_fixed_point(&store)?;
     Ok(())
 }
 
@@ -221,14 +392,15 @@ fn write_pinned_document_has_a_resolvable_pin() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// No pin entry, but the tree's own id is a known root generation
-/// ([`SchemaSchema::GENESIS`], written unpinned via plain [`serialize`]):
-/// legitimate, and [`Schema::read_pin`] reads it as genesis.
+/// The canonical meta-schema carries an empty-tree `schema` entry. The
+/// empty entry is the fixed-point base case, and [`Schema::read_pin`] resolves
+/// it as genesis.
 #[test]
-fn absent_pin_on_a_known_root_reads_as_genesis() -> anyhow::Result<()> {
+fn empty_schema_pin_on_the_meta_schema_reads_as_genesis() -> anyhow::Result<()> {
     let store = ObjectStore::default();
     let doc = schema_of::<Schema>()?;
     let root = serialize_into(&doc, &store)?;
+    let root = splice_empty_schema(&store, &root);
     let root = splice_codec(&store, &root);
 
     let recognized = Schema::read_pin(&root, &store)?;

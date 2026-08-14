@@ -31,10 +31,12 @@ use crate::normal_form::IDENTITY_DEF_PREFIX;
 
 /// A complete, self-contained schema document.
 ///
-/// `root` describes the value itself; `defs` holds the bodies of every named
-/// user type (struct or enum) the root reaches, keyed by the deterministic
-/// names that [`Node::Ref`] nodes use. A `BTreeMap` keeps the encoding
-/// order-independent of construction, so equal documents share an object id.
+/// `kind` is the embedded publication/type name. It is data in the schema
+/// document, not inferred from a ref namespace; `root` describes the value
+/// itself; and `defs` holds the bodies of every named user type (struct or
+/// enum) the root reaches, keyed by the deterministic names that
+/// [`Node::Ref`] nodes use. A `BTreeMap` keeps the encoding order-independent
+/// of construction, so equal documents share an object id.
 ///
 /// This type carries no format-version field: a stored document instead pins
 /// the schema-schema tree it was written against as a `schema` entry spliced
@@ -42,11 +44,37 @@ use crate::normal_form::IDENTITY_DEF_PREFIX;
 /// storage-layer concern, not part of this Rust type.
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct Schema {
+    /// The kind/type name this schema describes.
+    ///
+    /// [`Self::LEGACY_KIND`] is used only when a reader decodes the historical
+    /// pre-`kind` `{root, defs}` representation. New schemas always carry the
+    /// publication/type name selected by the writer.
+    pub kind: String,
     /// The schema of the value itself. Named user types appear as
     /// [`Node::Ref`] nodes resolved through `defs`.
     pub root: Node,
     /// The definition table for named user types, keyed by assigned name.
     pub defs: BTreeMap<String, Node>,
+}
+
+impl Schema {
+    /// Explicit kind used for a schema decoded from the pre-`kind` format.
+    ///
+    /// This sentinel is valid as a Git ref segment but is not selected by
+    /// [`schema_of`]. Compatibility callers that require a publication name
+    /// should replace it with [`Self::with_kind`] before writing.
+    pub const LEGACY_KIND: &'static str = "legacy-unknown";
+}
+
+/// The historical schema document, before [`Schema::kind`] was part of the
+/// self-hosted representation. It is private because it exists only as a
+/// reader-side wire compatibility shape; new code must use [`Schema`].
+#[derive(Debug, Clone, PartialEq, Facet)]
+pub(crate) struct LegacySchema {
+    /// The schema of the value itself.
+    pub(crate) root: Node,
+    /// The named definition table.
+    pub(crate) defs: BTreeMap<String, Node>,
 }
 
 /// A single schema node: the shape of one value in the encoding.
@@ -245,9 +273,47 @@ pub fn schema_and_hints_of<T: for<'a> Facet<'a>>() -> Result<(Schema, Hints), Sc
     Schema::from_shape_with_hints(<T as Facet>::SHAPE)
 }
 
+/// Validate the ref-segment form used for an embedded kind name without
+/// depending on the storage crate's ref types.
+fn validate_kind_name(name: &str) -> Result<(), SchemaError> {
+    let reason = if name.is_empty() {
+        Some("must not be empty")
+    } else if name.starts_with('.') || name.ends_with('.') {
+        Some("must not begin or end with '.'")
+    } else if name.ends_with(".lock") {
+        Some("must not end with '.lock'")
+    } else if name.contains("..") || name.contains("@{") {
+        Some("must not contain '..' or '@{'")
+    } else if name == "@" {
+        Some("must not be a lone '@'")
+    } else if name.contains('/') {
+        Some("must not contain '/'")
+    } else if name.chars().any(|c| c.is_ascii_control() || c == ' ') {
+        Some("must not contain control characters or spaces")
+    } else if name
+        .chars()
+        .any(|c| matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
+    {
+        Some("must not contain any of ~^:?*[\\\\")
+    } else {
+        None
+    };
+
+    match reason {
+        Some(reason) => Err(SchemaError::InvalidKindName {
+            name: name.to_owned(),
+            reason,
+        }),
+        None => Ok(()),
+    }
+}
+
+fn is_valid_kind_name(name: &str) -> bool {
+    validate_kind_name(name).is_ok()
+}
+
 impl Schema {
-    /// Generate the [`Schema`] describing how values of `shape` are
-    /// encoded.
+    /// Generate the [`Schema`] describing how values of `shape` are encoded.
     ///
     /// The walker mirrors the encoder's dispatch order exactly
     /// (`schema.generation`): transparency collapse, then [`RawTree`], then
@@ -280,13 +346,48 @@ impl Schema {
     ) -> Result<(Self, Hints), SchemaError> {
         let mut walker = Walker::new(limit);
         let root = walker.node(shape, 0)?;
+        let kind = shape.type_identifier.to_owned();
+        let kind = if is_valid_kind_name(&kind) {
+            kind
+        } else {
+            // A schema generated for an anonymous/container root has no
+            // publication name to derive. Keep generation deterministic; a
+            // storage layer should replace this sentinel with its kind name
+            // through [`Schema::with_kind`] before publication.
+            "anonymous".to_owned()
+        };
         Ok((
             Schema {
+                kind,
                 root,
                 defs: walker.defs,
             },
             walker.hints,
         ))
+    }
+
+    /// Return this schema with its embedded kind name replaced and validated.
+    ///
+    /// `schema_of` supplies a deterministic type-name default. Storage layers
+    /// that publish schemas under a user-selected kind should use this method
+    /// so the ref name and the embedded document name are checked by the same
+    /// rules at the boundary.
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Result<Self, SchemaError> {
+        self.set_kind(kind)?;
+        Ok(self)
+    }
+
+    /// Replace the embedded kind name after validating it.
+    pub fn set_kind(&mut self, kind: impl Into<String>) -> Result<(), SchemaError> {
+        let kind = kind.into();
+        validate_kind_name(&kind)?;
+        self.kind = kind;
+        Ok(())
+    }
+
+    /// Validate the schema document's embedded kind name.
+    pub fn validate(&self) -> Result<(), SchemaError> {
+        validate_kind_name(&self.kind)
     }
 }
 

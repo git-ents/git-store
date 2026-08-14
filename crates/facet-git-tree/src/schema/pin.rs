@@ -14,11 +14,13 @@
 //! value is *spelled* — not just to `Schema`'s own shape — moves the
 //! generation id too.
 
+use std::collections::BTreeMap;
+
 use gix_object::{Find, Write};
 
 use crate::de::find_tree_entries;
 use crate::error::{DeserializeError, SchemaPinError, SerializeError};
-use crate::schema::{Schema, codec, schema_of};
+use crate::schema::{Node, Schema, codec, schema_of};
 use crate::ser::serialize_into;
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 
@@ -38,20 +40,25 @@ impl SchemaSchema {
     /// The tree entry name a document pins its schema-schema under.
     pub const ENTRY: &'static str = "schema";
 
-    /// Generation zero: `serialize(&schema_of::<Schema>()?)` with no pin
-    /// spliced in — the recursion bottoms out here.
+    /// The last schema-schema generation before [`Schema::kind`] existed.
+    ///
+    /// This generation is read-only compatibility support. Its documents have
+    /// the historical `{root, defs}` shape and are decoded with
+    /// [`LegacySchema`], then represented as [`Schema::LEGACY_KIND`]. It is
+    /// deliberately not used by any writer.
+    pub const LEGACY: SchemaSchema = SchemaSchema {
+        tree: decode_oid(LEGACY_HEX),
+        parent: None,
+    };
+
+    /// Generation zero: the canonical reification of `Schema`'s
+    /// [`facet::Shape`], with its own `schema` entry pointing at Git's empty
+    /// tree. That empty entry is the fixed-point base case: the meta-schema
+    /// cannot point at itself before its object id exists.
     ///
     /// Changing this id is a semver-major break; see
     /// `genesis_constant_is_real` in `tests/schema_self_host.rs`, which pins
-    /// it against the actual serialization.
-    ///
-    /// Updated for the field-level default-presence marker: `Node::Struct`'s
-    /// field map now holds `StructField { node, has_default }` in place of a
-    /// bare `Node`, changing `Schema`'s own encoded shape and therefore this
-    /// id. This format has never released a schema-schema generation before,
-    /// and nothing outside this repo family stores a document against one, so
-    /// the constant is replaced in place rather than chained as a new
-    /// generation off the old one.
+    /// it against the actual serialization and fixture materialization.
     pub const GENESIS: SchemaSchema = SchemaSchema {
         tree: decode_oid(GENESIS_HEX),
         parent: None,
@@ -60,9 +67,10 @@ impl SchemaSchema {
     /// The generation this build writes.
     pub const CURRENT: &'static SchemaSchema = &Self::GENESIS;
 
-    /// Every generation this build speaks, oldest first. The known-roots set
-    /// later generations extend.
-    pub const KNOWN: &'static [&'static SchemaSchema] = &[&Self::GENESIS];
+    /// Every generation this build speaks, oldest first. The legacy entry is
+    /// retained solely so documents written before `Schema.kind` remain
+    /// readable; new documents always pin [`Self::CURRENT`].
+    pub const KNOWN: &'static [&'static SchemaSchema] = &[&Self::LEGACY, &Self::GENESIS];
 
     /// This generation's own schema-schema tree id.
     pub const fn tree(&self) -> &ObjectId {
@@ -78,11 +86,59 @@ impl SchemaSchema {
     pub fn recognize(tree: &ObjectId) -> Option<&'static SchemaSchema> {
         Self::KNOWN.iter().copied().find(|g| g.tree == *tree)
     }
+
+    /// Check the canonical schema-schema fixed point in `store`.
+    ///
+    /// This performs one checked bootstrap sequence: construct the canonical
+    /// meta-schema, add the empty-tree `schema` base entry, read it through the
+    /// ordinary pinned-schema path, re-encode it, and compare the complete
+    /// materialized tree with the compile-time digest. Keeping this check here
+    /// makes bootstrap validation available to library users without coupling
+    /// it to a CLI or a ref namespace.
+    pub fn check_fixed_point<S: Write + Find + ?Sized>(store: &S) -> Result<(), SchemaPinError> {
+        let schema_tree = canonical_tree(store)?;
+        Schema::read_pin(&schema_tree, store)?;
+        let decoded: Schema = crate::de::deserialize(&schema_tree, store).map_err(|source| {
+            SchemaPinError::FixedPointDecode {
+                expected: *Self::CURRENT.tree(),
+                observed: schema_tree,
+                source,
+            }
+        })?;
+        decoded.validate()?;
+
+        let reencoded = canonical_tree_from_doc(&decoded, store)?;
+        if reencoded != schema_tree {
+            return Err(SchemaPinError::FixedPoint {
+                stage: "schema re-encode",
+                expected: schema_tree,
+                observed: reencoded,
+            });
+        }
+        if reencoded != *Self::CURRENT.tree() {
+            return Err(SchemaPinError::FixedPoint {
+                stage: "compile-time digest validation",
+                expected: *Self::CURRENT.tree(),
+                observed: reencoded,
+            });
+        }
+        Ok(())
+    }
 }
+
+/// Git's well-known empty tree id. It is the schema identity of the
+/// meta-schema itself, so the fixed-point construction has a finite base case.
+///
+/// This crate currently speaks SHA-1 Git objects only.
+pub const EMPTY_TREE: ObjectId = decode_oid(EMPTY_TREE_HEX);
+const EMPTY_TREE_HEX: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// The historical pre-`kind` schema-schema tree id.
+const LEGACY_HEX: &str = "5896cb1c8ff662027c9a54232a5364a5072b60c1";
 
 /// Hex text for [`SchemaSchema::GENESIS`]'s tree id, kept as a named constant
 /// so it stays human-checkable against the golden-oid test.
-const GENESIS_HEX: &str = "5896cb1c8ff662027c9a54232a5364a5072b60c1";
+const GENESIS_HEX: &str = "ea875f69726986da822cdb2670a089eddd09b6ce";
 
 /// Decode a 40-character lowercase-hex SHA-1 literal at compile time, so a
 /// malformed constant is a compile error rather than a silent runtime bug.
@@ -171,16 +227,36 @@ where
     splice_entry(doc, SchemaSchema::ENTRY, pin, store)
 }
 
-/// Write the current generation's own tree — including its [`codec`]
-/// fixture — into `store`, so a pin to it resolves from the store alone.
-fn materialize<S: Write + Find + ?Sized>(store: &S) -> Result<ObjectId, SchemaPinError> {
-    let tree = serialize_into(&schema_schema_doc(), store)?;
+/// Construct the canonical meta-schema tree. Its `schema` entry is the
+/// empty-tree identity; the codec fixture remains beside it so changes in
+/// spelling are still covered by the generation digest.
+fn canonical_tree<S: Write + Find + ?Sized>(store: &S) -> Result<ObjectId, SchemaPinError> {
+    canonical_tree_from_doc(&schema_schema_doc(), store)
+}
+
+fn canonical_tree_from_doc<S: Write + Find + ?Sized>(
+    doc: &Schema,
+    store: &S,
+) -> Result<ObjectId, SchemaPinError> {
+    doc.validate()?;
+    let tree = serialize_into(doc, store)?;
+    let tree = splice_pin::<S, SchemaPinError>(tree, &EMPTY_TREE, store)?;
     let codec_tree = codec::codec_tree(store)?;
-    let tree = splice_entry::<S, SchemaPinError>(tree, codec::ENTRY, &codec_tree, store)?;
-    match SchemaSchema::CURRENT.parent() {
-        Some(parent) => splice_pin(tree, parent.tree(), store),
-        None => Ok(tree),
+    splice_entry::<S, SchemaPinError>(tree, codec::ENTRY, &codec_tree, store)
+}
+
+/// Write the current generation's own tree into `store`, so a pin to it
+/// resolves from the store alone.
+fn materialize<S: Write + Find + ?Sized>(store: &S) -> Result<ObjectId, SchemaPinError> {
+    let tree = canonical_tree(store)?;
+    if tree != *SchemaSchema::CURRENT.tree() {
+        return Err(SchemaPinError::FixedPoint {
+            stage: "generation materialization",
+            expected: *SchemaSchema::CURRENT.tree(),
+            observed: tree,
+        });
     }
+    Ok(tree)
 }
 
 impl Schema {
@@ -193,6 +269,7 @@ impl Schema {
         &self,
         store: &S,
     ) -> Result<ObjectId, SchemaPinError> {
+        self.validate()?;
         materialize(store)?;
         let doc_tree = serialize_into(self, store)?;
         splice_pin(doc_tree, SchemaSchema::CURRENT.tree(), store)
@@ -210,6 +287,9 @@ impl Schema {
             .find(|(name, _, _)| name == SchemaSchema::ENTRY)
         {
             Some((_, pinned, _)) => {
+                if *pinned == EMPTY_TREE && *tree == *SchemaSchema::CURRENT.tree() {
+                    return Ok(SchemaSchema::CURRENT);
+                }
                 SchemaSchema::recognize(pinned).ok_or(SchemaPinError::Unrecognized {
                     tree: *tree,
                     pinned: *pinned,
@@ -231,6 +311,10 @@ impl Schema {
     /// build has never heard of, and a typed deserialize attempted first
     /// would fail with an opaque reflection error before the pin was ever
     /// checked — so [`read_pin`](Self::read_pin) runs first, unconditionally.
+    ///
+    /// Historical pre-`kind` documents are intentionally not accepted here;
+    /// use [`read_pinned_legacy`](Self::read_pinned_legacy) to opt into that
+    /// compatibility format.
     pub fn read_pinned<F: Find + ?Sized>(
         tree: &ObjectId,
         store: &F,
@@ -238,6 +322,99 @@ impl Schema {
         Self::read_pin(tree, store)?;
         Ok(crate::de::deserialize(tree, store)?)
     }
+
+    /// Read a historical pre-`kind` schema document and accept its legacy leaf
+    /// blobs. Forge-era `migration` metadata is ignored after the top-level
+    /// shape is validated. This is the explicit compatibility counterpart to
+    /// [`read_pinned`](Self::read_pinned); ordinary schema reads remain strict.
+    /// Current-generation schema documents are also decoded with the legacy
+    /// leaf mode so this method can normalize old values paired with a current
+    /// schema.
+    pub fn read_pinned_legacy<F: Find + ?Sized>(
+        tree: &ObjectId,
+        store: &F,
+    ) -> Result<Schema, SchemaPinError> {
+        let legacy_shape = is_legacy_shape(tree, store)?;
+        let generation = match Self::read_pin(tree, store) {
+            Ok(generation) => Some(generation),
+            Err(err @ SchemaPinError::Unpinned(unpinned)) => {
+                if legacy_shape && unpinned == *tree {
+                    None
+                } else {
+                    return Err(err);
+                }
+            }
+            Err(err) => return Err(err),
+        };
+
+        let doc = if legacy_shape
+            || generation.is_none()
+            || generation.is_some_and(|g| g.tree() == SchemaSchema::LEGACY.tree())
+        {
+            decode_legacy(tree, store)?
+        } else {
+            crate::de::deserialize_legacy_leaves(tree, store)?
+        };
+        doc.validate()?;
+        Ok(doc)
+    }
+}
+
+/// Whether `tree` has the historical pre-`kind` schema-document shape.
+///
+/// Forge-era publications may carry a schema pin and migration metadata beside
+/// the two schema fields. The compatibility decoder accepts only those known
+/// entries and never treats an arbitrary unpinned tree as a schema.
+fn is_legacy_shape<F: Find + ?Sized>(tree: &ObjectId, store: &F) -> Result<bool, SchemaPinError> {
+    let names: Vec<String> = find_tree_entries(tree, store)?
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect();
+    Ok(names.iter().any(|name| name == "root")
+        && names.iter().any(|name| name == "defs")
+        && names.iter().all(|name| {
+            matches!(
+                name.as_str(),
+                "root" | "defs" | SchemaSchema::ENTRY | "migration"
+            )
+        }))
+}
+
+/// Decode the pre-`kind` schema representation after filtering its storage
+/// metadata. Only `root` and `defs` are passed to the legacy leaf decoder;
+/// the optional schema pin and migration metadata are not schema fields.
+fn decode_legacy<F: Find + ?Sized>(tree: &ObjectId, store: &F) -> Result<Schema, SchemaPinError> {
+    let mut root = None;
+    let mut defs = None;
+    for (name, oid, _) in find_tree_entries(tree, store)? {
+        match name.as_str() {
+            "root" => root = Some(oid),
+            "defs" => defs = Some(oid),
+            SchemaSchema::ENTRY | "migration" => {}
+            _ => {
+                return Err(SchemaPinError::LegacyFormat {
+                    tree: *tree,
+                    reason: "expected root and defs, with optional schema pin and migration",
+                });
+            }
+        }
+    }
+    let root = root.ok_or(SchemaPinError::LegacyFormat {
+        tree: *tree,
+        reason: "expected root and defs, with optional schema pin and migration",
+    })?;
+    let defs = defs.ok_or(SchemaPinError::LegacyFormat {
+        tree: *tree,
+        reason: "expected root and defs, with optional schema pin and migration",
+    })?;
+
+    let root: Node = crate::de::deserialize_legacy_leaves(&root, store)?;
+    let defs: BTreeMap<String, Node> = crate::de::deserialize_legacy_leaves(&defs, store)?;
+    Ok(Schema {
+        kind: Schema::LEGACY_KIND.to_owned(),
+        root,
+        defs,
+    })
 }
 
 /// The known generations, rendered for [`SchemaPinError::Unrecognized`]'s
