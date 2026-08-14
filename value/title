@@ -1,0 +1,1 @@
+The specification stops at facet-git-tree, leaving the ref layout and schema binding - the actual contract - unspecified
