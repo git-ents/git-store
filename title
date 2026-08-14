@@ -1,1 +1,0 @@
-Store is a concrete type welded to a gix::Repository, and its configurable prefixes are write-only
