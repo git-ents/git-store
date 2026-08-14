@@ -1,0 +1,63 @@
+**What**
+Unit enum variants, `None`, `Unit`, `Null`, and empty collections all encode as
+an *empty tree*, so their entire information content lives in a tree entry name
+whose subtree holds no blobs. Git list and diff machinery is blob-oriented and
+elides these paths completely.
+
+**Where**
+`crates/facet-git-tree/src/ser.rs:288-292` (unit variant to empty tree),
+`ser.rs:269-273` (`None` to empty tree), `ser.rs:382` (`Null` to empty tree),
+`ser.rs:328-336` (variant name as the only entry).
+
+**Why it matters**
+Reproduced on a scratch repo with the shipped `schemas/task.json`, changing
+`priority` from `Low` to `High`:
+
+```
+$ git diff refs/store/task/t1~1 refs/store/task/t1
+                      <- completely empty
+$ git log --stat -1 refs/store/task/t1
+103d165 escalate to High
+                      <- completely empty
+$ git ls-tree -r refs/store/task/t1^{tree}
+100644 blob 02e4a84  done
+100644 blob de20668  summary
+100644 blob 2e65efe  tags/0000
+                      <- `priority` does not appear at all
+```
+
+The same happens to schemas, which are themselves mostly unit variants. Changing
+a field from `U32` to `String` and running `git diff refs/schema/recipe~1
+refs/schema/recipe` produces **zero output**.
+
+This is the demo. `crates/git-store/README.md` promises "git ls-tree, git
+cat-file, git log, git diff all work" and "history and blame are per field".
+For enums and options - two of the most common shapes in real data - they
+show nothing. If one audience member types `git diff` on stage, the central
+claim collapses.
+
+**Options**
+- Option A - give every empty tree a marker blob (e.g. a zero-length or
+  one-byte entry named `_` inside the variant payload tree). `ls-tree -r` and
+  `diff` then show `priority/High/_` appearing and `priority/Low/_`
+  disappearing. Cost: one extra object per unit value; changes all object ids;
+  slightly noisier `ls-tree`.
+- Option B - encode a unit variant as a *blob* holding the variant name rather
+  than a tree named by the variant. `priority` becomes `100644 blob` containing
+  `High`, and the diff reads `-Low` / `+High`. Cleanest possible diff, and it
+  matches how a human thinks of an enum. Cost: a unit variant and a
+  payload-bearing variant then have different tree shapes, so the reader must
+  branch on blob-vs-tree; and it diverges from the uniform external tagging in
+  `serialization.design.trees.variants`.
+- Option C - leave the encoding alone and ship `git store diff <kind> <name>
+  [rev] [rev]` that renders a semantic diff of two decoded values. Cost: the
+  pitch quietly becomes "our tool is the query language", not git.
+
+**Recommendation**
+Option B for unit variants specifically, plus a marker blob (Option A) for
+`None` / `Null` / empty collections. Both are breaking encoding changes, which
+is exactly why they should land before the talk rather than after. If that is
+too much churn, ship Option C as a safety net and lead the demo with a struct
+field change rather than an enum change. High confidence this is the single
+most damaging finding for the conference; moderate confidence on which option
+is best.
