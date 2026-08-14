@@ -1,0 +1,80 @@
+**What**
+A data commit binds itself to its schema by writing the schema commit id into a
+textual `Schema:` trailer in the commit message. A trailer is not part of the
+commit object graph, so the schema commit is not reachable from the data
+commit and does not travel with it.
+
+**Where**
+`crates/gix-store/src/store.rs:144` (`format!("{summary}\n\nSchema: {schema_commit}\n")`),
+`store.rs:395-409` (`schema_trailer`), `store.rs:201-211` (`retrieve_at`).
+
+**Why it matters**
+Reproduced. Fetch a data ref the way any consumer would:
+
+```
+$ git init /tmp/consumer && cd /tmp/consumer
+$ git fetch /tmp/origin refs/store/recipe/carbonara:refs/store/recipe/carbonara
+$ git ls-tree refs/store/recipe/carbonara^{tree}     # works
+$ git store get recipe carbonara
+Error: An object with id cb4ccfb60f43d39a7288972df4a7326c2e0d664e could not be found
+```
+
+The data is there, the tree is browsable, and the value is unreadable. The
+error does not say "missing schema", does not name the kind, and does not tell
+the user which ref to fetch - it is a raw `gix` object-not-found collapsed
+through `Error::Git(Box<dyn Error>)` at `crates/gix-store/src/error.rs:66`, so
+a caller cannot even distinguish it programmatically from a corrupt odb.
+
+Any refspec-scoped sync hits this: `git push refs/store/*`, a mirror that
+excludes `refs/schema/*`, a partial clone, a bundle. `gix-store`s README claims
+"old versions stay readable after a kind evolves" - true within one repo, false
+the moment data crosses a repo boundary. For a talk about Git as a distributed
+datastore, "the data does not replicate correctly" is the hostile question.
+
+**Options**
+- Option A - make the schema commit the **second parent** of every data commit.
+  The binding becomes a real DAG edge: `git fetch` brings the schema for free,
+  `git gc` will not prune it, and `retrieve_at` can read `parent_ids().nth(1)`
+  instead of scraping text. Rejected: schema binding today is a `Schema:`
+  trailer naming a schema commit, and the schema ref is itself a commit chain
+  (`store.rs:97,144`). Making that commit the second parent of every data
+  commit means every data commit's ancestry includes a chain of schema
+  commits. `git-forge`'s `1f25493d` computes review merge-bases over its own
+  commit graph, and that computation would now traverse schema-lineage
+  commits that have nothing to do with the review history being merged -
+  contaminating the one merge-base computation this fix was supposed to keep
+  safe. `git log --graph` on a data ref also grows a permanent, misleading
+  merge topology that needs explaining on every entity, not just this one.
+- Option B - bind the schema by **subtree**, not by parent. The data commit's
+  tree becomes `{value/, schema/}`: the value under `value/`, the schema
+  content under `schema/`, and the `Schema:` trailer kept as provenance naming
+  the schema commit. Reachability, gc-safety, and fetch-completeness all
+  follow from ordinary tree reachability, with no new parent-walking logic
+  anywhere. `git diff` between two data commits shows schema changes inline,
+  as part of the normal tree diff. The commit graph stays pure data history,
+  so `git log`, bisect, and any merge-base computation - including
+  `git-forge`'s `1f25493d` - never traverse schema commits. Trade-off:
+  `git ls-tree` of an entity's root now shows `value/` and `schema/` instead
+  of the value's fields directly, so callers that assumed the tree *is* the
+  value need a `value/` prefix.
+- Option C - keep the trailer but also write a `refs/schema-keep/<oid>` ref and
+  document a mandatory `+refs/schema/*:refs/schema/*` refspec. Trade-off:
+  correctness depends on the operator getting configuration right, which is
+  exactly the failure mode above.
+
+**Recommendation**
+Option B (subtree binding), high confidence. It converts a
+documentation-and-discipline problem into a structural guarantee the same way
+Option A would, without Option A's hidden cost: because the schema ref is
+itself a commit chain, making the schema commit a second parent would put an
+unrelated lineage of schema commits directly into every data commit's
+ancestry, which is exactly the ancestry `git-forge`'s `1f25493d` walks to
+compute merge-bases for its own, unrelated commits. Subtree binding gets the
+same guarantees - reachable, gc-safe, fetch-complete - while keeping the
+commit graph as pure data history. Keep the `Schema:` trailer too, now as a
+human-readable provenance label naming the schema commit, consistent with but
+no longer load-bearing against `schema/`. Independently, add an
+`Error::SchemaObjectMissing { kind, commit }` variant so the failure is
+diagnosable even when it does occur. This changes every data commit's tree
+shape, so it is `format-breaking` and belongs in the Wave 1 window rather than
+being a small tweak; effort `M`.
