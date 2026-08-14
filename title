@@ -1,1 +1,0 @@
-The schema authoring surface is a Rust enum leaked through facet-json, not a format anyone would hand-write
