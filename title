@@ -1,1 +1,0 @@
-Schema-read errors carry no location, while schema-write errors carry a full path
