@@ -1,0 +1,62 @@
+**What**
+`serialization.design.leaves.encoding` mandates that a leaf blob is the value
+bytes with "no delimiters, quoting, or trailing newline". Git treats every such
+blob as a file without a final newline, so it annotates both sides of every
+scalar change.
+
+**Where**
+`crates/facet-git-tree/src/ser.rs:677-725` (`scalar_bytes`, no newline appended),
+`docs/specification.adoc`, requirement `serialization.design.leaves.encoding`.
+
+**Why it matters**
+Reproduced, changing one integer field and adding one list element:
+
+```
+diff --git a/ingredients/0002 b/ingredients/0002
+new file mode 100644
++pecorino
+\ No newline at end of file
+diff --git a/serves b/serves
+-4
+\ No newline at end of file
++6
+\ No newline at end of file
+```
+
+Six lines of signal, three lines of noise, and the noise scales one-to-one with
+the number of changed fields. On a projector the `\ No newline at end of file`
+lines are as visually prominent as the data. The `git diff` moment is the
+strongest demo this project has - it is the proof that Git tooling really does
+work on this data - and it currently looks broken to anyone who reads diffs for
+a living.
+
+I want to acknowledge the spec says so deliberately, and the reasoning is
+sound: a trailing newline is not part of the value, and appending one makes the
+blob for the string `"4"` differ from the blob for the integer `4`... except it
+would not, since both would gain the same byte. The actual costs are (a) every
+object id changes, and (b) a `String` containing a trailing newline becomes
+indistinguishable from one that does not, unless the reader strips exactly one.
+
+**Options**
+- Option A - append exactly one `\n` to every leaf blob and strip exactly one
+  on read. Diffs become clean. Trade-off: breaking change to every object id;
+  and `String` values must round-trip through "strip at most one trailing
+  newline", which silently normalizes `"x\n\n"` incorrectly unless the rule is
+  "strip exactly one, always present".
+- Option B - append `\n` only to non-`String` scalars (numbers, bools, chars),
+  where there is no ambiguity. Cleans up the common numeric-field diff while
+  leaving string fidelity untouched. Trade-off: two leaf rules instead of one,
+  and string fields still show the marker.
+- Option C - leave the encoding alone and ship a `.gitattributes`-independent
+  `git store diff` that renders a value-level diff. Trade-off: the git-native
+  diff, which is the point, stays ugly.
+- Option D - leave it and simply pick demo fields that read well. Trade-off:
+  a knowledgeable audience member will diff something themselves.
+
+**Recommendation**
+Option A, medium confidence - this is a genuine judgement call. The purity
+argument for no-trailing-newline is real, but this format exists to be read by
+Git tooling, and Git tooling has a strong opinion about what a text file looks
+like. Being Git-native means adopting Gits conventions, not just Gits
+object model. If the encoding is to stay frozen, do Option C so there is at
+least one clean diff to show.
