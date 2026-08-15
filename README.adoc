@@ -22,24 +22,25 @@ Those names describe metadata found on historical Git objects only. Readers
 ignore legacy trailers, including malformed or conflicting values, and never
 use them to choose a schema.
 
-The old named entity CLI/API forms and named refs are historical compatibility
-paths. They may remain useful for addressing older entities, but they are not
-the document's type definition or content identity.
+Names remain how entities are addressed. A name is not the document's type
+definition and not its content identity, both of which live in the document
+itself.
 
 == Entity Identity and Refs
 
 `EntityId` is the OID of the complete bound document tree: the root containing
 exactly `schema/` and `value/`. It is not the OID of the publication commit and
-it is not a caller-selected alias. Both the embedded schema and encoded value
-therefore contribute to the identity. The canonical data ref is
-`refs/store/<kind>/<entity-id>`; named paths beneath the same kind are
-compatibility aliases and are excluded from the canonical entity index.
+it is not a caller-selected name. Both the embedded schema and encoded value
+therefore contribute to the identity.
 
-The current `Kind` API exposes both layers. `put_entity`, `compile_entity`,
-`read_entity`, and `entity_reference` use the content-derived identity.
-`put`, `get`, `reference`, `entity_name`, `anonymous`, and related named forms
-are compatibility conveniences for ref-addressed callers. A named write may
-maintain an alias, but the name never becomes the entity's identity.
+Identity is a derived value, not a ref layout. Data refs are
+`refs/store/<kind>/<name>`, and the name is whatever the caller chooses: the
+store attaches no meaning to it and advances it like a branch. Applications
+decide what names mean. An application that wants content-addressed storage
+selects `<entity-id>` as the name, which the store treats like any other;
+`put_entity`, `read_entity`, and `entity_reference` are the shorthand for that
+policy, and `compile_entity` derives the id for any document without publishing
+it.
 
 == Deletion and CLI Compatibility
 
@@ -55,16 +56,15 @@ The primary CLI form, `git store get <tree-ish>`, decodes a bound document from
 the tree it names. The hidden compatibility form, `git store get <kind> <name>`,
 reads a named ref and reports deleted entities differently from missing ones;
 revision suffixes such as `name~1` and `name@<revision>` address history.
-`git store rm <kind> <name>` publishes a tombstone over the canonical ref and
-any alias pointing at that publication. It does not hard-delete refs; repeating
+`git store rm <kind> <name>` publishes a tombstone over that name. It does not
+hard-delete refs, so the name's earlier publications stay reachable; repeating
 it reports `already deleted`, while an absent ref is an error. `get` reports a
-tombstone as deleted and an absent ref as absent.
+tombstone as deleted and an absent ref as absent. Names are independent:
+deleting one name does not affect another that addresses the same content.
 
-Writing the exact same bound content after deletion restores its original
-canonical ID by appending a normal value commit after the tombstone; aliases
-that pointed at the tombstone are restored atomically. Writing different
-content creates a new ID, leaving the old ID deleted. The CLI has no separate
-restore command; recreation and restoration are library write operations.
+Writing to a deleted name restores it by appending a normal value commit after
+the tombstone. The CLI has no separate restore command; recreation and
+restoration are ordinary write operations.
 
 == Trailer and Schema Compatibility
 
@@ -142,23 +142,23 @@ emit a success record. The current exit categories are:
 === Publication, CAS, and Identity
 
 `document publish <kind> <document-tree> --expected <absent|OID>` publishes a
-prepared bound document. With no `--alias`, the expectation applies to the
-canonical ref; with `--alias <name>`, it applies to that compatibility alias.
-The canonical ref, optional alias, and materialized per-kind index advance in
-one compare-and-swap batch. A stale expectation is a one-shot failure: the CLI
+prepared bound document under `--alias <name>`, defaulting to the entity's
+content-derived name when none is given. The expectation applies to that ref,
+and the ref and the materialized per-kind index advance in one compare-and-swap
+batch. A stale expectation is a one-shot failure: the CLI
 returns exit category `4` and does not retry. Objects written before a lost CAS
 may remain unreachable. A script owns retry, resume, and conflict policy.
 
 The complete bound document-tree OID is the content-derived `EntityId`, and both
-its schema and value contribute to it. The canonical ref is
-`refs/store/<kind>/<entity-id>`. Names are aliases, not identity. The persisted
-per-kind index under `refs/cache/` is a materialized cache of canonical refs;
-entity refs remain authoritative and reads can fall back when the index is
-missing, malformed, or stale.
+its schema and value contribute to it. It is a derived value, available for any
+document that compiles, and is independent of where the document is published.
+The persisted per-kind index under `refs/cache/` is a materialized cache of the
+entity refs; those refs remain authoritative and reads can fall back when the
+index is missing, malformed, or stale.
 
-`entity delete <kind> <entity-id>` publishes a typed tombstone over the
-canonical ref and aliases/index atomically. It does not remove the ref. A
-repeated deletion reports `already_deleted`; an absent entity is distinct.
+`entity delete <kind> <name>` publishes a typed tombstone over that ref,
+advancing it and the index atomically. It does not remove the ref. A repeated
+deletion reports `already_deleted`; an absent entity is distinct.
 
 === Script Boundary
 

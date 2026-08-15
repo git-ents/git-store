@@ -826,10 +826,10 @@ document failures. A failed command MUST NOT emit a success record.
 .Explicit Compare-and-Swap Publication
 --
 `git store document publish <kind> <document-tree> --expected <absent|OID>` MUST
-perform a one-shot compare-and-swap. Without an alias, the expectation applies
-to the canonical entity ref; with `--alias <name>`, it applies to that alias.
-The canonical ref, optional alias, and materialized per-kind index MUST advance
-in one ref-store batch or none of them may advance.
+perform a one-shot compare-and-swap. `--alias <name>` selects the ref to
+publish at, defaulting to the document's content-derived name. The expectation
+applies to that ref, and the ref and the materialized per-kind index MUST
+advance in one ref-store batch or neither may advance.
 
 A stale expectation MUST fail with the compare-and-swap exit category and MUST
 NOT be retried by the CLI. Objects written before a lost publication MAY remain
@@ -842,12 +842,16 @@ the calling script or program.
 --
 The `EntityId` of a bound document MUST be the object ID of its complete root
 `{schema/, value/}` tree. Both the encoded value and the embedded schema
-therefore contribute to identity. The canonical ref MUST be
-`refs/store/<kind>/<entity-id>`.
+therefore contribute to identity, and an implementation MUST make that ID
+available for any document it can compile.
 
-A caller-selected name MUST be represented only as a compatibility alias and
-MUST NOT be treated as the entity identity or as the source of truth. The
-per-kind index is a materialized cache of canonical entity refs; entity refs
+Identity is a derived value, not a ref layout. Ref names under
+`refs/store/<kind>/` are application policy: the store MUST publish an entity
+at whatever name the caller selects and MUST NOT attach meaning to that name.
+An application that wants content-addressed storage MUST be able to select
+`<entity-id>` as the name, and the store MUST treat that name like any other.
+
+The per-kind index is a materialized cache of the entity refs; entity refs
 remain authoritative and a reader MUST be able to fall back when the index is
 missing, malformed, or stale.
 --
@@ -855,11 +859,11 @@ missing, malformed, or stale.
 [role="requirement", id="plumbing.tombstone"]
 .Typed Entity Deletion
 --
-`git store entity delete <kind> <entity-id>` MUST publish a typed tombstone
-rather than prune the canonical ref. The tombstone MUST use the bound
-`{schema/, value/}` frame and carry an explicit deleted state, kind, and
-original `EntityId`. A repeated deletion MUST be distinguishable from an
-absent entity.
+`git store entity delete <kind> <name>` MUST publish a typed tombstone over
+the named ref rather than prune it, so the name's history stays reachable. The
+tombstone MUST use the bound `{schema/, value/}` frame and carry an explicit
+deleted state, kind, and the `EntityId` the name addressed when it was
+deleted. A repeated deletion MUST be distinguishable from an absent entity.
 --
 
 [role="requirement", id="plumbing.migration-boundary"]

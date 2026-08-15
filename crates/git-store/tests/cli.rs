@@ -198,13 +198,7 @@ fn store_get_list_and_remove() {
     let (out, _, ok) = run(path, None, &["ls", "recipe"]);
     assert!(ok);
     let listed: Vec<_> = out.lines().collect();
-    assert_eq!(listed.len(), 2);
-    assert!(listed.contains(&"carbonara"));
-    let older_canonical = listed
-        .iter()
-        .copied()
-        .find(|name| name.len() == 40)
-        .expect("older canonical identity");
+    assert_eq!(listed, ["carbonara"]);
 
     let (out, _, ok) = run(path, None, &["schema", "show", "recipe"]);
     assert!(ok);
@@ -244,7 +238,7 @@ fn store_get_list_and_remove() {
     let (out, err, ok) = run(path, None, &["ls", "recipe"]);
     assert!(ok, "list after rm failed: {err}");
     let listed_after_delete: Vec<_> = out.lines().collect();
-    assert_eq!(listed_after_delete, [older_canonical]);
+    assert!(listed_after_delete.is_empty(), "list after rm: {out}");
     assert!(
         !listed_after_delete.contains(&"carbonara"),
         "deleted alias must not list as live: {out}"
@@ -617,8 +611,7 @@ fn entity_names_may_nest() {
         .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&refs.stdout).trim(),
-        "refs/store/recipe/2551a112682de0d7564849a0ab4d9d9a1bf6aaf1\
-\nrefs/store/recipe/italian/carbonara"
+        "refs/store/recipe/italian/carbonara"
     );
 }
 
@@ -1277,7 +1270,7 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
         path,
         None,
         &[
-            "entity", "delete", "recipe", &entity_id, "--format", "ndjson",
+            "entity", "delete", "recipe", "carbonara", "--format", "ndjson",
         ],
     );
     assert!(ok, "entity delete failed: {err}");
@@ -1285,7 +1278,7 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
     let (already, err, ok) = run(
         path,
         None,
-        &["entity", "delete", "recipe", &entity_id, "--json"],
+        &["entity", "delete", "recipe", "carbonara", "--json"],
     );
     assert!(ok, "repeated entity delete failed: {err}");
     assert_eq!(json_string_field(&already, "status"), "already_deleted");

@@ -29,7 +29,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use facet_git_tree::{Node, Schema, SchemaSchema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use gix_store::{
-    ApplyError, DeleteResult, DocumentInspection, Dynamic, EntityId, EntityState, Expectation,
+    ApplyError, DeleteResult, DocumentInspection, Dynamic, EntityState, Expectation,
     GixRefStore, Kind, Layout, ObjectId, PublishOptions, RefName, RefPath, RefPrefix, RefSegment,
     RefStore, RepoStore,
 };
@@ -1230,13 +1230,10 @@ fn entity_delete(
     entity_text: &str,
     format: OutputFormat,
 ) -> Result<()> {
-    let id: EntityId = entity_text.parse().with_context(|| {
-        cli_context(
-            ExitClass::Invalid,
-            format!("invalid canonical entity id {entity_text:?}"),
-        )
-    })?;
-    let result = store.dynamic(segment("kind", kind)?).delete_entity(id)?;
+    // Names are application policy: an entity may be published under a
+    // content-derived id or any other path, and either addresses it here.
+    let name = entity(entity_text)?;
+    let result = store.dynamic(segment("kind", kind)?).delete_name(&name)?;
     let (status, code, commit) = match result {
         DeleteResult::Deleted(entry) => ("deleted", "deleted", Some(entry.commit)),
         DeleteResult::AlreadyDeleted(entry) => {
@@ -1245,7 +1242,7 @@ fn entity_delete(
         DeleteResult::Absent => {
             return Err(cli_error(
                 ExitClass::NotFound,
-                format!("no entity {kind}/{id}"),
+                format!("no entity {kind}/{entity_text}"),
             ));
         }
     };
@@ -1254,13 +1251,13 @@ fn entity_delete(
         record.insert("status", status);
         record.insert("code", code);
         record.insert("kind", kind);
-        record.insert("id", id.to_string());
+        record.insert("id", entity_text.to_owned());
         if let Some(commit) = commit {
             record.insert("commit", oid_value(commit));
         }
         emit_record(format, record)
     } else {
-        println!("{status} {kind}/{id}");
+        println!("{status} {kind}/{entity_text}");
         Ok(())
     }
 }

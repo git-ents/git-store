@@ -61,16 +61,12 @@ where
         &self.name
     }
 
-    /// The compatibility ref for an entity alias.
-    ///
-    /// New code should prefer [`entity_reference`](Self::entity_reference).
-    /// Existing named refs remain readable and are maintained as aliases by
-    /// named writes.
+    /// The ref backing an entity name.
     pub fn reference(&self, name: &RefPath) -> RefName {
         self.entities.join_path(name)
     }
 
-    /// The canonical ref for a content-derived entity id.
+    /// The ref backing an entity published under its content-derived id.
     pub fn entity_reference(&self, id: EntityId) -> RefName {
         self.reference(&entity_id_name(id))
     }
@@ -84,12 +80,13 @@ where
         }
     }
 
-    /// Store `value` with `name` as an optional compatibility alias.
+    /// Store `value` under `name`, advancing that ref like a branch.
     ///
-    /// The returned commit id is retained for compatibility. The authoritative
-    /// identity and canonical ref are derived from the complete bound document;
-    /// use [`put_entity`](Self::put_entity) when the derived [`EntityId`] is
-    /// what the caller needs.
+    /// The name is whatever the caller chooses; the store attaches no meaning
+    /// to it. Republishing identical content is a no-op, and every earlier
+    /// publication stays reachable from the name. Use
+    /// [`compile_entity`](Self::compile_entity) for the content-derived
+    /// [`EntityId`] of the same document.
     pub fn put(&self, name: &RefPath, value: &E::Value) -> Result<ObjectId, Error>
     where
         R: Committer,
@@ -98,7 +95,11 @@ where
         self.write(value).at(name)
     }
 
-    /// Store `value` without a caller-selected name and return its derived id.
+    /// Store `value` under its content-derived name and return that id.
+    ///
+    /// This is the naming policy to use when an entity has no meaningful name
+    /// yet, or when identical content must land at one ref regardless of who
+    /// publishes it.
     pub fn put_entity(&self, value: &E::Value) -> Result<EntityId, Error>
     where
         R: Committer,
@@ -107,8 +108,8 @@ where
         self.write(value).canonical()
     }
 
-    /// Store `value`, maintaining `alias` as a compatibility ref, and return
-    /// the content-derived id.
+    /// Store `value` under `name` and return its content-derived id rather
+    /// than the publication commit.
     pub fn put_with_alias(&self, alias: &RefPath, value: &E::Value) -> Result<EntityId, Error>
     where
         R: Committer,
@@ -131,7 +132,7 @@ where
         }
     }
 
-    /// Read the current state at an alias or canonical ref path.
+    /// Read the current state at a name.
     ///
     /// Unlike [`get`](Self::get), this distinguishes an explicit tombstone
     /// from an absent or hard-deleted ref. The alias form is retained for
@@ -537,78 +538,6 @@ where
         Ok(entries)
     }
 
-    /// Canonical entity refs are the index source of truth. Named refs are
-    /// deliberately excluded: they are aliases and may be added, removed, or
-    /// retargeted without changing entity identity.
-    fn canonical_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
-        let mut entries = Vec::new();
-        for (name, commit) in self.source_entries()? {
-            let Some(last) = name.segments().last() else {
-                continue;
-            };
-            if name.segments().len() != 1 {
-                continue;
-            }
-            let Ok(id) = last.as_str().parse::<EntityId>() else {
-                continue;
-            };
-            if self.canonical_target_matches(id, commit) {
-                entries.push((name, commit));
-            }
-        }
-        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-        Ok(entries)
-    }
-
-    fn is_canonical_ref(&self, name: &RefPath, commit: ObjectId) -> bool {
-        if name.segments().len() != 1 {
-            return false;
-        }
-        let Some(last) = name.segments().last() else {
-            return false;
-        };
-        let Ok(id) = last.as_str().parse::<EntityId>() else {
-            return false;
-        };
-        self.canonical_target_matches(id, commit)
-    }
-
-    fn canonical_target_matches(&self, id: EntityId, commit: ObjectId) -> bool {
-        let Ok(root) = self.store.commit_tree(commit) else {
-            return false;
-        };
-        let Ok((value_tree, _schema_tree, doc, _message)) = self.read_bound(commit) else {
-            return false;
-        };
-        if doc.kind == tombstone::SCHEMA_KIND {
-            return tombstone::read(self.store, &value_tree, &doc)
-                .ok()
-                .flatten()
-                .is_some_and(|marker| {
-                    marker.kind == self.name.as_str() && marker.entity_id() == Some(id)
-                });
-        }
-        doc.kind == self.name.as_str()
-            && tombstone::read(self.store, &value_tree, &doc)
-                .ok()
-                .flatten()
-                .is_none()
-            && id.object_id() == root
-    }
-
-    fn compatibility_identity(&self, commit: ObjectId) -> Option<EntityId> {
-        let (value_tree, _schema_tree, doc, _message) = self.read_bound(commit).ok()?;
-        if doc.kind != self.name.as_str()
-            || tombstone::read(self.store, &value_tree, &doc)
-                .ok()
-                .flatten()
-                .is_some()
-        {
-            return None;
-        }
-        self.store.commit_tree(commit).ok().map(EntityId::from)
-    }
-
     /// Decode only enough of a bound document to recognize a tombstone. This
     /// is deliberately independent of the current schema ref/history.
     fn tombstone_for(&self, commit: ObjectId) -> Option<EntityId> {
@@ -619,53 +548,19 @@ where
             .and_then(|marker| marker.entity_id())
     }
 
-    fn aliases_pointing_to(
-        &self,
-        commit: ObjectId,
-        canonical_name: &RefPath,
-    ) -> Result<Vec<RefPath>, Error> {
-        Ok(self
-            .source_entries()?
-            .into_iter()
-            .filter_map(|(name, target)| {
-                (name != *canonical_name && target == commit).then_some(name)
-            })
-            .collect())
-    }
-
-    fn aliases_for_entity(
-        &self,
-        id: EntityId,
-        canonical_name: &RefPath,
-    ) -> Result<Vec<(RefPath, ObjectId)>, Error> {
-        Ok(self
-            .source_entries()?
-            .into_iter()
-            .filter(|(name, _)| name != canonical_name)
-            .filter(|(_, commit)| {
-                self.compatibility_identity(*commit) == Some(id)
-                    || self.tombstone_for(*commit) == Some(id)
-            })
-            .collect())
-    }
-
-    /// Publish one complete document under its content-derived canonical ref,
-    /// optionally maintaining a caller-selected compatibility alias.
-    ///
-    /// This is the compatibility implementation used by the legacy write
-    /// builders; prepared callers use [`publish_prepared`](Self::publish_prepared).
+    /// Publish one complete document under a caller-selected name, defaulting
+    /// to the content-derived name when none is given.
     ///
     /// The document tree is validated before any ref is read or commit is
     /// written. Its identity is the object id of the complete `{schema/,
     /// value/}` tree, and the schema embedded in that tree must name this
-    /// kind. Canonical ref, optional alias, and the materialized index advance
-    /// in one ref-store batch.
+    /// kind. The name ref and the materialized index advance in one ref-store
+    /// batch.
     ///
-    /// An explicit [`Expectation`](gix_refstore::Expectation) is applied to
-    /// the canonical ref when no alias is supplied, or to the alias otherwise.
-    /// It is a one-shot compare-and-swap: a stale expectation is returned as an
-    /// error and is never retried. With no explicit expectation, this retains
-    /// the compatibility writer's retry-on-lost-race behavior.
+    /// An explicit [`Expectation`](gix_refstore::Expectation) is a one-shot
+    /// compare-and-swap on that ref: a stale expectation is returned as an
+    /// error and is never retried. With no explicit expectation, this retries
+    /// on a lost race.
     pub fn publish_prepared(
         &self,
         prepared: &PreparedDocument,
@@ -737,14 +632,13 @@ where
             )));
         }
         let id = canonical_document_id(tree);
-        // Canonical refs are direct children named by the document-tree id.
-        // Every caller-selected path other than that direct ref is an alias,
-        // including grouped compatibility paths.
-        let canonical_name = RefPath::from(id.as_segment());
-        let canonical_ref = self.reference(&canonical_name);
-        let alias_ref = alias
-            .filter(|name| **name != canonical_name)
-            .map(|name| self.reference(name));
+        // The caller-selected name is the ref. Callers that want a
+        // content-derived name ask for one explicitly; the store does not
+        // impose one.
+        let name = alias
+            .cloned()
+            .unwrap_or_else(|| RefPath::from(id.as_segment()));
+        let reference = self.reference(&name);
         if let Some(parent) = parent {
             // An explicit parent is a commit-level primitive, not an arbitrary
             // object edge. Validate it before attempting the ref-store CAS.
@@ -752,143 +646,54 @@ where
         }
 
         loop {
-            let canonical_current = self
-                .store
-                .refs()
-                .read(&canonical_ref)
-                .map_err(Error::backend)?;
-            let alias_current = match &alias_ref {
-                Some(reference) => self.store.refs().read(reference).map_err(Error::backend)?,
-                None => None,
-            };
+            let current = self.store.refs().read(&reference).map_err(Error::backend)?;
 
             if let Some(expected) = expected_alias {
-                let observed = if alias_ref.is_some() {
-                    alias_current
-                } else {
-                    canonical_current
-                };
                 let matches = match expected {
-                    gix_refstore::Expectation::Absent => observed.is_none(),
-                    gix_refstore::Expectation::Exactly(old) => observed == Some(old),
+                    gix_refstore::Expectation::Absent => current.is_none(),
+                    gix_refstore::Expectation::Exactly(old) => current == Some(old),
                 };
                 if !matches {
                     if retry_on_race {
                         return Ok(None);
                     }
-                    return Err(self.expectation_error(
-                        alias_ref.as_ref().unwrap_or(&canonical_ref),
-                        expected,
-                    ));
+                    return Err(self.expectation_error(&reference, expected));
                 }
             }
 
-            if let (Some(reference), Some(commit)) = (&alias_ref, alias_current)
-                && self.is_canonical_ref(
-                    &reference
-                        .relative_to(&self.entities)
-                        .unwrap_or_else(|| canonical_name.clone()),
-                    commit,
-                )
-                && reference != &canonical_ref
-            {
-                return Err(Error::NameTaken {
-                    name: reference.clone(),
-                });
-            }
-
-            let restoring_from = match canonical_current {
-                Some(commit)
-                    if self.store.commit_tree(commit)? != tree
-                        && self.tombstone_for(commit) == Some(id) =>
-                {
-                    Some(commit)
-                }
-                _ => None,
-            };
-            let aliases_to_restore = restoring_from
-                .map(|commit| self.aliases_pointing_to(commit, &canonical_name))
-                .transpose()?
-                .unwrap_or_default();
-
-            let (commit, canonical_edit) = match canonical_current {
-                Some(commit) => {
-                    let actual = self.store.commit_tree(commit)?;
-                    if actual == tree {
-                        (commit, None)
-                    } else if restoring_from == Some(commit) {
-                        // Recreating the exact content addressed by a
-                        // tombstoned id is an explicit restore: retain the
-                        // canonical ref and append a normal value commit.
-                        let next = self.store.write_commit(message, tree, Some(commit))?;
-                        (
-                            next,
-                            Some(RefEdit::Update {
-                                name: canonical_ref.clone(),
-                                expected: commit,
-                                new: next,
-                            }),
-                        )
-                    } else {
-                        return Err(Error::EntityIdCollision {
-                            id,
-                            expected: tree,
-                            found: actual,
-                        });
-                    }
+            // Republishing identical content is a no-op, which keeps migration
+            // and repeated writes idempotent. Otherwise the ref advances like a
+            // branch, so every previous publication stays reachable.
+            let (commit, edit) = match current {
+                Some(commit) if self.store.commit_tree(commit)? == tree => (commit, None),
+                Some(expected) => {
+                    let next =
+                        self.store
+                            .write_commit(message, tree, Some(parent.unwrap_or(expected)))?;
+                    (
+                        next,
+                        Some(RefEdit::Update {
+                            name: reference.clone(),
+                            expected,
+                            new: next,
+                        }),
+                    )
                 }
                 None => {
-                    // Reuse a legacy named commit whose complete document is
-                    // already identical. This makes migration of old refs
-                    // idempotent without manufacturing a metadata-dependent
-                    // replacement commit.
-                    let commit = alias_current
-                        .filter(|commit| self.store.commit_tree(*commit).ok() == Some(tree))
-                        .unwrap_or(self.store.write_commit(
-                            message,
-                            tree,
-                            parent.or(alias_current),
-                        )?);
+                    let next = self.store.write_commit(message, tree, parent)?;
                     (
-                        commit,
+                        next,
                         Some(RefEdit::Create {
-                            name: canonical_ref.clone(),
-                            new: commit,
+                            name: reference.clone(),
+                            new: next,
                         }),
                     )
                 }
             };
 
             let mut edits = Vec::new();
-            if let Some(edit) = canonical_edit {
+            if let Some(edit) = edit {
                 edits.push(edit);
-            }
-            for name in &aliases_to_restore {
-                edits.push(RefEdit::Update {
-                    name: self.reference(name),
-                    expected: restoring_from.expect("aliases imply a restore"),
-                    new: commit,
-                });
-            }
-            let explicit_alias_will_restore = alias
-                .is_some_and(|name| aliases_to_restore.iter().any(|restored| restored == name));
-            if let Some(reference) = &alias_ref
-                && !explicit_alias_will_restore
-            {
-                let current = alias_current;
-                if current != Some(commit) {
-                    edits.push(match current {
-                        Some(expected) => RefEdit::Update {
-                            name: reference.clone(),
-                            expected,
-                            new: commit,
-                        },
-                        None => RefEdit::Create {
-                            name: reference.clone(),
-                            new: commit,
-                        },
-                    });
-                }
             }
 
             let current_index = self
@@ -896,11 +701,11 @@ where
                 .refs()
                 .read(&index::reference(&self.name))
                 .map_err(Error::backend)?;
-            let mut next = self.canonical_entries()?;
-            if let Some((_, current)) = next.iter_mut().find(|(name, _)| name == &canonical_name) {
+            let mut next = self.source_entries()?;
+            if let Some((_, current)) = next.iter_mut().find(|(entry, _)| entry == &name) {
                 *current = commit;
             } else {
-                next.push((canonical_name.clone(), commit));
+                next.push((name.clone(), commit));
                 next.sort_by(|(a, _), (b, _)| a.cmp(b));
             }
             if let Some(edit) = self.index_edit(current_index, &next)? {
@@ -916,6 +721,60 @@ where
                 Err(lost @ ApplyError::LostRace { .. }) => {
                     return Err(Error::backend(lost));
                 }
+                Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
+            }
+        }
+    }
+
+    /// Publish a document under a name derived from its own publication
+    /// commit. The commit must exist before its name is known, so this cannot
+    /// go through the ordinary named path.
+    fn publish_named_by_commit(
+        &self,
+        message: &str,
+        tree: ObjectId,
+        name: impl FnOnce(ObjectId) -> RefPath,
+    ) -> Result<ObjectId, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
+        let (_, schema_tree) = self.store.split(tree, tree)?;
+        let document = self.store.schema(schema_tree)?;
+        if document.kind != self.name.as_str() {
+            return Err(Error::backend(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "prepared document belongs to kind {:?}, expected {:?}",
+                    document.kind, self.name
+                ),
+            )));
+        }
+        let commit = self.store.write_commit(message, tree, None)?;
+        let name = name(commit);
+        let reference = self.reference(&name);
+        loop {
+            if self.store.refs().read(&reference).map_err(Error::backend)? == Some(commit) {
+                return Ok(commit);
+            }
+            let mut edits = vec![RefEdit::Create {
+                name: reference.clone(),
+                new: commit,
+            }];
+            let current_index = self
+                .store
+                .refs()
+                .read(&index::reference(&self.name))
+                .map_err(Error::backend)?;
+            let mut next = self.source_entries()?;
+            next.push((name.clone(), commit));
+            next.sort_by(|(a, _), (b, _)| a.cmp(b));
+            if let Some(edit) = self.index_edit(current_index, &next)? {
+                edits.push(edit);
+            }
+            match self.store.refs().apply_batch(edits) {
+                Ok(()) => return Ok(commit),
+                Err(ApplyError::LostRace { .. }) => continue,
                 Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
             }
         }
@@ -970,12 +829,10 @@ where
         self.list_in(self.entities.clone())
     }
 
-    /// The canonical entity ref paths and publication commit IDs, ascending.
-    ///
-    /// Caller-selected aliases are not included: they are compatibility refs,
-    /// not members of the entity index.
+    /// Every entity name and publication commit, ascending, including names
+    /// whose tip is a tombstone.
     pub fn list_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
-        let source = self.canonical_entries()?;
+        let source = self.source_entries()?;
         Ok(
             index::read_validated(self.store, &self.name, &self.entities, &source)?
                 .unwrap_or(source),
@@ -993,7 +850,7 @@ where
     {
         let index_ref = index::reference(&self.name);
         loop {
-            let source = self.canonical_entries()?;
+            let source = self.source_entries()?;
             let current = self.store.refs().read(&index_ref).map_err(Error::backend)?;
             let edit = if source.is_empty() {
                 current.map(|expected| RefEdit::Delete {
@@ -1092,7 +949,7 @@ where
 
     fn list_in(&self, prefix: RefPrefix) -> Result<Vec<RefPath>, Error> {
         let mut entries: Vec<_> = self
-            .compatibility_entries()?
+            .live_entries()?
             .into_iter()
             .filter(|(name, _)| self.entities.join_path(name).is_under(&prefix))
             .map(|(name, _)| name)
@@ -1101,29 +958,13 @@ where
         Ok(entries)
     }
 
-    fn compatibility_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
-        let source = self.source_entries()?;
-        // Prefer caller-selected names for the entity they name, but make that
-        // preference per entity. A compatibility alias for one entity must not
-        // hide unrelated canonical-only entities.
-        let aliased_ids: Vec<_> = source
-            .iter()
-            .filter(|(name, commit)| !self.is_canonical_ref(name, *commit))
-            .filter_map(|(_, commit)| self.compatibility_identity(*commit))
-            .collect();
-        let mut entries = Vec::new();
-        for (name, commit) in &source {
-            if self.tombstone_for(*commit).is_some() {
-                continue;
-            }
-            let canonical = self.is_canonical_ref(name, *commit);
-            let identity = self.compatibility_identity(*commit);
-            if canonical && identity.is_some_and(|id| aliased_ids.contains(&id)) {
-                continue;
-            }
-            entries.push((name.clone(), *commit));
-        }
-        Ok(entries)
+    /// Every named ref under this kind whose tip is not a tombstone.
+    fn live_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
+        Ok(self
+            .source_entries()?
+            .into_iter()
+            .filter(|(_, commit)| self.tombstone_for(*commit).is_none())
+            .collect())
     }
 
     fn list_entries_in(&self, prefix: RefPrefix) -> Result<Vec<(RefPath, ObjectId)>, Error> {
@@ -1131,7 +972,7 @@ where
             return self.list_entries();
         }
         let mut entries: Vec<_> = self
-            .canonical_entries()?
+            .source_entries()?
             .into_iter()
             .filter(|(name, _)| self.entities.join_path(name).is_under(&prefix))
             .collect();
@@ -1139,157 +980,65 @@ where
         Ok(entries)
     }
 
-    /// Publish a typed tombstone at the canonical entity ref.
+    /// Publish a typed tombstone at the named entity ref.
     ///
-    /// The canonical ref, every compatibility alias currently pointing at the
-    /// same publication, and the materialized index advance in one ref-store
-    /// CAS batch. Repeating the operation is idempotent and returns
+    /// The ref and the materialized index advance in one ref-store CAS batch.
+    /// Repeating the operation is idempotent and returns
     /// [`DeleteResult::AlreadyDeleted`]. A missing ref is [`DeleteResult::Absent`].
-    pub fn delete(&self, id: EntityId) -> Result<DeleteResult, Error>
+    pub fn delete(&self, name: &RefPath) -> Result<DeleteResult, Error>
     where
         R: Committer,
         O: Write,
     {
-        self.delete_entity(id)
+        self.delete_name(name)
     }
 
-    /// [`delete`](Self::delete) using the canonical entity id.
+    /// [`delete`](Self::delete) for an entity published under a
+    /// content-derived name.
     pub fn delete_entity(&self, id: EntityId) -> Result<DeleteResult, Error>
     where
         R: Committer,
         O: Write,
     {
-        let canonical_name = entity_id_name(id);
-        let canonical_ref = self.reference(&canonical_name);
+        self.delete_name(&entity_id_name(id))
+    }
+
+    /// Publish a typed tombstone at `name`, retaining its history.
+    pub fn delete_name(&self, name: &RefPath) -> Result<DeleteResult, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
+        let reference = self.reference(name);
         loop {
-            let canonical_current = self
-                .store
-                .refs()
-                .read(&canonical_ref)
-                .map_err(Error::backend)?;
-            let aliases = self.aliases_for_entity(id, &canonical_name)?;
-
-            if let Some(current) = canonical_current {
-                if let EntityState::Deleted(existing) = self.read_at(current)?
-                    && existing.tombstone.entity_id() == Some(id)
-                {
-                    // A historical alias can still point at an older
-                    // publication of this same content. Repair all such names
-                    // to the existing tombstone instead of claiming that the
-                    // deletion is complete while a named read stays live.
-                    let edits: Vec<_> = aliases
-                        .iter()
-                        .filter(|(_, target)| *target != current)
-                        .map(|(name, target)| RefEdit::Update {
-                            name: self.reference(name),
-                            expected: *target,
-                            new: current,
-                        })
-                        .collect();
-                    if edits.is_empty() {
-                        return Ok(DeleteResult::AlreadyDeleted(existing));
-                    }
-                    match self.store.refs().apply_batch(edits) {
-                        Ok(()) => return Ok(DeleteResult::AlreadyDeleted(existing)),
-                        Err(ApplyError::LostRace { .. }) => continue,
-                        Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
-                    }
-                }
-
-                let actual = self.store.commit_tree(current)?;
-                if actual != id.object_id() {
-                    return Err(Error::EntityIdCollision {
-                        id,
-                        expected: id.object_id(),
-                        found: actual,
-                    });
-                }
-            } else if aliases.is_empty() {
-                // No canonical ref and no bound compatibility ref remains.
+            let Some(current) = self.store.refs().read(&reference).map_err(Error::backend)? else {
                 return Ok(DeleteResult::Absent);
+            };
+            if let EntityState::Deleted(existing) = self.read_at(current)? {
+                return Ok(DeleteResult::AlreadyDeleted(existing));
             }
 
-            // If an alias-only entity was already tombstoned, promote that
-            // tombstone to the canonical ref and repair every alias without
-            // manufacturing a second deletion commit.
-            if canonical_current.is_none()
-                && let Some((_, existing_commit)) = aliases
-                    .iter()
-                    .find(|(_, commit)| self.tombstone_for(*commit) == Some(id))
-            {
-                let current_index = self
-                    .store
-                    .refs()
-                    .read(&index::reference(&self.name))
-                    .map_err(Error::backend)?;
-                let mut edits = vec![RefEdit::Create {
-                    name: canonical_ref.clone(),
-                    new: *existing_commit,
-                }];
-                for (name, target) in &aliases {
-                    if target != existing_commit {
-                        edits.push(RefEdit::Update {
-                            name: self.reference(name),
-                            expected: *target,
-                            new: *existing_commit,
-                        });
-                    }
-                }
-                let mut next = self.canonical_entries()?;
-                next.push((canonical_name.clone(), *existing_commit));
-                next.sort_by(|(a, _), (b, _)| a.cmp(b));
-                if let Some(edit) = self.index_edit(current_index, &next)? {
-                    edits.push(edit);
-                }
-                match self.store.refs().apply_batch(edits) {
-                    Ok(()) => {
-                        let EntityState::Deleted(existing) = self.read_at(*existing_commit)? else {
-                            unreachable!("tombstone_for returned a tombstone commit")
-                        };
-                        return Ok(DeleteResult::AlreadyDeleted(existing));
-                    }
-                    Err(ApplyError::LostRace { .. }) => continue,
-                    Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
-                }
-            }
-
-            let parent = canonical_current.or_else(|| aliases.first().map(|(_, commit)| *commit));
+            let id = canonical_document_id(self.store.commit_tree(current)?);
             let tombstone = Tombstone::new(&self.name, id);
             let tree = tombstone::write(self.store, &tombstone)?;
             let message = format!("delete {}/{}\n", self.name, id);
-            let commit = self.store.write_commit(&message, tree, parent)?;
-            let mut edits = vec![match canonical_current {
-                Some(expected) => RefEdit::Update {
-                    name: canonical_ref.clone(),
-                    expected,
-                    new: commit,
-                },
-                None => RefEdit::Create {
-                    name: canonical_ref.clone(),
-                    new: commit,
-                },
+            let commit = self.store.write_commit(&message, tree, Some(current))?;
+            let mut edits = vec![RefEdit::Update {
+                name: reference.clone(),
+                expected: current,
+                new: commit,
             }];
-
-            // Match aliases by entity identity, not only by their current
-            // publication commit, so historical alias targets are hidden too.
-            for (name, expected) in aliases {
-                edits.push(RefEdit::Update {
-                    name: self.reference(&name),
-                    expected,
-                    new: commit,
-                });
-            }
 
             let current_index = self
                 .store
                 .refs()
                 .read(&index::reference(&self.name))
                 .map_err(Error::backend)?;
-            let mut next = self.canonical_entries()?;
-            if let Some((_, target)) = next.iter_mut().find(|(name, _)| name == &canonical_name) {
+            let mut next = self.source_entries()?;
+            if let Some((_, target)) = next.iter_mut().find(|(entry, _)| entry == name) {
                 *target = commit;
             } else {
-                next.push((canonical_name.clone(), commit));
+                next.push((name.clone(), commit));
                 next.sort_by(|(a, _), (b, _)| a.cmp(b));
             }
             if let Some(edit) = self.index_edit(current_index, &next)? {
@@ -1310,33 +1059,11 @@ where
         }
     }
 
-    /// Delete the entity currently addressed by a compatibility alias. The
-    /// alias remains a compatibility ref and observes the tombstone, while
-    /// canonical refs for other content-derived identities in the alias's
-    /// history remain unchanged. Each distinct document tree is a distinct
-    /// entity, so alias history is intentionally not traversed.
-    pub fn delete_name(&self, name: &RefPath) -> Result<DeleteResult, Error>
-    where
-        R: Committer,
-        O: Write,
-    {
-        let reference = self.reference(name);
-        let Some(commit) = self.store.refs().read(&reference).map_err(Error::backend)? else {
-            return Ok(DeleteResult::Absent);
-        };
-
-        let id = match self.read_at(commit)? {
-            EntityState::Present(_) => canonical_document_id(self.store.commit_tree(commit)?),
-            EntityState::Deleted(entry) => {
-                entry.tombstone.entity_id().ok_or(Error::InvalidTombstone)?
-            }
-            EntityState::Absent => unreachable!("a ref read yielded a commit"),
-        };
-        self.delete_entity(id)
-    }
-
-    /// Delete a compatibility alias or canonical ref. Returns whether it
-    /// existed. Removing an alias does not remove the canonical entity.
+    /// Prune a name and its history outright. Returns whether it existed.
+    ///
+    /// This is the non-typed counterpart to [`delete`](Self::delete): no
+    /// tombstone is published, so a later reader cannot distinguish the name
+    /// from one that never existed.
     pub fn remove(&self, name: &RefPath) -> Result<bool, Error>
     where
         R: Committer,
@@ -1347,25 +1074,22 @@ where
             let Some(expected) = self.store.refs().read(&reference).map_err(Error::backend)? else {
                 return Ok(false);
             };
-            let canonical = self.is_canonical_ref(name, expected);
             let mut edits = vec![RefEdit::Delete {
                 name: reference.clone(),
                 expected,
             }];
-            if canonical {
-                let current_index = self
-                    .store
-                    .refs()
-                    .read(&index::reference(&self.name))
-                    .map_err(Error::backend)?;
-                let next: Vec<_> = self
-                    .canonical_entries()?
-                    .into_iter()
-                    .filter(|(entry, _)| entry != name)
-                    .collect();
-                if let Some(edit) = self.index_edit(current_index, &next)? {
-                    edits.push(edit);
-                }
+            let current_index = self
+                .store
+                .refs()
+                .read(&index::reference(&self.name))
+                .map_err(Error::backend)?;
+            let next: Vec<_> = self
+                .source_entries()?
+                .into_iter()
+                .filter(|(entry, _)| entry != name)
+                .collect();
+            if let Some(edit) = self.index_edit(current_index, &next)? {
+                edits.push(edit);
             }
             match self.store.refs().apply_batch(edits) {
                 Ok(()) => return Ok(true),
@@ -1550,7 +1274,7 @@ pub fn entity_name(commit: ObjectId) -> RefPath {
     commit_segment(commit).into()
 }
 
-/// Return the direct canonical ref path for an [`EntityId`].
+/// Return the ref path naming an entity by its [`EntityId`].
 pub fn entity_id_name(id: EntityId) -> RefPath {
     id.as_segment().into()
 }
@@ -1597,7 +1321,7 @@ where
         Ok(commit)
     }
 
-    /// Commit the value at the canonical content-derived ref and return its
+    /// Commit the value under its content-derived name and return its
     /// [`EntityId`].
     pub fn canonical(self) -> Result<EntityId, Error>
     where
@@ -1611,8 +1335,8 @@ where
         Ok(id)
     }
 
-    /// Commit the value at its canonical ref and maintain `alias` as an
-    /// optional compatibility ref, returning the derived [`EntityId`].
+    /// Commit the value under `alias`, returning the derived [`EntityId`]
+    /// rather than the publication commit.
     pub fn with_alias(self, alias: &RefPath) -> Result<EntityId, Error>
     where
         R: Committer,
@@ -1680,13 +1404,7 @@ where
         let kind = self.kind;
         let default = || format!("store {}/<auto>", kind.name);
         let (message, tree) = self.build(default)?;
-        let (_, commit) = kind.publish_document(None, &message, tree)?;
-        // Keep the old commit-named path readable for callers that use the
-        // compatibility `entity_name*` helpers. It is an alias only; the
-        // canonical ref was published from the document tree above.
-        let alias = name(commit);
-        let (_, commit) = kind.publish_document(Some(&alias), &message, tree)?;
-        Ok(commit)
+        kind.publish_named_by_commit(&message, tree, name)
     }
 }
 

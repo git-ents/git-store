@@ -234,10 +234,11 @@ before implementation.
 
 Then:
 
-- replace the normal `put(name, value)` authority with an API that writes and
-  returns the derived entity ID;
-- make caller labels optional metadata/index entries, never identity;
-- update entity refs and the materialized index to use the derived ID;
+- expose an API that returns the derived entity ID for any document, published
+  or not, so identity never depends on where a document was written;
+- keep ref naming as application policy: `put(name, value)` publishes at the
+  caller's name, and naming an entity by its derived ID is one available
+  choice rather than a layout the store imposes;
 - define collision behavior and idempotent repeated writes;
 - migrate CLI syntax and documentation away from mandatory caller-controlled
   names;

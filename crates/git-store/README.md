@@ -30,8 +30,8 @@ $ git store get <document-tree> | jq .serves
 
 The positional `put <schema> [<value>]` form remains a convenient pure compile:
 it prints the bound document-tree OID and advances no ref. The hidden two-argument
-`put <kind> <name>` form is retained for old scripts and publishes a named
-compatibility alias. The explicit `value` and `document` commands make each
+`put <kind> <name>` form publishes the value under that name. The explicit
+`value` and `document` commands make each
 step addressable for a manually scripted migration.
 
 What landed is a real Git tree, not an opaque payload — `git ls-tree` and
@@ -54,7 +54,7 @@ $ git ls-tree refs/store/recipe/carbonara^{tree}:value
 $ git cat-file blob $(git rev-parse refs/store/recipe/carbonara^{tree}:value/serves)
 4
 
-$ git log --oneline refs/store/recipe/carbonara     # compatibility-alias history
+$ git log --oneline refs/store/recipe/carbonara     # this name's history
 9f50ef7 publish recipe
 15e425b publish recipe
 
@@ -119,9 +119,9 @@ git store                                   # list kinds
 git store put <schema> [<value>]            # pure compile; prints document-tree OID
 git store get <tree-ish>                    # decode a bound document
 git store check <tree-ish> <schema>         # validate a value tree against a published schema
-git store list [<kind>]   (alias: ls)       # kinds, or live entity aliases
-git store log  <kind> <name>                # commit OID + date per compatibility alias
-git store rm   <kind> <name>                # compatibility-name tombstone
+git store list [<kind>]   (alias: ls)       # kinds, or live entity names
+git store log  <kind> <name>                # commit OID + date per publication
+git store rm   <kind> <name>                # publish a tombstone over a name
 git store schema put <kind> [-F <file>]    # define/evolve a kind (else stdin, or -i)
 git store schema get <kind> [--at <commit>] [--legacy-leaves] # schema as JSON
 git store schema inspect <kind> --at <commit> [--legacy-leaves] # inspect publication
@@ -137,7 +137,7 @@ git store value decode <value-tree> --schema <tree-ish>
 git store document inspect <document-tree>
 git store document bind <value-tree> --schema <schema-tree>
 git store document publish <kind> <document-tree> --expected <absent|OID> [--alias <name>]
-git store entity delete <kind> <entity-id>   # canonical tombstone
+git store entity delete <kind> <name>        # typed tombstone over a name
 
 # Global layout options (defaults shown):
 git store --data-prefix refs/store --schema-prefix refs/schema <command>
@@ -200,8 +200,8 @@ tree; no kind lookup, schema-history guess, or trailer is consulted.
 `document bind <value-tree> --schema <schema-tree>` creates only the complete
 `{schema/, value/}` root tree. `document inspect <document-tree>` reports
 `bound`, `legacy_value_root`, or `malformed` without guessing. `document publish`
-then commits a prepared bound tree and updates the canonical ref, optional alias,
-and materialized index in one compare-and-swap batch.
+then commits a prepared bound tree and updates the named ref and materialized
+index in one compare-and-swap batch.
 
 `schema get <kind> --at <commit>` returns the schema snapshot at an explicit
 publication commit; without `--at` it returns the current snapshot. `schema
@@ -235,21 +235,23 @@ for the actionable diagnostic.
 ### Publication, identity, and deletion
 
 `document publish` requires `--expected absent` or `--expected <full-oid>`. With
-no alias the expectation applies to the selected data prefix's
-`<data-prefix>/<kind>/<entity-id>`; with `--alias` it applies to that alias. A
-stale expectation fails with exit category
+`--alias <name>` it publishes at `<data-prefix>/<kind>/<name>`; with no alias it
+publishes at the entity's content-derived name. The expectation applies to that
+ref. A stale expectation fails with exit category
 `4`, publishes none of the batch, and is **not retried**. Objects written before
 a lost CAS may remain unreachable; a script decides whether to retry, resume, or
 report the conflict. The CLI does not hide that policy.
 
 The bound document-tree OID is the content-derived `EntityId`, so both schema
-and value contribute to identity. The canonical ref is
-`<data-prefix>/<kind>/<entity-id>`. Caller names are compatibility aliases and
-are not identity or the source of truth. The per-kind index under `refs/cache/` is
-a materialized cache of canonical refs: entity refs remain authoritative, and
-readers can fall back to them when the index is absent, malformed, or stale.
-`entity delete <kind> <entity-id>` publishes a typed tombstone over the
-canonical ref and updates aliases/index atomically; it does not prune the ref.
+and value contribute to identity. It is a derived value, independent of where
+the document is published. Ref layout is application policy: an entity lives at
+`<data-prefix>/<kind>/<name>` for whatever name the caller picks, and naming it
+`<entity-id>` is one such choice rather than a rule the store imposes. The
+per-kind index under `refs/cache/` is a materialized cache of the entity refs:
+those refs remain authoritative, and readers can fall back to them when the
+index is absent, malformed, or stale. `entity delete <kind> <name>` publishes a
+typed tombstone over that ref and updates the index atomically; it does not
+prune the ref.
 
 ### Script boundary
 

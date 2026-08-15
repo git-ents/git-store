@@ -39,7 +39,7 @@ fn options(alias: Option<RefPath>, expectation: Option<Expectation>) -> gix_stor
 }
 
 #[test]
-fn publishes_complete_document_at_canonical_ref_and_alias() {
+fn publishes_complete_document_at_the_requested_name() {
     let store = store();
     let kind = store.dynamic(seg("counter"));
     kind.schema()
@@ -57,19 +57,15 @@ fn publishes_complete_document_at_canonical_ref_and_alias() {
         .unwrap();
     assert_eq!(publication.id, id);
 
-    let canonical = kind.entity_reference(id);
-    let commit = store.refs().read(&canonical).unwrap().unwrap();
+    let commit = store
+        .refs()
+        .read(&kind.reference(&path("friendly")))
+        .unwrap()
+        .unwrap();
     assert_eq!(publication.commit, commit);
     assert_eq!(
-        store
-            .refs()
-            .read(&kind.reference(&path("friendly")))
-            .unwrap(),
-        Some(commit)
-    );
-    assert_eq!(
         kind.list_entries().unwrap(),
-        vec![(id.as_segment().into(), commit)]
+        vec![(path("friendly"), commit)]
     );
     assert_eq!(
         kind.get(&path("friendly")).unwrap(),
@@ -150,7 +146,7 @@ fn stale_explicit_expectation_is_not_retried_or_published() {
         .put(&facet_git_tree::schema_of::<Counter>().unwrap())
         .unwrap();
     let alias = path("friendly");
-    let first = kind.put_with_alias(&alias, &value!({ "n": 1 })).unwrap();
+    kind.put_with_alias(&alias, &value!({ "n": 1 })).unwrap();
     let old_commit = kind.get_entry(&alias).unwrap().unwrap().commit;
     kind.put_with_alias(&alias, &value!({ "n": 2 })).unwrap();
     let tree = kind.compile(&value!({ "n": 3 })).unwrap();
@@ -164,11 +160,14 @@ fn stale_explicit_expectation_is_not_retried_or_published() {
         .is_err()
     );
     assert_eq!(kind.get(&alias).unwrap(), Some(value!({ "n": 2 })));
-    assert_eq!(kind.get_entity(first).unwrap(), Some(value!({ "n": 1 })));
+    // The rejected write left no trace, and the name's history still reaches
+    // the superseded publication.
+    assert_eq!(kind.history(&alias).unwrap().len(), 2);
+    assert_eq!(kind.get_at(old_commit).unwrap(), value!({ "n": 1 }));
 }
 
 #[test]
-fn same_prepared_content_deduplicates_while_aliases_are_updated_atomically() {
+fn the_same_prepared_document_may_be_published_under_several_names() {
     let store = store();
     let kind = store.dynamic(seg("counter"));
     kind.schema()
@@ -183,33 +182,20 @@ fn same_prepared_content_deduplicates_while_aliases_are_updated_atomically() {
         options(Some(path("first")), Some(Expectation::Absent)),
     )
     .unwrap();
-    let canonical_commit = store
-        .refs()
-        .read(&kind.entity_reference(id))
-        .unwrap()
+    let second = kind
+        .publish_prepared(
+            &prepared,
+            options(Some(path("second")), Some(Expectation::Absent)),
+        )
         .unwrap();
-    kind.publish_prepared(
-        &prepared,
-        options(Some(path("second")), Some(Expectation::Absent)),
-    )
-    .unwrap();
 
-    assert_eq!(
-        store.refs().read(&kind.entity_reference(id)).unwrap(),
-        Some(canonical_commit)
-    );
-    assert_eq!(
-        store.refs().read(&kind.reference(&path("first"))).unwrap(),
-        Some(canonical_commit)
-    );
-    assert_eq!(
-        store.refs().read(&kind.reference(&path("second"))).unwrap(),
-        Some(canonical_commit)
-    );
-    assert_eq!(
-        kind.list_entries().unwrap(),
-        vec![(id.as_segment().into(), canonical_commit)]
-    );
+    // Identity is derived from content, so both names address the same entity
+    // while remaining independent refs.
+    assert_eq!(second.id, id);
+    for name in ["first", "second"] {
+        assert_eq!(kind.get(&path(name)).unwrap(), Some(value!({ "n": 9 })));
+    }
+    assert_eq!(kind.list().unwrap(), vec![path("first"), path("second")]);
 }
 
 #[derive(facet::Facet)]

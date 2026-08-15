@@ -190,7 +190,7 @@ fn fetched_tombstone_is_deleted_without_schema_ref_or_index() {
     let kind = origin_store.dynamic(seg("counter"));
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let id = kind.put_entity(&value!({ "n": 1 })).unwrap();
-    let tombstone_commit = match kind.delete(id).unwrap() {
+    let tombstone_commit = match kind.delete_entity(id).unwrap() {
         DeleteResult::Deleted(entry) => entry.commit,
         other => panic!("expected a new tombstone, got {other:?}"),
     };
@@ -241,69 +241,62 @@ fn fetched_tombstone_is_deleted_without_schema_ref_or_index() {
 }
 
 #[test]
-fn concurrent_restore_and_delete_keep_canonical_and_alias_refs_consistent() {
+fn concurrent_rewrite_and_delete_leave_a_name_in_an_explicit_state() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let repo = gix::open(dir.path()).unwrap();
     let store = RepoStore::open(&repo);
     let kind = store.dynamic(seg("counter"));
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
-    let alias = entity("legacy/counter");
-    let value = value!({ "n": 1 });
-    let id = kind.put_with_alias(&alias, &value).unwrap();
-    assert!(matches!(kind.delete(id).unwrap(), DeleteResult::Deleted(_)));
+    let name = entity("legacy/counter");
+    kind.put(&name, &value!({ "n": 1 })).unwrap();
 
     let barrier = Arc::new(Barrier::new(2));
     let path = dir.path();
     std::thread::scope(|scope| {
-        let restore_barrier = Arc::clone(&barrier);
+        let write_barrier = Arc::clone(&barrier);
+        let write_name = name.clone();
         scope.spawn(move || {
             let repo = gix::open(path).unwrap();
             let store = RepoStore::open(&repo);
-            restore_barrier.wait();
+            write_barrier.wait();
             store
                 .dynamic(seg("counter"))
-                .put_entity(&value!({ "n": 1 }))
+                .put(&write_name, &value!({ "n": 2 }))
                 .unwrap();
         });
 
         let delete_barrier = Arc::clone(&barrier);
+        let delete_name = name.clone();
         scope.spawn(move || {
             let repo = gix::open(path).unwrap();
             let store = RepoStore::open(&repo);
             delete_barrier.wait();
-            let _ = store.dynamic(seg("counter")).delete(id).unwrap();
+            let _ = store
+                .dynamic(seg("counter"))
+                .delete_name(&delete_name)
+                .unwrap();
         });
     });
 
-    match kind.read_entity(id).unwrap() {
+    // Either order is a valid outcome, but the name must be either live or
+    // explicitly deleted -- never absent, and never disagreeing with the index.
+    match kind.read(&name).unwrap() {
         EntityState::Present(entry) => {
-            match kind.read(&alias).unwrap() {
-                EntityState::Present(alias_entry) => {
-                    assert_eq!(alias_entry.commit, entry.commit);
-                }
-                other => panic!("a live canonical entity must have a live alias, got {other:?}"),
-            }
-            assert_eq!(kind.list().unwrap(), vec![alias.clone()]);
-            assert_eq!(kind.entries().unwrap().len(), 1);
-        }
-        EntityState::Deleted(entry) => {
-            match kind.read(&alias).unwrap() {
-                EntityState::Deleted(alias_entry) => {
-                    assert_eq!(alias_entry.commit, entry.commit);
-                }
-                other => {
-                    panic!("a deleted canonical entity must have a deleted alias, got {other:?}")
-                }
-            }
-            assert!(kind.list().unwrap().is_empty());
-            assert!(kind.entries().unwrap().is_empty());
+            assert_eq!(kind.list().unwrap(), vec![name.clone()]);
             assert_eq!(
                 kind.list_entries().unwrap(),
-                vec![(gix_store::entity_id_name(id), entry.commit)]
+                vec![(name.clone(), entry.commit)]
             );
         }
-        other => panic!("restore/delete race must leave an explicit state, got {other:?}"),
+        EntityState::Deleted(entry) => {
+            assert!(kind.list().unwrap().is_empty());
+            assert_eq!(
+                kind.list_entries().unwrap(),
+                vec![(name.clone(), entry.commit)]
+            );
+        }
+        other => panic!("write/delete race must leave an explicit state, got {other:?}"),
     }
 }
 

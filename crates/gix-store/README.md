@@ -19,8 +19,8 @@ let recipes = store.kind::<Recipe>(RefSegment::new("recipe")?);
 // the type definition: stored documents carry their own schema tree.
 recipes.publish()?;
 
-// The canonical ref is named by the complete bound document-tree OID.
-// Keep a named ref only as an explicit compatibility alias.
+// The name is the ref. `put_with_alias` returns the content-derived
+// `EntityId` instead of the publication commit.
 let id = recipes.put_with_alias(
     &RefPath::new("carbonara")?,
     &Recipe { title: "Carbonara".into(), serves: 4 },
@@ -65,17 +65,19 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   use them to resolve a schema.
 - **Entity identity is the complete bound tree OID.** `EntityId` is the OID of
   the root tree containing exactly `schema/` and `value/`. It is not the
-  publication commit OID and not a caller alias; changing either the bound
-  schema or encoded value changes the ID. Canonical refs are direct children
-  named by that ID (`refs/store/<kind>/<entity-id>`). Named refs, including
-  nested legacy paths, are compatibility aliases and are not the canonical
-  entity index. `put_entity`, `put_with_alias`, `compile_entity`,
-  `read_entity`, and `entity_reference` expose the canonical layer.
-- **Named handles are a compatibility convenience.** `Kind::put`, `get`,
-  `reference`, `entity_name`, `anonymous`, and related named APIs remain useful
-  for ref-addressed callers and old repositories. They may maintain or read an
-  alias, but a name or schema publication never replaces the document's
-  embedded schema or content identity. Option-returning `get` methods also map
+  publication commit OID and not a caller-selected name; changing either the
+  bound schema or encoded value changes the ID. It is a derived value that
+  `compile_entity` produces for any document, published or not.
+- **Ref names are application policy.** Data refs are
+  `refs/store/<kind>/<name>` for whatever name the caller picks, nesting
+  included. The store attaches no meaning to a name: it advances that ref like
+  a branch, so every earlier publication stays reachable, and distinct names
+  are independent even when they address identical content. An application
+  that wants content-addressed storage names an entity by its `EntityId`;
+  `put_entity`, `read_entity`, and `entity_reference` are the shorthand for
+  that policy, and the store treats those refs like any other. A name or schema
+  publication never replaces the document's embedded schema or content
+  identity. Option-returning `get` methods also map
   both absent and deleted entities to `None`; use `read`/`read_entity` and
   `EntityState` when that distinction matters.
 - **Prepared documents expose the plumbing boundary.** `Store::encode_value`
@@ -88,8 +90,8 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
 - **Writes compare and swap.** Each entity write reads the entity and index
   refs, writes its commit and the next index tree, then applies both edits with
   one [`RefStore::apply_batch`](gix_refstore::RefStore::apply_batch)
-  transaction. A lost race retries the whole read/build/publication sequence for
-  compatibility writes; object writes may remain unreachable, but the old pair
+  transaction. A lost race retries the whole read/build/publication sequence;
+  object writes may remain unreachable, but the old pair
   of refs remains valid. `PublishOptions::with_expectation` changes this to a
   one-shot CAS: a stale expectation returns an error and is never retried.
 - **Kinds have a materialized index.** The private cache ref
@@ -103,7 +105,7 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   The existing fingerprint domain and kind-name component are unchanged, so
   schema refs remain excluded and different kinds cannot share a cache key.
 - **Indexes are advisory.** Entity refs remain authoritative. Reads validate a
-  present index against the complete canonical entity-ref mapping and fall back
+  present index against the complete entity-ref mapping and fall back
   safely to that mapping when the index is absent, malformed, or stale. This
   preserves correctness after low-level or external ref writes, at the cost of
   validation work; `Kind::rebuild_index` is the explicit repair/materialization
@@ -153,9 +155,8 @@ document-tree OID) and `git store get <tree-ish>` (decode that tree directly).
 The explicit library operations behind the plumbing are
 `encode_value`/`decode_value`, `bind_document`, `inspect_document`, and
 `publish_prepared`. The hidden two-argument forms are compatibility paths:
-`get <kind> <name>` reads an alias or legacy named ref, while
-`rm <kind> <name>` publishes a tombstone over the canonical ref and aliases
-rather than removing them.
+`get <kind> <name>` reads a named ref, while `rm <kind> <name>` publishes a
+tombstone over that ref rather than removing it.
 
 Schema selection for an unbound value is always explicit. The CLI equivalents
 are `git store value encode --schema <tree-ish>`,
@@ -177,10 +178,10 @@ for invalid arguments/object shape, `3` for missing refs/objects/schemas/entitie
 `4` for CAS conflicts, and `5` for schema/value/document failures.
 
 `git store document publish <kind> <document-tree> --expected <absent|OID>`
-uses a one-shot compare-and-swap. The expectation applies to the canonical ref
-unless an alias is supplied, in which case it applies to that alias. The
-canonical ref, optional alias, and materialized index are published in one
-batch. A stale expectation fails without retry; objects written before a lost
+uses a one-shot compare-and-swap. It publishes under `--alias <name>`,
+defaulting to the entity's content-derived name when none is given; the
+expectation applies to that ref, and the ref and materialized index are
+published in one batch. A stale expectation fails without retry; objects written before a lost
 CAS may remain unreachable. Bash, Git, or another caller owns traversal,
 transforms, batching, retry/resume, and policy. There is no hard-coded CLI
 `migrate` workflow, and these commands never silently rewrite a stored tree.
