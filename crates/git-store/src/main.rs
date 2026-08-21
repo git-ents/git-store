@@ -46,11 +46,11 @@ pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, GixRefStore<'r>, &'r gix::Od
     arg_required_else_help = true
 )]
 struct Cli {
-    /// Output format for additive plumbing commands.
-    #[arg(long, global = true, value_enum, conflicts_with = "json")]
+    /// Output format, honored by every command.
+    #[arg(long, global = true, value_enum)]
     format: Option<OutputFormat>,
-    /// Use compact JSON output.
-    #[arg(long, global = true, conflicts_with = "format")]
+    /// Shorthand for `--format json`.
+    #[arg(long, global = true, hide = true)]
     json: bool,
     /// Ref namespace containing data kinds and compatibility entity aliases.
     #[arg(
@@ -421,105 +421,17 @@ fn run() -> Result<()> {
     let store = RepoStore::open_with_layout(&repo, layout);
 
     match cli.command {
-        Command::Put(args) => put(&store, args)?,
+        Command::Put(args) => put(&store, args, output)?,
         Command::Get {
             args,
             legacy_leaves,
-        } => match <[String; 1]>::try_from(args) {
-            // `get <tree-ish>`: decode any tree of the `{value/, schema/}`
-            // shape directly, whatever it was reached through.
-            Ok([tree_ish]) => {
-                let tree = resolve_tree(&repo, &tree_ish)?;
-                // `decode` reads entirely out of `tree`'s own embedded
-                // schema and does not consult any kind or schema ref.
-                let value = if legacy_leaves {
-                    store.decode_legacy(tree)
-                } else {
-                    store.decode(tree)
-                }
-                .with_context(|| {
-                    cli_context(ExitClass::Schema, format!("{tree_ish} is not a document"))
-                })?;
-                println!("{}", to_json(&value)?);
-            }
-            // Hidden old form: `get <kind> <name>`.
-            Err(args) => {
-                let [kind, name] = <[String; 2]>::try_from(args)
-                    .expect("clap enforces 1..=2 positional arguments");
-                let (name, rev) = split_name_rev(&name);
-                let handle = store.dynamic(segment("kind", &kind)?);
-                let name_seg = entity(name)?;
-                let state = match rev {
-                    Some(rev) => {
-                        let oid = resolve_at(&repo, &handle, &name_seg, rev)?;
-                        // Only read a commit that is actually a version of
-                        // this entity, so a stray oid can't return an
-                        // unrelated value.
-                        if !handle.history(&name_seg)?.contains(&oid) {
-                            bail!("{rev} is not a version of {kind}/{name}");
-                        }
-                        handle.read(oid)?
-                    }
-                    None => handle.read(name_seg)?,
-                };
-                let value = match state {
-                    EntityState::Present(entry) => entry.value,
-                    EntityState::Deleted(_) => bail!("entity {kind}/{name} is deleted"),
-                    EntityState::Absent => {
-                        return Err(cli_error(
-                            ExitClass::NotFound,
-                            format!("no entity {kind}/{name}"),
-                        ));
-                    }
-                };
-                println!("{}", to_json(&value)?);
-            }
-        },
-        Command::Check { tree_ish, schema } => {
-            let tree = resolve_tree(&repo, &tree_ish)?;
-            let doc = store
-                .dynamic(segment("schema", &schema)?)
-                .schema()
-                .get()?
-                .with_context(|| {
-                    cli_context(
-                        ExitClass::NotFound,
-                        format!("no schema published for {schema:?}"),
-                    )
-                })?;
-            validate_with_schema(&tree, &doc, store.objects()).with_context(|| {
-                cli_context(
-                    ExitClass::Schema,
-                    format!("{tree_ish} does not conform to {schema:?}"),
-                )
-            })?;
-        }
-        Command::Doctor => doctor(&repo, &store)?,
-        Command::List { kind: Some(kind) } => {
-            print_lines(store.dynamic(segment("kind", &kind)?).list()?)
-        }
-        Command::List { kind: None } => print_lines(store.kinds()?),
-        Command::Log { kind, name } => {
-            let name_seg = entity(&name)?;
-            print_log(
-                &repo,
-                store.dynamic(segment("kind", &kind)?).history(&name_seg)?,
-            )?
-        }
-        Command::Rm { kind, name } => {
-            let name_seg = entity(&name)?;
-            let handle = store.dynamic(segment("kind", &kind)?);
-            match handle.delete_name(&name_seg)? {
-                DeleteResult::Deleted(_) => println!("deleted {kind}/{name}"),
-                DeleteResult::AlreadyDeleted(_) => println!("already deleted {kind}/{name}"),
-                DeleteResult::Absent => {
-                    return Err(cli_error(
-                        ExitClass::NotFound,
-                        format!("no entity {kind}/{name}"),
-                    ));
-                }
-            }
-        }
+        } => get(&repo, &store, args, legacy_leaves, output)?,
+        Command::Check { tree_ish, schema } => check(&repo, &store, &tree_ish, &schema, output)?,
+        Command::Doctor => doctor(&repo, &store, output)?,
+        Command::List { kind: Some(kind) } => list_entities(&store, &kind, output)?,
+        Command::List { kind: None } => list_kinds(&store, output)?,
+        Command::Log { kind, name } => log(&repo, &store, &kind, &name, output)?,
+        Command::Rm { kind, name } => rm(&store, &kind, &name, output)?,
         Command::Schema { command } => match command {
             SchemaCommand::Put {
                 kind,
@@ -532,7 +444,10 @@ fn run() -> Result<()> {
                 } else {
                     schema_doc_from_json(&read_source(file.as_ref())?)?
                 };
-                println!("{}", handle.schema().put(&doc)?);
+                let commit = handle.schema().put(&doc)?;
+                let mut fields = VObject::new();
+                fields.insert("commit", oid_value(commit));
+                emit_single(output, fields, || commit.to_string())?;
             }
             SchemaCommand::Get {
                 kind,
@@ -570,22 +485,12 @@ fn run() -> Result<()> {
             } => {
                 schema_inspect(&repo, &store, &kind, &at, legacy_leaves, output)?;
             }
-            SchemaCommand::Show { kind } => {
-                let kinds = match kind {
-                    Some(kind) => vec![segment("kind", &kind)?],
-                    None => store.kinds()?,
-                };
-                for seg in kinds {
-                    let handle = store.dynamic(seg);
-                    if let Some(doc) = handle.schema().get()? {
-                        print_type(handle.name().as_str(), &doc);
-                    }
-                }
-            }
-            SchemaCommand::List => print_lines(store.kinds()?),
-            SchemaCommand::Log { kind } => print_log(
+            SchemaCommand::Show { kind } => schema_show(&store, kind.as_deref(), output)?,
+            SchemaCommand::List => list_kinds(&store, output)?,
+            SchemaCommand::Log { kind } => log_commits(
                 &repo,
                 store.dynamic(segment("kind", &kind)?).schema().history()?,
+                output,
             )?,
         },
         Command::Ref { command } => match command {
@@ -765,15 +670,75 @@ where
 }
 
 fn emit_record(format: OutputFormat, record: VObject) -> Result<()> {
-    if !format.machine() {
-        bail!("internal error: attempted machine output in text mode")
-    }
+    debug_assert!(format.machine(), "emit_record is for json/ndjson only");
     let value: Value = record.into();
     println!(
         "{}",
         facet_json::to_string(&value).map_err(|e| anyhow::anyhow!("encoding JSON: {e}"))?
     );
     Ok(())
+}
+
+/// Print one command's result: `text()` under [`OutputFormat::Text`], or
+/// `fields` layered over the standard `status`/`code` envelope under `json`
+/// or `ndjson` — the two formats agree for a single-result command, and
+/// differ only for a list ([`emit_list`]). Every command routes its output
+/// through this or [`emit_list`], so no command can silently ignore the
+/// selected format.
+fn emit_single(format: OutputFormat, fields: VObject, text: impl FnOnce() -> String) -> Result<()> {
+    if format.machine() {
+        emit_fields(format, fields)
+    } else {
+        println!("{}", text());
+        Ok(())
+    }
+}
+
+/// [`emit_single`]'s machine-format half: the standard envelope with `fields`
+/// layered over it, for a command whose text rendering is empty (`check`) or
+/// handled separately by the caller.
+fn emit_fields(format: OutputFormat, fields: VObject) -> Result<()> {
+    let mut record = json_record();
+    record.extend(fields);
+    emit_record(format, record)
+}
+
+/// One row of a [`emit_list`] result: `fields` are the bare, unwrapped
+/// machine data for that row and `text` its one-line human rendering.
+struct ListItem {
+    fields: VObject,
+    text: String,
+}
+
+/// Print a list-shaped command's result. Text prints one line per item.
+/// `ndjson` prints one enveloped record per item. `json` prints one envelope
+/// whose `list_field` holds the array of bare item objects — the same shape
+/// [`ref_list`] and [`object_tree`] already used, generalized to every
+/// list-producing command.
+fn emit_list(format: OutputFormat, list_field: &str, items: Vec<ListItem>) -> Result<()> {
+    match format {
+        OutputFormat::Text => {
+            for item in items {
+                println!("{}", item.text);
+            }
+            Ok(())
+        }
+        OutputFormat::Ndjson => {
+            for item in items {
+                emit_fields(format, item.fields)?;
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            let mut values = VArray::new();
+            for item in items {
+                values.push(Value::from(item.fields));
+            }
+            let mut record = json_record();
+            record.insert(list_field, values);
+            emit_record(format, record)
+        }
+    }
 }
 
 fn resolve_commit(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
@@ -839,7 +804,7 @@ fn schema_inspect(
         println!("kind: {}", snapshot.schema.kind);
         println!("commit: {}", snapshot.commit);
         println!("schema tree: {}", snapshot.schema_tree);
-        print_type(kind, &snapshot.schema);
+        println!("{}", type_layout(kind, &snapshot.schema));
         Ok(())
     }
 }
@@ -1348,7 +1313,7 @@ fn raw_git_dir(start: &Path) -> Option<PathBuf> {
 /// The checks themselves — object format and the meta-schema fixed point —
 /// live in [`gix_store::check_repository`]; this only gathers its inputs and
 /// formats its outcome.
-fn doctor(repo: &gix::Repository, store: &RepoStore<'_>) -> Result<()> {
+fn doctor(repo: &gix::Repository, store: &RepoStore<'_>, format: OutputFormat) -> Result<()> {
     let observed = repo.object_hash();
     // A SHA-256 repository is reported as SHA-1 by gix builds without its
     // `sha256` feature. Inspect the raw extension as well so this build does
@@ -1357,13 +1322,17 @@ fn doctor(repo: &gix::Repository, store: &RepoStore<'_>) -> Result<()> {
         .config_snapshot()
         .string("extensions.objectformat")
         .is_some_and(|format| format.as_ref().eq_ignore_ascii_case(b"sha256"));
-    doctor_with(|| gix_store::check_repository(observed, configured_sha256, store.objects()))
+    doctor_with(
+        || gix_store::check_repository(observed, configured_sha256, store.objects()),
+        format,
+    )
 }
 
 /// Format the outcome of one repository check, attaching CLI context to a
 /// fixed-point failure specifically.
 fn doctor_with(
     check: impl FnOnce() -> Result<gix_store::DoctorReport, gix_store::Error>,
+    format: OutputFormat,
 ) -> Result<()> {
     let report = check().map_err(|error| match error {
         gix_store::Error::SchemaPin(_) => anyhow::Error::new(error).context(cli_context(
@@ -1372,11 +1341,15 @@ fn doctor_with(
         )),
         error => anyhow::Error::new(error),
     })?;
-    println!(
-        "git-store doctor: ok (object format: {}; schema fixed point: valid)",
-        report.object_format
-    );
-    Ok(())
+    let mut fields = VObject::new();
+    fields.insert("object_format", report.object_format.to_string());
+    fields.insert("schema_fixed_point", "valid");
+    emit_single(format, fields, || {
+        format!(
+            "git-store doctor: ok (object format: {}; schema fixed point: valid)",
+            report.object_format
+        )
+    })
 }
 
 /// Resolve `spec` to a tree: any revision syntax `rev-parse` accepts
@@ -1419,7 +1392,7 @@ fn gathered_json(handle: &DynKind<'_, '_>, file: &Option<PathBuf>, edit: bool) -
 /// the selected data prefix, printing the commit id — the pre-S1 named-entity
 /// write path. Without that switch, invalid inline JSON is rejected before any
 /// named write can be attempted.
-fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
+fn put(store: &RepoStore<'_>, args: PutArgs, format: OutputFormat) -> Result<()> {
     let PutArgs {
         schema,
         value,
@@ -1434,8 +1407,16 @@ fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
         let name = value
             .as_deref()
             .context("--legacy-name requires an entity name as the positional value")?;
-        put_named(store, schema, name, file, message, edit, interactive)?;
-        return Ok(());
+        return put_named(
+            store,
+            schema,
+            name,
+            file,
+            message,
+            edit,
+            interactive,
+            format,
+        );
     }
 
     if let Some(value) = value {
@@ -1453,8 +1434,7 @@ fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
             )
         })?;
         let handle = store.dynamic(segment("schema", &schema)?);
-        println!("{}", handle.compile(&value)?);
-        return Ok(());
+        return emit_tree(format, handle.compile(&value)?);
     }
 
     let handle = store.dynamic(segment("schema", &schema)?);
@@ -1465,8 +1445,15 @@ fn put(store: &RepoStore<'_>, args: PutArgs) -> Result<()> {
         facet_json::from_str(&json)
             .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))?
     };
-    println!("{}", handle.compile(&value)?);
-    Ok(())
+    emit_tree(format, handle.compile(&value)?)
+}
+
+/// Print a bare document-tree hash: `{tree}` under `json`/`ndjson`, the hash
+/// alone as text.
+fn emit_tree(format: OutputFormat, tree: ObjectId) -> Result<()> {
+    let mut fields = VObject::new();
+    fields.insert("tree", oid_value(tree));
+    emit_single(format, fields, || tree.to_string())
 }
 
 /// The explicit compatibility `put <kind> <name> --legacy-name` form: commit
@@ -1480,6 +1467,7 @@ fn put_named(
     message: Option<String>,
     edit: bool,
     interactive: bool,
+    format: OutputFormat,
 ) -> Result<()> {
     let name_seg = entity(name)?;
     let handle = store.dynamic(segment("kind", &kind)?);
@@ -1494,8 +1482,177 @@ fn put_named(
     if let Some(summary) = message {
         write = write.message(summary);
     }
-    println!("{}", write.at(&name_seg)?);
+    let commit = write.at(&name_seg)?;
+    let mut fields = VObject::new();
+    fields.insert("commit", oid_value(commit));
+    emit_single(format, fields, || commit.to_string())
+}
+
+/// `get <tree-ish>` or the hidden `get <kind> <name>` form: decode a document
+/// to JSON.
+fn get(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    args: Vec<String>,
+    legacy_leaves: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    let value = match <[String; 1]>::try_from(args) {
+        // `get <tree-ish>`: decode any tree of the `{value/, schema/}` shape
+        // directly, whatever it was reached through.
+        Ok([tree_ish]) => {
+            let tree = resolve_tree(repo, &tree_ish)?;
+            // `decode` reads entirely out of `tree`'s own embedded schema
+            // and does not consult any kind or schema ref.
+            if legacy_leaves {
+                store.decode_legacy(tree)
+            } else {
+                store.decode(tree)
+            }
+            .with_context(|| {
+                cli_context(ExitClass::Schema, format!("{tree_ish} is not a document"))
+            })?
+        }
+        // Hidden old form: `get <kind> <name>`.
+        Err(args) => {
+            let [kind, name] =
+                <[String; 2]>::try_from(args).expect("clap enforces 1..=2 positional arguments");
+            let (name, rev) = split_name_rev(&name);
+            let handle = store.dynamic(segment("kind", &kind)?);
+            let name_seg = entity(name)?;
+            let state = match rev {
+                Some(rev) => {
+                    let oid = resolve_at(repo, &handle, &name_seg, rev)?;
+                    // Only read a commit that is actually a version of this
+                    // entity, so a stray oid can't return an unrelated value.
+                    if !handle.history(&name_seg)?.contains(&oid) {
+                        bail!("{rev} is not a version of {kind}/{name}");
+                    }
+                    handle.read(oid)?
+                }
+                None => handle.read(name_seg)?,
+            };
+            match state {
+                EntityState::Present(entry) => entry.value,
+                EntityState::Deleted(_) => bail!("entity {kind}/{name} is deleted"),
+                EntityState::Absent => {
+                    return Err(cli_error(
+                        ExitClass::NotFound,
+                        format!("no entity {kind}/{name}"),
+                    ));
+                }
+            }
+        }
+    };
+    let mut fields = VObject::new();
+    fields.insert("value", value.clone());
+    emit_single(format, fields, || to_json(&value).unwrap_or_default())
+}
+
+/// `check <tree-ish> <schema>`: validate a value tree against a published
+/// schema, without decoding it. Silent on success in text mode, matching
+/// `git`'s own validating subcommands; `json`/`ndjson` emit a confirming
+/// record so a script never has to infer success from silence.
+fn check(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    tree_ish: &str,
+    schema: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    let tree = resolve_tree(repo, tree_ish)?;
+    let doc = store
+        .dynamic(segment("schema", schema)?)
+        .schema()
+        .get()?
+        .with_context(|| {
+            cli_context(
+                ExitClass::NotFound,
+                format!("no schema published for {schema:?}"),
+            )
+        })?;
+    validate_with_schema(&tree, &doc, store.objects()).with_context(|| {
+        cli_context(
+            ExitClass::Schema,
+            format!("{tree_ish} does not conform to {schema:?}"),
+        )
+    })?;
+    if format.machine() {
+        let mut fields = VObject::new();
+        fields.insert("tree", oid_value(tree));
+        fields.insert("schema", schema.to_owned());
+        fields.insert("valid", true);
+        emit_fields(format, fields)?;
+    }
     Ok(())
+}
+
+/// `rm <kind> <name>`: publish a tombstone over a name.
+fn rm(store: &RepoStore<'_>, kind: &str, name: &str, format: OutputFormat) -> Result<()> {
+    let name_seg = entity(name)?;
+    let handle = store.dynamic(segment("kind", kind)?);
+    let result = handle.delete_name(&name_seg)?;
+    emit_deletion(format, kind, name, result)
+}
+
+/// Render a [`DeleteResult`], shared by `rm` and `entity delete`.
+fn emit_deletion(
+    format: OutputFormat,
+    kind: &str,
+    target: &str,
+    result: DeleteResult,
+) -> Result<()> {
+    let (status, commit) = match result {
+        DeleteResult::Deleted(entry) => ("deleted", Some(entry.commit)),
+        DeleteResult::AlreadyDeleted(entry) => ("already_deleted", Some(entry.commit)),
+        DeleteResult::Absent => {
+            return Err(cli_error(
+                ExitClass::NotFound,
+                format!("no entity {kind}/{target}"),
+            ));
+        }
+    };
+    let mut fields = VObject::new();
+    fields.insert("status", status);
+    fields.insert("code", status);
+    fields.insert("kind", kind.to_owned());
+    fields.insert("id", target.to_owned());
+    if let Some(commit) = commit {
+        fields.insert("commit", oid_value(commit));
+    }
+    let text = match status {
+        "deleted" => format!("deleted {kind}/{target}"),
+        _ => format!("already deleted {kind}/{target}"),
+    };
+    emit_single(format, fields, || text)
+}
+
+/// `schema show [<kind>]`: field layout, human-readable, of one kind or every
+/// published kind.
+fn schema_show(store: &RepoStore<'_>, kind: Option<&str>, format: OutputFormat) -> Result<()> {
+    let kinds = match kind {
+        Some(kind) => vec![segment("kind", kind)?],
+        None => store.kinds()?,
+    };
+    let mut items = Vec::new();
+    for seg in kinds {
+        let handle = store.dynamic(seg);
+        let Some(doc) = handle.schema().get()? else {
+            continue;
+        };
+        let schema_json = facet_json::to_string(&doc)
+            .map_err(|e| anyhow::anyhow!("encoding schema JSON: {e}"))?;
+        let schema: Value = facet_json::from_str(&schema_json)
+            .map_err(|e| anyhow::anyhow!("encoding schema JSON: {e}"))?;
+        let mut fields = VObject::new();
+        fields.insert("kind", handle.name().as_str().to_owned());
+        fields.insert("schema", schema);
+        items.push(ListItem {
+            text: type_layout(handle.name().as_str(), &doc),
+            fields,
+        });
+    }
+    emit_list(format, "kinds", items)
 }
 
 /// Split an entity argument into its name and an optional revision.
@@ -1612,11 +1769,70 @@ fn edit_in_editor(seed: &str) -> Result<String> {
     Ok(content)
 }
 
-/// Print one item per line.
-fn print_lines<T: std::fmt::Display>(items: Vec<T>) {
-    for item in items {
-        println!("{item}");
+/// `list`/`ls` with no kind: every kind with a published schema.
+fn list_kinds(store: &RepoStore<'_>, format: OutputFormat) -> Result<()> {
+    let items = store
+        .kinds()?
+        .into_iter()
+        .map(|kind| {
+            let mut fields = VObject::new();
+            fields.insert("kind", kind.as_str().to_owned());
+            ListItem {
+                text: kind.to_string(),
+                fields,
+            }
+        })
+        .collect();
+    emit_list(format, "kinds", items)
+}
+
+/// `list`/`ls <kind>`: the live entity names published under `kind`.
+fn list_entities(store: &RepoStore<'_>, kind: &str, format: OutputFormat) -> Result<()> {
+    let items = store
+        .dynamic(segment("kind", kind)?)
+        .list()?
+        .into_iter()
+        .map(|name| {
+            let mut fields = VObject::new();
+            fields.insert("name", name.to_string());
+            ListItem {
+                text: name.to_string(),
+                fields,
+            }
+        })
+        .collect();
+    emit_list(format, "entities", items)
+}
+
+/// `log <kind> <name>`: `name`'s publication history, newest first.
+fn log(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    kind: &str,
+    name: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    let name_seg = entity(name)?;
+    let commits = store.dynamic(segment("kind", kind)?).history(&name_seg)?;
+    log_commits(repo, commits, format)
+}
+
+/// Render a first-parent commit walk as a list of `<oid> <iso-date>` rows,
+/// shared by [`log`] and `schema log`.
+fn log_commits(repo: &gix::Repository, commits: Vec<ObjectId>, format: OutputFormat) -> Result<()> {
+    let mut items = Vec::with_capacity(commits.len());
+    for id in commits {
+        let commit = repo.find_commit(id)?;
+        let when = commit.time()?.format(gix::date::time::format::ISO8601)?;
+        let mut fields = VObject::new();
+        fields.insert("commit", oid_value(id));
+        fields.insert("date", when.clone());
+        items.push(ListItem {
+            text: format!("{id} {when}"),
+            fields,
+        });
     }
+    emit_list(format, "commits", items)
 }
 
 /// A pretty-printed JSON skeleton for a kind's schema, or `{}` if it cannot be
@@ -1688,28 +1904,20 @@ fn to_json<T: facet::Facet<'static>>(value: &T) -> Result<String> {
     facet_json::to_string_pretty(value).map_err(|e| anyhow::anyhow!("encoding JSON: {e}"))
 }
 
-/// Print `<oid> <iso-date>` per commit, newest first.
-fn print_log(repo: &gix::Repository, commits: Vec<ObjectId>) -> Result<()> {
-    for id in commits {
-        let commit = repo.find_commit(id)?;
-        let when = commit.time()?.format(gix::date::time::format::ISO8601)?;
-        println!("{id} {when}");
-    }
-    Ok(())
-}
-
-/// Print a kind's top-level field layout, resolving the root through `defs`.
-fn print_type(kind: &str, doc: &Schema) {
-    println!("{kind}");
+/// A kind's top-level field layout, resolving the root through `defs`, as
+/// `print_type` used to print directly.
+fn type_layout(kind: &str, doc: &Schema) -> String {
+    let mut out = format!("{kind}");
     match resolve(&doc.root, doc) {
         Node::Struct(fields) => {
             for (name, field) in fields {
                 let default = if field.has_default { " = default" } else { "" };
-                println!("  {name}: {}{default}", label(&field.node));
+                out.push_str(&format!("\n  {name}: {}{default}", label(&field.node)));
             }
         }
-        other => println!("  {}", label(other)),
+        other => out.push_str(&format!("\n  {}", label(other))),
     }
+    out
 }
 
 /// Whether a schema node is a scalar — the same classification that decides
@@ -1790,7 +1998,7 @@ mod tests {
         let injected = gix_store::Error::SchemaPin(facet_git_tree::SchemaPinError::Unpinned(
             gix::ObjectId::null(gix::hash::Kind::Sha1),
         ));
-        let error = doctor_with(|| Err(injected))
+        let error = doctor_with(|| Err(injected), OutputFormat::Text)
             .expect_err("the injected fixed-point failure must reach the caller");
         let message = format!("{error:#}");
         assert!(message.contains("schema fixed-point validation failed"));
@@ -1799,13 +2007,16 @@ mod tests {
 
     #[test]
     fn doctor_rejects_a_configured_sha256_repository() {
-        let error = doctor_with(|| {
-            gix_store::check_repository(
-                gix::hash::Kind::Sha1,
-                true,
-                &facet_git_tree::ObjectStore::default(),
-            )
-        })
+        let error = doctor_with(
+            || {
+                gix_store::check_repository(
+                    gix::hash::Kind::Sha1,
+                    true,
+                    &facet_git_tree::ObjectStore::default(),
+                )
+            },
+            OutputFormat::Text,
+        )
         .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("unsupported Git object format"));

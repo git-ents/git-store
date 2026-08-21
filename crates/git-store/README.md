@@ -219,12 +219,19 @@ the normalized schema JSON without changing ordinary schema reads.
 `ref list` emits full ref names and their OIDs; `ref resolve` accepts a full ref
 name and emits its OID. `object inspect` resolves an object or revision and
 reports its kind, full OID, and byte size. `object tree` lists direct entries
-with mode, OID, kind, and name. Text output is intended for people. Additive
-plumbing commands also accept `--format text|json|ndjson` or `--json` (an alias
-for compact JSON). JSON output uses records with stable OIDs and full refs;
-`ndjson` emits one JSON record per item for list-like commands and one record for
-single-result commands. Successful machine output is on stdout. Diagnostics are
-on stderr and a failed command does not emit a success record.
+with mode, OID, kind, and name. Text output is intended for people.
+
+**Every command honors every format.** `--format text|json|ndjson` (default
+`text`) and `--json` (a hidden alias for `--format json`) are global options,
+resolved once, and every command — porcelain and plumbing alike — renders its
+result through them; none falls back to text silently. JSON output uses
+records with stable OIDs and full refs; `ndjson` emits one JSON record per
+item for list-like commands (`ls`, `log`, `ref list`, `object tree`, `schema
+show`) and one record for single-result commands. Text and JSON are
+information-equivalent: both are rendered from the same result value, just
+through a different renderer, so neither can drift arbitrarily far from the
+other. Successful machine output is on stdout. Diagnostics are on stderr and
+a failed command does not emit a success record.
 
 The current exit categories are: `1` other operational errors; `2` invalid
 arguments or object shape; `3` missing refs, objects, schemas, or entities;

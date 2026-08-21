@@ -1274,7 +1274,12 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
         path,
         None,
         &[
-            "entity", "delete", "recipe", "carbonara", "--format", "ndjson",
+            "entity",
+            "delete",
+            "recipe",
+            "carbonara",
+            "--format",
+            "ndjson",
         ],
     );
     assert!(ok, "entity delete failed: {err}");
@@ -1308,4 +1313,66 @@ fn check_validates_a_value_tree_against_a_schema() {
 
     let (_, err, ok) = run(path, None, &["check", hash, "recipe"]);
     assert!(!ok, "check should refuse a non-value tree: {err}");
+}
+
+/// Parse `json` as a generic value, panicking with the offending text on
+/// failure — the assertion `--format json` must satisfy for every command.
+fn assert_parses_as_json(json: &str) {
+    facet_json::from_str::<facet_value::Value>(json)
+        .unwrap_or_else(|e| panic!("not valid JSON ({e}): {json:?}"));
+}
+
+/// Every porcelain command honors `--format`/`--json`, not just the
+/// plumbing group: `ls`, `log`, and `schema show` all emit parseable JSON
+/// under `--format json`, and `--json` is a working alias for it.
+#[test]
+fn porcelain_commands_honor_the_output_format() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe", "--json"]);
+    assert!(ok, "schema put failed: {err}");
+
+    let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
+    let (_, err, ok) = run(
+        path,
+        Some(recipe),
+        &["put", "recipe", "carbonara", "--legacy-name"],
+    );
+    assert!(ok, "put failed: {err}");
+
+    let (out, err, ok) = run(path, None, &["ls", "--json"]);
+    assert!(ok, "ls --json failed: {err}");
+    assert_parses_as_json(out.trim());
+    assert!(out.contains("recipe"), "ls --json output: {out}");
+
+    let (out, err, ok) = run(path, None, &["ls", "recipe", "--format", "json"]);
+    assert!(ok, "ls recipe --format json failed: {err}");
+    assert_parses_as_json(out.trim());
+    assert!(out.contains("carbonara"), "ls recipe --format json: {out}");
+
+    let (out, err, ok) = run(path, None, &["log", "recipe", "carbonara", "--json"]);
+    assert!(ok, "log --json failed: {err}");
+    assert_parses_as_json(out.trim());
+
+    let (out, err, ok) = run(path, None, &["schema", "show", "recipe", "--json"]);
+    assert!(ok, "schema show --json failed: {err}");
+    assert_parses_as_json(out.trim());
+    assert_eq!(json_string_field(&out, "kind"), "recipe");
+
+    let (out, err, ok) = run(path, None, &["get", "recipe", "carbonara", "--json"]);
+    assert!(ok, "get --json failed: {err}");
+    assert_parses_as_json(out.trim());
+
+    let (out, err, ok) = run(path, None, &["doctor", "--json"]);
+    assert!(ok, "doctor --json failed: {err}");
+    assert_parses_as_json(out.trim());
+    assert_eq!(json_string_field(&out, "status"), "ok");
+
+    let (out, err, ok) = run(path, None, &["rm", "recipe", "carbonara", "--json"]);
+    assert!(ok, "rm --json failed: {err}");
+    assert_parses_as_json(out.trim());
+    assert_eq!(json_string_field(&out, "status"), "deleted");
 }
