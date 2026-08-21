@@ -30,9 +30,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use facet_git_tree::{Node, Schema, SchemaSchema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use gix_store::{
-    ApplyError, DeleteResult, DocumentInspection, Dynamic, EntityState, Expectation,
-    GixRefStore, Kind, Layout, ObjectId, PublishOptions, RefName, RefPath, RefPrefix, RefSegment,
-    RefStore, RepoStore,
+    ApplyError, DeleteResult, DocumentInspection, Dynamic, EntityState, Expectation, GixRefStore,
+    Kind, Layout, ObjectId, PublishOptions, RefName, RefPath, RefPrefix, RefSegment, RefStore,
+    RepoStore,
 };
 
 /// A handle on one kind, over the CLI's own repo-backed store.
@@ -458,9 +458,9 @@ fn run() -> Result<()> {
                         if !handle.history(&name_seg)?.contains(&oid) {
                             bail!("{rev} is not a version of {kind}/{name}");
                         }
-                        handle.read_at(oid)?
+                        handle.read(oid)?
                     }
-                    None => handle.read(&name_seg)?,
+                    None => handle.read(name_seg)?,
                 };
                 let value = match state {
                     EntityState::Present(entry) => entry.value,

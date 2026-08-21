@@ -221,7 +221,10 @@ mod tests {
     #[test]
     fn present_is_none_off_the_present_branch() {
         assert_eq!(EntityState::<u32>::Absent.present(), None);
-        assert_eq!(EntityState::<u32>::Deleted(tombstone_entry()).present(), None);
+        assert_eq!(
+            EntityState::<u32>::Deleted(tombstone_entry()).present(),
+            None
+        );
     }
 
     #[test]

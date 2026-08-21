@@ -17,7 +17,7 @@ use facet_value::value;
 use gix::bstr::ByteSlice;
 use gix_refstore::RefEdit;
 use gix_store::{
-    ApplyError, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
+    ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
     EntityState, Entry, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix, RefSegment,
     RefStore, Store, Subtree, TargetSchema, entity_id_name, entity_name, entity_name_under,
 };
@@ -485,6 +485,90 @@ fn explicit_target_migration_uses_captured_schema_history() {
 }
 
 #[test]
+fn read_and_read_as_cover_every_address_including_entity_id() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let id = kind.put_entity(&value!({ "n": 1 })).unwrap();
+    let commit = match kind.read(id).unwrap() {
+        EntityState::Present(entry) => entry.commit,
+        other => panic!("expected the freshly published entity to be present, got {other:?}"),
+    };
+    let document_tree = match store.objects().get(&commit).unwrap() {
+        GitObject::Commit(commit) => commit.tree,
+        other => panic!("expected a commit, got {other:?}"),
+    };
+    let name = entity("alias");
+    kind.put_with_alias(&name, &value!({ "n": 1 })).unwrap();
+
+    let value = value!({ "n": 1 });
+    // Every address axis reaches the same document: a caller-chosen alias,
+    // the content-derived entity id, the publication commit, and the bare
+    // document tree addressed without any ref.
+    assert_eq!(
+        kind.read(At::Name(name.clone())).unwrap().value(),
+        Some(value.clone())
+    );
+    assert_eq!(
+        kind.read(At::Entity(id)).unwrap().value(),
+        Some(value.clone())
+    );
+    assert_eq!(
+        kind.read(At::Commit(commit)).unwrap().value(),
+        Some(value.clone())
+    );
+    assert_eq!(
+        kind.read(At::Tree(document_tree)).unwrap().value(),
+        Some(value.clone())
+    );
+
+    let mut evolved = schema_of::<Counter>().unwrap();
+    let Node::Struct(fields) = evolved.defs.get_mut("Counter").unwrap() else {
+        panic!("Counter schema should have a struct definition");
+    };
+    fields.insert(
+        "label".into(),
+        StructField {
+            node: Node::String,
+            has_default: true,
+        },
+    );
+    let hints = Hints::new().defaulted(
+        Target::Def("Counter".into()),
+        "label",
+        Constant::Text("migrated".into()),
+    );
+    kind.schema().write(&evolved, &hints).unwrap();
+    let target = TargetSchema::new(
+        kind.schema().get().unwrap().unwrap(),
+        kind.schema().history().unwrap(),
+    );
+    let migrated = value!({ "n": 1, "label": "migrated" });
+
+    // The migration axis is available for every address `read` accepts,
+    // including `At::Entity` — previously there was no migration-aware read
+    // addressed by `EntityId` at all.
+    assert_eq!(
+        kind.read_as(At::Name(name), &target).unwrap().value(),
+        Some(migrated.clone())
+    );
+    assert_eq!(
+        kind.read_as(At::Entity(id), &target).unwrap().value(),
+        Some(migrated.clone())
+    );
+    assert_eq!(
+        kind.read_as(At::Commit(commit), &target).unwrap().value(),
+        Some(migrated.clone())
+    );
+    assert_eq!(
+        kind.read_as(At::Tree(document_tree), &target)
+            .unwrap()
+            .value(),
+        Some(migrated)
+    );
+}
+
+#[test]
 fn tombstone_migrated_read_bypasses_an_unavailable_target() {
     let store = store();
     let kind = store.dynamic(seg("counter"));
@@ -871,7 +955,7 @@ fn delete_name_tombstones_the_name_and_retains_its_history() {
         other => panic!("expected deletion, got {other:?}"),
     };
     assert!(matches!(
-        kind.read(&name).unwrap(),
+        kind.read(name.clone()).unwrap(),
         EntityState::Deleted(entry) if entry.commit == tombstone_commit
     ));
     assert!(kind.list().unwrap().is_empty());
@@ -896,7 +980,10 @@ fn remove_prunes_a_name_without_a_tombstone() {
     assert!(kind.remove(&name).unwrap());
     assert!(kind.list().unwrap().is_empty());
     assert!(kind.list_entries().unwrap().is_empty());
-    assert!(matches!(kind.read(&name).unwrap(), EntityState::Absent));
+    assert!(matches!(
+        kind.read(name.clone()).unwrap(),
+        EntityState::Absent
+    ));
     assert!(!kind.remove(&name).unwrap());
     assert!(matches!(
         kind.delete_name(&name).unwrap(),
@@ -919,7 +1006,7 @@ fn deleting_one_name_leaves_other_names_for_the_same_content_alone() {
         other => panic!("expected deletion, got {other:?}"),
     };
     assert!(matches!(
-        kind.read(&first).unwrap(),
+        kind.read(first.clone()).unwrap(),
         EntityState::Deleted(entry) if entry.commit == tombstone_commit
     ));
     // Names are independent: what one name means is not what another means,
@@ -954,11 +1041,11 @@ fn delete_name_tombstones_a_rewound_name_from_its_current_target() {
         other => panic!("expected deletion, got {other:?}"),
     };
     assert!(matches!(
-        kind.read(&name).unwrap(),
+        kind.read(name.clone()).unwrap(),
         EntityState::Deleted(entry) if entry.commit == tombstone_commit
     ));
     // The tombstone records the identity that the name actually pointed at.
-    match kind.read(&name).unwrap() {
+    match kind.read(name.clone()).unwrap() {
         EntityState::Deleted(entry) => assert_eq!(
             entry.tombstone.entity_id(),
             Some(kind.compile_entity(&value!({ "n": 1 })).unwrap())
@@ -1029,7 +1116,7 @@ fn ordinary_reads_reject_cross_kind_tombstones() {
         .unwrap();
 
     assert!(matches!(
-        counter.read(&entity("foreign-tombstone")),
+        counter.read(entity("foreign-tombstone")),
         Err(Error::KindMismatch { .. })
     ));
 }
@@ -1137,7 +1224,7 @@ fn republishing_over_a_tombstone_restores_the_name_and_materialized_views() {
     assert!(kind.entries().unwrap().is_empty());
 
     assert_eq!(kind.put_with_alias(&name, &value).unwrap(), id);
-    let restored_commit = match kind.read(&name).unwrap() {
+    let restored_commit = match kind.read(name.clone()).unwrap() {
         EntityState::Present(entry) => {
             assert_eq!(entry.value, value);
             entry.commit
@@ -1164,7 +1251,10 @@ fn hard_deleted_canonical_refs_remain_absent_not_deleted() {
     let id = kind.put_entity(&value!({ "n": 1 })).unwrap();
     assert!(kind.remove(&entity_id_name(id)).unwrap());
     assert!(matches!(kind.read_entity(id).unwrap(), EntityState::Absent));
-    assert!(matches!(kind.delete_entity(id).unwrap(), DeleteResult::Absent));
+    assert!(matches!(
+        kind.delete_entity(id).unwrap(),
+        DeleteResult::Absent
+    ));
 }
 
 // --- typed API ---

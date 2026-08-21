@@ -10,6 +10,7 @@
 //! [`facet_value::Value`].
 #![forbid(unsafe_code)]
 
+mod address;
 mod document;
 mod encoding;
 mod error;
@@ -21,6 +22,7 @@ mod migrate;
 mod store;
 mod tombstone;
 
+pub use address::At;
 pub use document::{
     DocumentBuilder, DocumentError, DocumentInspection, DocumentKind, DocumentShapeError,
     PreparedDocument, SchemaSnapshot,

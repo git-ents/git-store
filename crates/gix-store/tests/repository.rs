@@ -281,7 +281,7 @@ fn concurrent_rewrite_and_delete_leave_a_name_in_an_explicit_state() {
 
     // Either order is a valid outcome, but the name must be either live or
     // explicitly deleted -- never absent, and never disagreeing with the index.
-    match kind.read(&name).unwrap() {
+    match kind.read(name.clone()).unwrap() {
         EntityState::Present(entry) => {
             assert_eq!(kind.list().unwrap(), vec![name.clone()]);
             assert_eq!(
