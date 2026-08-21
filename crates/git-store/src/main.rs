@@ -2,7 +2,8 @@
 //! in Git as a real tree. JSON lives only here, at the CLI boundary; the
 //! [`Store`] underneath is oid-in/oid-out.
 //!
-//! Bare `git store` lists kinds. Writing is `git store put <schema> <value>`,
+//! Bare `git store` prints help, like any clap app; `git store list` (alias
+//! `ls`) lists kinds. Writing is `git store put <schema> <value>`,
 //! which compiles `<value>` under `<schema>` into the `{value/, schema/}`
 //! tree and prints its hash — the document's identity — without advancing
 //! any ref; reading is `git store get <tree-ish>`, which decodes any tree of
@@ -41,7 +42,8 @@ pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, GixRefStore<'r>, &'r gix::Od
 #[command(
     name = "git-store",
     about = "Store anything in Git as a real tree",
-    version
+    version,
+    arg_required_else_help = true
 )]
 struct Cli {
     /// Output format for additive plumbing commands.
@@ -67,7 +69,7 @@ struct Cli {
     )]
     schema_prefix: String,
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -419,13 +421,11 @@ fn run() -> Result<()> {
     let store = RepoStore::open_with_layout(&repo, layout);
 
     match cli.command {
-        // Bare `git store` lists kinds — a read-only default, like `git remote`.
-        None => print_lines(store.kinds()?),
-        Some(Command::Put(args)) => put(&store, args)?,
-        Some(Command::Get {
+        Command::Put(args) => put(&store, args)?,
+        Command::Get {
             args,
             legacy_leaves,
-        }) => match <[String; 1]>::try_from(args) {
+        } => match <[String; 1]>::try_from(args) {
             // `get <tree-ish>`: decode any tree of the `{value/, schema/}`
             // shape directly, whatever it was reached through.
             Ok([tree_ish]) => {
@@ -475,7 +475,7 @@ fn run() -> Result<()> {
                 println!("{}", to_json(&value)?);
             }
         },
-        Some(Command::Check { tree_ish, schema }) => {
+        Command::Check { tree_ish, schema } => {
             let tree = resolve_tree(&repo, &tree_ish)?;
             let doc = store
                 .dynamic(segment("schema", &schema)?)
@@ -494,19 +494,19 @@ fn run() -> Result<()> {
                 )
             })?;
         }
-        Some(Command::Doctor) => doctor(&repo, &store)?,
-        Some(Command::List { kind: Some(kind) }) => {
+        Command::Doctor => doctor(&repo, &store)?,
+        Command::List { kind: Some(kind) } => {
             print_lines(store.dynamic(segment("kind", &kind)?).list()?)
         }
-        Some(Command::List { kind: None }) => print_lines(store.kinds()?),
-        Some(Command::Log { kind, name }) => {
+        Command::List { kind: None } => print_lines(store.kinds()?),
+        Command::Log { kind, name } => {
             let name_seg = entity(&name)?;
             print_log(
                 &repo,
                 store.dynamic(segment("kind", &kind)?).history(&name_seg)?,
             )?
         }
-        Some(Command::Rm { kind, name }) => {
+        Command::Rm { kind, name } => {
             let name_seg = entity(&name)?;
             let handle = store.dynamic(segment("kind", &kind)?);
             match handle.delete_name(&name_seg)? {
@@ -520,7 +520,7 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Some(Command::Schema { command }) => match command {
+        Command::Schema { command } => match command {
             SchemaCommand::Put {
                 kind,
                 file,
@@ -588,17 +588,17 @@ fn run() -> Result<()> {
                 store.dynamic(segment("kind", &kind)?).schema().history()?,
             )?,
         },
-        Some(Command::Ref { command }) => match command {
+        Command::Ref { command } => match command {
             RefCommand::List { prefix, kind } => {
                 ref_list(&store, prefix.as_deref(), kind.as_deref(), output)?
             }
             RefCommand::Resolve { reference } => ref_resolve(&store, &reference, output)?,
         },
-        Some(Command::Object { command }) => match command {
+        Command::Object { command } => match command {
             ObjectCommand::Inspect { object_ish } => object_inspect(&repo, &object_ish, output)?,
             ObjectCommand::Tree { tree_ish } => object_tree(&repo, &tree_ish, output)?,
         },
-        Some(Command::Value { command }) => match command {
+        Command::Value { command } => match command {
             ValueCommand::Decode {
                 value_tree,
                 schema,
@@ -608,7 +608,7 @@ fn run() -> Result<()> {
                 value_encode(&repo, &store, &schema, file.as_ref(), output)?
             }
         },
-        Some(Command::Document { command }) => match command {
+        Command::Document { command } => match command {
             DocumentCommand::Inspect { document_tree_ish } => {
                 document_inspect(&repo, &store, &document_tree_ish, output)?
             }
@@ -637,7 +637,7 @@ fn run() -> Result<()> {
                 output,
             )?,
         },
-        Some(Command::Entity { command }) => match command {
+        Command::Entity { command } => match command {
             EntityCommand::Delete { kind, entity_id } => {
                 entity_delete(&store, &kind, &entity_id, output)?
             }

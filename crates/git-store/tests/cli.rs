@@ -190,8 +190,12 @@ fn store_get_list_and_remove() {
     assert!(ok, "get carbonara@~1 failed: {err}");
     assert!(out.contains("\"serves\": 4"), "prior version via @: {out}");
 
-    // Bare `git store` lists kinds; `ls` is an alias for `list`.
-    let (out, _, ok) = run(path, None, &[]);
+    // Bare `git store` prints help, like any clap app, rather than listing
+    // kinds; `list` (alias `ls`) is the explicit way to do that.
+    let (out, err, _) = run(path, None, &[]);
+    assert!(out.contains("Usage: git-store") || err.contains("Usage: git-store"));
+
+    let (out, _, ok) = run(path, None, &["list"]);
     assert!(ok);
     assert_eq!(out.trim(), "recipe");
 
