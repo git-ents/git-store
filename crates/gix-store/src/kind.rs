@@ -672,7 +672,7 @@ where
         R: Committer,
         O: Write,
     {
-        let tree = prepared.document_tree();
+        let tree = prepared.document_tree().object_id();
         let (id, commit) = self
             .publish_document_checked(
                 options.alias.as_ref(),

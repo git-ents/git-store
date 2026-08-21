@@ -18,8 +18,9 @@ use gix::bstr::ByteSlice;
 use gix_refstore::RefEdit;
 use gix_store::{
     ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
-    EntityState, Entry, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix, RefSegment,
-    RefStore, Store, Subtree, TargetSchema, entity_id_name, entity_name, entity_name_under,
+    DocumentTree, EntityState, Entry, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix,
+    RefSegment, RefStore, SchemaTree, Store, Subtree, TargetSchema, entity_id_name, entity_name,
+    entity_name_under,
 };
 
 fn seg(s: &str) -> RefSegment {
@@ -167,13 +168,17 @@ fn explicit_schema_value_codecs_round_trip_without_a_kind_handle() {
     let schema_tree = doc.write_pinned(store.objects()).unwrap();
     let expected = value!({ "n": 7 });
 
-    let value_tree = store.encode_value(&expected, schema_tree).unwrap();
+    let value_tree = store
+        .encode_value(&expected, SchemaTree::from(schema_tree))
+        .unwrap();
     assert_eq!(
-        store.decode_value(value_tree, schema_tree).unwrap(),
+        store
+            .decode_value(value_tree, SchemaTree::from(schema_tree))
+            .unwrap(),
         expected
     );
     assert!(matches!(
-        store.encode_value(&value!({ "n": "wrong" }), schema_tree),
+        store.encode_value(&value!({ "n": "wrong" }), SchemaTree::from(schema_tree)),
         Err(Error::SchemaWrite(_))
     ));
 }
@@ -187,9 +192,11 @@ fn binding_and_inspection_describe_a_prepared_document() {
         .unwrap();
     let schema_tree = doc.write_pinned(store.objects()).unwrap();
     let value_tree = store
-        .encode_value(&value!({ "n": 7 }), schema_tree)
+        .encode_value(&value!({ "n": 7 }), SchemaTree::from(schema_tree))
         .unwrap();
-    let prepared = store.bind_document(value_tree, schema_tree).unwrap();
+    let prepared = store
+        .bind_document(value_tree, SchemaTree::from(schema_tree))
+        .unwrap();
     assert!(store.kinds().unwrap().is_empty());
 
     assert_eq!(
@@ -197,7 +204,10 @@ fn binding_and_inspection_describe_a_prepared_document() {
         DocumentInspection::Bound(prepared)
     );
     assert_eq!(
-        store.inspect_document(value_tree).unwrap().kind(),
+        store
+            .inspect_document(DocumentTree::from(value_tree.object_id()))
+            .unwrap()
+            .kind(),
         DocumentKind::LegacyValueRoot
     );
 }
@@ -208,10 +218,12 @@ fn inspection_reports_malformed_envelopes_without_guessing() {
     let value_tree = store
         .encode_value(
             &value!({ "n": 7 }),
-            schema_of::<Counter>()
-                .unwrap()
-                .write_pinned(store.objects())
-                .unwrap(),
+            SchemaTree::from(
+                schema_of::<Counter>()
+                    .unwrap()
+                    .write_pinned(store.objects())
+                    .unwrap(),
+            ),
         )
         .unwrap();
     let malformed = gix::objs::Write::write(
@@ -220,14 +232,15 @@ fn inspection_reports_malformed_envelopes_without_guessing() {
             entries: vec![TreeEntry {
                 mode: gix::objs::tree::EntryKind::Tree.into(),
                 filename: "value".into(),
-                oid: value_tree,
+                oid: value_tree.object_id(),
             }],
         },
     )
     .unwrap();
 
-    let DocumentInspection::Malformed { found, reason, .. } =
-        store.inspect_document(malformed).unwrap()
+    let DocumentInspection::Malformed { found, reason, .. } = store
+        .inspect_document(DocumentTree::from(malformed))
+        .unwrap()
     else {
         panic!("expected malformed document metadata");
     };

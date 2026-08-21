@@ -15,7 +15,7 @@ use gix_refstore::{
 use crate::document::{DocumentInspection, DocumentShapeError, PreparedDocument};
 use crate::encoding::{Dynamic, Encoding, Typed};
 use crate::error::{Error, Subtree};
-use crate::identity::EntityId;
+use crate::identity::{DocumentTree, EntityId, SchemaTree, ValueTree};
 use crate::kind::Kind;
 
 /// Options controlling publication of a prepared document.
@@ -249,11 +249,24 @@ where
     /// is decoded.
     pub fn decode_value(
         &self,
+        value_tree: ValueTree,
+        schema_tree: SchemaTree,
+    ) -> Result<Value, Error> {
+        let doc = self.schema(schema_tree.object_id())?;
+        Dynamic::read(&value_tree.object_id(), &doc, self.objects())
+    }
+
+    /// [`decode_value`](Self::decode_value) taking bare object ids.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `Store::decode_value(ValueTree, SchemaTree)` instead"
+    )]
+    pub fn decode_value_untyped(
+        &self,
         value_tree: ObjectId,
         schema_tree: ObjectId,
     ) -> Result<Value, Error> {
-        let doc = self.schema(schema_tree)?;
-        Dynamic::read(&value_tree, &doc, self.objects())
+        self.decode_value(ValueTree::from(value_tree), SchemaTree::from(schema_tree))
     }
 
     /// Decode a historical unbound value tree to JSON-compatible [`Value`].
@@ -289,12 +302,34 @@ where
     ///
     /// Encoding is validation: a value that does not conform to the schema is
     /// rejected before any document envelope or publication is written.
-    pub fn encode_value(&self, value: &Value, schema_tree: ObjectId) -> Result<ObjectId, Error>
+    pub fn encode_value(&self, value: &Value, schema_tree: SchemaTree) -> Result<ValueTree, Error>
     where
         O: Write,
     {
-        let doc = self.schema(schema_tree)?;
-        Dynamic::write(value, &doc, self.objects())
+        let doc = self.schema(schema_tree.object_id())?;
+        Ok(ValueTree::from(Dynamic::write(
+            value,
+            &doc,
+            self.objects(),
+        )?))
+    }
+
+    /// [`encode_value`](Self::encode_value) taking and returning bare object ids.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `Store::encode_value(value, SchemaTree)` instead"
+    )]
+    pub fn encode_value_untyped(
+        &self,
+        value: &Value,
+        schema_tree: ObjectId,
+    ) -> Result<ObjectId, Error>
+    where
+        O: Write,
+    {
+        Ok(self
+            .encode_value(value, SchemaTree::from(schema_tree))?
+            .object_id())
     }
 
     /// Bind already-written value and schema subtrees into a prepared document.
@@ -304,27 +339,45 @@ where
     /// first when the value still needs schema-directed validation.
     pub fn bind_document(
         &self,
+        value_tree: ValueTree,
+        schema_tree: SchemaTree,
+    ) -> Result<PreparedDocument, Error>
+    where
+        O: Write,
+    {
+        let value_oid = value_tree.object_id();
+        let schema_oid = schema_tree.object_id();
+        match self.kind_of(value_oid)? {
+            Some(_) => {}
+            None => return Err(Error::MissingObject { oid: value_oid }),
+        }
+        match self.kind_of(schema_oid)? {
+            Some(gix::objs::Kind::Tree) => {}
+            Some(_) => return Err(Error::NotATree { oid: schema_oid }),
+            None => return Err(Error::MissingObject { oid: schema_oid }),
+        }
+        let document_tree = self.bind_schema(value_oid, schema_oid)?;
+        Ok(PreparedDocument {
+            document_tree: DocumentTree::from(document_tree),
+            value_tree,
+            schema_tree,
+        })
+    }
+
+    /// [`bind_document`](Self::bind_document) taking bare object ids.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `Store::bind_document(ValueTree, SchemaTree)` instead"
+    )]
+    pub fn bind_document_untyped(
+        &self,
         value_tree: ObjectId,
         schema_tree: ObjectId,
     ) -> Result<PreparedDocument, Error>
     where
         O: Write,
     {
-        match self.kind_of(value_tree)? {
-            Some(_) => {}
-            None => return Err(Error::MissingObject { oid: value_tree }),
-        }
-        match self.kind_of(schema_tree)? {
-            Some(gix::objs::Kind::Tree) => {}
-            Some(_) => return Err(Error::NotATree { oid: schema_tree }),
-            None => return Err(Error::MissingObject { oid: schema_tree }),
-        }
-        let document_tree = self.bind_schema(value_tree, schema_tree)?;
-        Ok(PreparedDocument {
-            document_tree,
-            value_tree,
-            schema_tree,
-        })
+        self.bind_document(ValueTree::from(value_tree), SchemaTree::from(schema_tree))
     }
 
     /// Inspect a document boundary without consulting a kind or schema ref.
@@ -333,7 +386,11 @@ where
     /// Trees without either envelope entry are reported as legacy unbound value
     /// roots; envelope-like but invalid trees are reported as structured
     /// [`DocumentInspection::Malformed`] metadata instead of being guessed.
-    pub fn inspect_document(&self, document_tree: ObjectId) -> Result<DocumentInspection, Error> {
+    pub fn inspect_document(
+        &self,
+        document_tree: DocumentTree,
+    ) -> Result<DocumentInspection, Error> {
+        let document_tree = document_tree.object_id();
         let mut entries = self.with_tree(document_tree, |tree| {
             Ok(tree
                 .entries
@@ -376,9 +433,9 @@ where
             match self.kind_of(schema.1)? {
                 Some(gix::objs::Kind::Tree) => {
                     return Ok(DocumentInspection::Bound(PreparedDocument {
-                        document_tree,
-                        value_tree: value.1,
-                        schema_tree: schema.1,
+                        document_tree: DocumentTree::from(document_tree),
+                        value_tree: ValueTree::from(value.1),
+                        schema_tree: SchemaTree::from(schema.1),
                     }));
                 }
                 Some(_) => {
@@ -409,6 +466,18 @@ where
             found: found.clone(),
             reason: DocumentShapeError::UnexpectedEntries { found },
         })
+    }
+
+    /// [`inspect_document`](Self::inspect_document) taking a bare object id.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `Store::inspect_document(DocumentTree)` instead"
+    )]
+    pub fn inspect_document_untyped(
+        &self,
+        document_tree: ObjectId,
+    ) -> Result<DocumentInspection, Error> {
+        self.inspect_document(DocumentTree::from(document_tree))
     }
 
     pub(crate) fn decode_with<E: Encoding>(&self, tree: ObjectId) -> Result<E::Value, Error> {

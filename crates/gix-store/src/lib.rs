@@ -29,7 +29,9 @@ pub use document::{
 };
 pub use encoding::{Dynamic, Encoding, Typed};
 pub use error::{Error, Subtree};
-pub use identity::{EntityId, canonical_document_id, canonical_object_id};
+pub use identity::{
+    DocumentTree, EntityId, SchemaTree, ValueTree, canonical_document_id, canonical_object_id,
+};
 pub use kind::{
     Entry, Kind, KindSchema, NamedEntries, Put, entity_id_name, entity_name, entity_name_under,
 };
@@ -64,7 +66,7 @@ where
         let schema = Schema::read_pinned(&schema_tree, self.store.objects())?;
         Ok(SchemaSnapshot {
             commit,
-            schema_tree,
+            schema_tree: SchemaTree::from(schema_tree),
             schema,
         })
     }
@@ -78,7 +80,7 @@ where
         let schema = Schema::read_pinned_legacy(&schema_tree, self.store.objects())?;
         Ok(SchemaSnapshot {
             commit,
-            schema_tree,
+            schema_tree: SchemaTree::from(schema_tree),
             schema,
         })
     }

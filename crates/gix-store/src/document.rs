@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use facet_git_tree::{Node, ObjectId, Schema, StructField};
 use facet_value::{VObject, Value};
 
+use crate::identity::{DocumentTree, SchemaTree, ValueTree};
+
 /// A self-contained document tree with its two constituent subtrees.
 ///
 /// The `document_tree` is the root containing exactly `schema/` and `value/`;
@@ -15,26 +17,26 @@ use facet_value::{VObject, Value};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreparedDocument {
     /// The root tree containing the `schema/` and `value/` entries.
-    pub document_tree: ObjectId,
+    pub document_tree: DocumentTree,
     /// The encoded value subtree.
-    pub value_tree: ObjectId,
+    pub value_tree: ValueTree,
     /// The pinned schema subtree used for the value.
-    pub schema_tree: ObjectId,
+    pub schema_tree: SchemaTree,
 }
 
 impl PreparedDocument {
     /// Return the complete bound document tree.
-    pub const fn document_tree(&self) -> ObjectId {
+    pub const fn document_tree(&self) -> DocumentTree {
         self.document_tree
     }
 
     /// Return the encoded value subtree.
-    pub const fn value_tree(&self) -> ObjectId {
+    pub const fn value_tree(&self) -> ValueTree {
         self.value_tree
     }
 
     /// Return the schema subtree used for the value.
-    pub const fn schema_tree(&self) -> ObjectId {
+    pub const fn schema_tree(&self) -> SchemaTree {
         self.schema_tree
     }
 }
@@ -120,7 +122,7 @@ pub struct SchemaSnapshot {
     /// The schema publication commit.
     pub commit: ObjectId,
     /// The schema document tree stored by `commit`.
-    pub schema_tree: ObjectId,
+    pub schema_tree: SchemaTree,
     /// The decoded schema at `schema_tree`.
     pub schema: Schema,
 }
@@ -132,7 +134,7 @@ impl SchemaSnapshot {
     }
 
     /// Return the schema document tree captured by this snapshot.
-    pub const fn schema_tree(&self) -> ObjectId {
+    pub const fn schema_tree(&self) -> SchemaTree {
         self.schema_tree
     }
 

@@ -3,8 +3,8 @@
 use facet_git_tree::{GitObject, ObjectStore};
 use facet_value::value;
 use gix_store::{
-    DocumentInspection, Expectation, MemoryRefStore, RefPath, RefSegment, RefStore, Store,
-    canonical_document_id,
+    DocumentInspection, DocumentTree, Expectation, MemoryRefStore, RefPath, RefSegment, RefStore,
+    Store, canonical_document_id,
 };
 
 fn seg(name: &str) -> RefSegment {
@@ -23,7 +23,7 @@ fn prepared(
     store: &Store<MemoryRefStore, ObjectStore>,
     tree: gix_store::ObjectId,
 ) -> gix_store::PreparedDocument {
-    match store.inspect_document(tree).unwrap() {
+    match store.inspect_document(DocumentTree::from(tree)).unwrap() {
         DocumentInspection::Bound(document) => document,
         other => panic!("expected a bound document, got {other:?}"),
     }

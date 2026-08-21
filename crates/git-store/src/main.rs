@@ -30,9 +30,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use facet_git_tree::{Node, Schema, SchemaSchema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use gix_store::{
-    ApplyError, DeleteResult, DocumentInspection, Dynamic, EntityState, Expectation, GixRefStore,
-    Kind, Layout, ObjectId, PublishOptions, RefName, RefPath, RefPrefix, RefSegment, RefStore,
-    RepoStore,
+    ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityState, Expectation,
+    GixRefStore, Kind, Layout, ObjectId, PublishOptions, RefName, RefPath, RefPrefix, RefSegment,
+    RefStore, RepoStore, SchemaTree, ValueTree,
 };
 
 /// A handle on one kind, over the CLI's own repo-backed store.
@@ -747,8 +747,8 @@ fn json_record() -> VObject {
     record
 }
 
-fn oid_value(oid: ObjectId) -> Value {
-    oid.to_string().into()
+fn oid_value(oid: impl Into<ObjectId>) -> Value {
+    oid.into().to_string().into()
 }
 
 fn string_array<I>(items: I) -> Value
@@ -1031,7 +1031,7 @@ fn value_decode(
     let value = if legacy_leaves {
         store.decode_value_legacy(value_tree, schema_tree)
     } else {
-        store.decode_value(value_tree, schema_tree)
+        store.decode_value(ValueTree::from(value_tree), SchemaTree::from(schema_tree))
     }?;
     if format.machine() {
         let mut record = json_record();
@@ -1056,7 +1056,7 @@ fn value_encode(
     let json = read_source(file)?;
     let value: Value = facet_json::from_str(&json)
         .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))?;
-    let value_tree = store.encode_value(&value, schema_tree)?;
+    let value_tree = store.encode_value(&value, SchemaTree::from(schema_tree))?;
     if format.machine() {
         let mut record = json_record();
         record.insert("schema_tree", oid_value(schema_tree));
@@ -1075,7 +1075,7 @@ fn document_inspect(
     format: OutputFormat,
 ) -> Result<()> {
     let document_tree = resolve_tree(repo, spec)?;
-    let inspection = store.inspect_document(document_tree)?;
+    let inspection = store.inspect_document(DocumentTree::from(document_tree))?;
     if format.machine() {
         let mut record = json_record();
         record.insert("document_tree", oid_value(document_tree));
@@ -1124,7 +1124,8 @@ fn document_bind(
 ) -> Result<()> {
     let value_tree = resolve_tree(repo, value_spec)?;
     let schema_tree = resolve_schema_tree(repo, schema_spec)?;
-    let prepared = store.bind_document(value_tree, schema_tree)?;
+    let prepared =
+        store.bind_document(ValueTree::from(value_tree), SchemaTree::from(schema_tree))?;
     if format.machine() {
         let mut record = json_record();
         record.insert("document_tree", oid_value(prepared.document_tree()));
@@ -1174,7 +1175,7 @@ fn document_publish(
         message,
     } = request;
     let document_tree = resolve_tree(repo, document_spec)?;
-    let prepared = match store.inspect_document(document_tree)? {
+    let prepared = match store.inspect_document(DocumentTree::from(document_tree))? {
         DocumentInspection::Bound(prepared) => prepared,
         DocumentInspection::LegacyValueRoot { .. } => {
             return Err(cli_error(
