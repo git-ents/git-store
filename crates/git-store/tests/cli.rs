@@ -596,10 +596,10 @@ fn entity_names_may_nest() {
 }
 
 /// `compile <kind> <value>` compiles a document and prints its tree hash —
-/// no ref is touched — and `get <tree-ish>` (soon `cat`) decodes it back,
-/// addressed purely by that hash.
+/// no ref is touched — and `cat <tree-ish>` decodes it back, addressed
+/// purely by that hash.
 #[test]
-fn compile_prints_a_tree_hash_and_get_decodes_it_back() {
+fn compile_prints_a_tree_hash_and_cat_decodes_it_back() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let path = dir.path();
@@ -619,7 +619,7 @@ fn compile_prints_a_tree_hash_and_get_decodes_it_back() {
     assert!(ok);
     assert_eq!(out.trim(), "");
 
-    let (out, err, ok) = run(path, None, &["get", hash]);
+    let (out, err, ok) = run(path, None, &["cat", hash]);
     assert!(ok, "get failed: {err}");
     assert!(out.contains("\"serves\": 4"), "get output: {out}");
     assert!(
@@ -681,7 +681,7 @@ fn compile_without_an_inline_value_still_reads_stdin() {
     assert_eq!(out.trim().len(), 40);
     let hash = out.trim();
 
-    let (out, err, ok) = run(path, None, &["get", hash]);
+    let (out, err, ok) = run(path, None, &["cat", hash]);
     assert!(ok, "get failed: {err}");
     assert!(out.contains("\"serves\": 4"), "get output: {out}");
 }
@@ -1003,11 +1003,12 @@ fn embedded_document_reads_without_schema_ref_and_ignores_legacy_trailers() {
     );
 }
 
-/// `get` also decodes through any commit/ref whose tree has the compiled
+/// `cat` decodes through any commit/ref whose tree has the compiled
 /// `{value/, schema/}` shape — the same shape a named, ref-addressed entity
-/// (written through the explicit `put --legacy-name <kind> <name>` form) has.
+/// (written through `put <kind> <name>`) has — since it is content-addressed
+/// rather than resolving a name through a kind.
 #[test]
-fn get_decodes_through_a_ref_naming_a_bound_commit() {
+fn cat_decodes_through_a_ref_naming_a_bound_commit() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let path = dir.path();
@@ -1020,9 +1021,9 @@ fn get_decodes_through_a_ref_naming_a_bound_commit() {
     let (_, err, ok) = run(path, Some(recipe), &["put", "recipe", "carbonara"]);
     assert!(ok, "named put failed: {err}");
 
-    let (out, err, ok) = run(path, None, &["get", "refs/store/recipe/carbonara"]);
-    assert!(ok, "get via ref failed: {err}");
-    assert!(out.contains("\"serves\": 4"), "get output: {out}");
+    let (out, err, ok) = run(path, None, &["cat", "refs/store/recipe/carbonara"]);
+    assert!(ok, "cat via ref failed: {err}");
+    assert!(out.contains("\"serves\": 4"), "cat output: {out}");
 }
 
 /// `check <tree-ish> <schema>` validates a bare value tree against a schema

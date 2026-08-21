@@ -24,7 +24,7 @@ bound document <document-tree>
   schema: <schema-tree>
 $ git store document publish recipe <document-tree> --expected absent --alias carbonara
 <entity-id>
-$ git store get <document-tree> | jq .serves
+$ git store cat <document-tree> | jq .serves
 4
 ```
 
@@ -59,7 +59,7 @@ $ git log --oneline refs/store/recipe/carbonara     # this name's history
 9f50ef7 publish recipe
 15e425b publish recipe
 
-$ git store get recipe 'carbonara~1' | jq .serves   # compatibility history
+$ git store get recipe 'carbonara~1' | jq .serves   # name-addressed, with revision
 4
 ```
 
@@ -119,7 +119,8 @@ every field is its own object, addressed by content:
 git store                                   # list kinds
 git store compile <kind> [<value>]          # pure compile; prints document-tree OID
 git store put <kind> <name> [<value>]       # compile, then publish under <name>
-git store get <tree-ish>                    # decode a bound document
+git store cat <tree-ish>                    # decode any document tree, ref, or commit
+git store get <kind> <name>                 # resolve a name, then decode it
 git store check <tree-ish> <schema>         # validate a value tree against a published schema
 git store list [<kind>]   (alias: ls)       # kinds, or live entity names
 git store log  <kind> <name>                # commit OID + date per publication

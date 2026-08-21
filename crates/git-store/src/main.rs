@@ -7,18 +7,18 @@
 //! under `<kind>`'s schema into the `{value/, schema/}` tree and prints its
 //! hash — the document's identity — without advancing any ref. `git store put
 //! <kind> <name> [<value>]` does the same, then publishes it under `<name>`,
-//! advancing that name's ref. Reading is `git store get <tree-ish>`, which
-//! decodes any tree of that shape back to JSON; `git store check <tree-ish>
-//! <schema>` validates a bare value tree against a schema without decoding
-//! it. `<value>` may be omitted, taking content from `-F <file>`, stdin,
-//! `$EDITOR`, or — with `-i` — an interactive prompt walking the schema.
+//! advancing that name's ref. Reading mirrors writing: `git store cat
+//! <tree-ish>` decodes any tree of that shape back to JSON, content-addressed
+//! like `git cat-file`; `git store get <kind> <name>` resolves a name first,
+//! then decodes it. `git store check <tree-ish> <schema>` validates a bare
+//! value tree against a schema without decoding it. `<value>` may be
+//! omitted, taking content from `-F <file>`, stdin, `$EDITOR`, or — with
+//! `-i` — an interactive prompt walking the schema.
 //!
 //! Named, ref-addressed, versioned entities remain reachable: `list`, `log`,
 //! `rm`, and the `schema` subgroup mirror git porcelain over them, and any
 //! entity ref under the selected data prefix is itself a valid `<tree-ish>`
-//! for `get`/`check`. `get` also accepts an old two-argument
-//! `get <kind> <name>` form as an explicit compatibility path (see
-//! [`Command::Get`]).
+//! for `cat`/`check`.
 
 mod interactive;
 
@@ -176,20 +176,22 @@ enum Command {
     Compile(CompileArgs),
     /// Store a value under a name, advancing that name's ref.
     Put(PutArgs),
-    /// Decode a document back to JSON from any tree-ish of the
-    /// `{value/, schema/}` shape `put` compiles — a bare tree hash, or any
-    /// commit/ref whose tree has that shape.
-    ///
-    /// Hidden compatibility: `get <kind> <name>` (two arguments) is the old
-    /// ref-addressed form; `<name>` may carry a revision suffix
-    /// (`carbonara~1`, `carbonara@{yesterday}`, `carbonara@<oid>`).
-    Get {
-        #[arg(num_args = 1..=2, value_name = "TREE-ISH")]
-        args: Vec<String>,
+    /// Decode any document tree, ref, or commit — a bare tree hash, or any
+    /// commit/ref whose tree has the `{value/, schema/}` shape `put`
+    /// compiles. Content-addressed, like `git cat-file`; use `get` to
+    /// resolve a name first.
+    Cat {
+        #[arg(value_name = "TREE-ISH")]
+        tree_ish: String,
         /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
         #[arg(long)]
         legacy_leaves: bool,
     },
+    /// Read a stored value as JSON, by kind and name.
+    ///
+    /// `<name>` may carry a revision suffix (`carbonara~1`,
+    /// `carbonara@{yesterday}`, `carbonara@<oid>`).
+    Get { kind: String, name: String },
     /// Check whether a tree-ish's value conforms to a schema, without
     /// decoding it. Exits non-zero, with a diagnostic, when it does not.
     Check { tree_ish: String, schema: String },
@@ -440,10 +442,11 @@ fn run() -> Result<()> {
     match cli.command {
         Command::Compile(args) => compile(&store, args, output)?,
         Command::Put(args) => put(&store, args, output)?,
-        Command::Get {
-            args,
+        Command::Cat {
+            tree_ish,
             legacy_leaves,
-        } => get(&repo, &store, args, legacy_leaves, output)?,
+        } => cat(&repo, &store, &tree_ish, legacy_leaves, output)?,
+        Command::Get { kind, name } => get(&repo, &store, &kind, &name, output)?,
         Command::Check { tree_ish, schema } => check(&repo, &store, &tree_ish, &schema, output)?,
         Command::Doctor => doctor(&repo, &store, output)?,
         Command::List { kind: Some(kind) } => list_entities(&store, &kind, output)?,
@@ -1485,62 +1488,68 @@ fn gather_value(
         .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))
 }
 
-/// `get <tree-ish>` or the hidden `get <kind> <name>` form: decode a document
-/// to JSON.
-fn get(
+/// `cat <tree-ish>`: decode any tree of the `{value/, schema/}` shape
+/// directly, whatever it was reached through — content-addressed, like `git
+/// cat-file`.
+fn cat(
     repo: &gix::Repository,
     store: &RepoStore<'_>,
-    args: Vec<String>,
+    tree_ish: &str,
     legacy_leaves: bool,
     format: OutputFormat,
 ) -> Result<()> {
-    let value = match <[String; 1]>::try_from(args) {
-        // `get <tree-ish>`: decode any tree of the `{value/, schema/}` shape
-        // directly, whatever it was reached through.
-        Ok([tree_ish]) => {
-            let tree = resolve_tree(repo, &tree_ish)?;
-            // `decode` reads entirely out of `tree`'s own embedded schema
-            // and does not consult any kind or schema ref.
-            if legacy_leaves {
-                store.decode_legacy(tree)
-            } else {
-                store.decode(tree)
+    let tree = resolve_tree(repo, tree_ish)?;
+    // `decode` reads entirely out of `tree`'s own embedded schema and does
+    // not consult any kind or schema ref.
+    let value = if legacy_leaves {
+        store.decode_legacy(tree)
+    } else {
+        store.decode(tree)
+    }
+    .with_context(|| cli_context(ExitClass::Schema, format!("{tree_ish} is not a document")))?;
+    emit_value(format, value)
+}
+
+/// `get <kind> <name>`: resolve a name, then decode it — the name-addressed
+/// mirror of `put`.
+fn get(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    kind: &str,
+    name: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    let (name, rev) = split_name_rev(name);
+    let handle = store.dynamic(segment("kind", kind)?);
+    let name_seg = entity(name)?;
+    let state = match rev {
+        Some(rev) => {
+            let oid = resolve_at(repo, &handle, &name_seg, rev)?;
+            // Only read a commit that is actually a version of this entity,
+            // so a stray oid can't return an unrelated value.
+            if !handle.history(&name_seg)?.contains(&oid) {
+                bail!("{rev} is not a version of {kind}/{name}");
             }
-            .with_context(|| {
-                cli_context(ExitClass::Schema, format!("{tree_ish} is not a document"))
-            })?
+            handle.read(oid)?
         }
-        // Hidden old form: `get <kind> <name>`.
-        Err(args) => {
-            let [kind, name] =
-                <[String; 2]>::try_from(args).expect("clap enforces 1..=2 positional arguments");
-            let (name, rev) = split_name_rev(&name);
-            let handle = store.dynamic(segment("kind", &kind)?);
-            let name_seg = entity(name)?;
-            let state = match rev {
-                Some(rev) => {
-                    let oid = resolve_at(repo, &handle, &name_seg, rev)?;
-                    // Only read a commit that is actually a version of this
-                    // entity, so a stray oid can't return an unrelated value.
-                    if !handle.history(&name_seg)?.contains(&oid) {
-                        bail!("{rev} is not a version of {kind}/{name}");
-                    }
-                    handle.read(oid)?
-                }
-                None => handle.read(name_seg)?,
-            };
-            match state {
-                EntityState::Present(entry) => entry.value,
-                EntityState::Deleted(_) => bail!("entity {kind}/{name} is deleted"),
-                EntityState::Absent => {
-                    return Err(cli_error(
-                        ExitClass::NotFound,
-                        format!("no entity {kind}/{name}"),
-                    ));
-                }
-            }
+        None => handle.read(name_seg)?,
+    };
+    let value = match state {
+        EntityState::Present(entry) => entry.value,
+        EntityState::Deleted(_) => bail!("entity {kind}/{name} is deleted"),
+        EntityState::Absent => {
+            return Err(cli_error(
+                ExitClass::NotFound,
+                format!("no entity {kind}/{name}"),
+            ));
         }
     };
+    emit_value(format, value)
+}
+
+/// Render a decoded document value: `{value}` under `json`/`ndjson`, its
+/// pretty JSON alone as text. Shared by `cat` and `get`.
+fn emit_value(format: OutputFormat, value: Value) -> Result<()> {
     let mut fields = VObject::new();
     fields.insert("value", value.clone());
     emit_single(format, fields, || to_json(&value).unwrap_or_default())
