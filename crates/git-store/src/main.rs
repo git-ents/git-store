@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use facet_git_tree::{Node, Schema, SchemaSchema, VariantKind, validate_with_schema};
+use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use gix_store::{
     ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityState, Expectation,
@@ -727,7 +727,8 @@ fn store_error_exit_class(error: &gix_store::Error) -> ExitClass {
         | gix_store::Error::Fingerprint(_)
         | gix_store::Error::Backend(_)
         | gix_store::Error::Serialize(_)
-        | gix_store::Error::Deserialize(_) => ExitClass::Other,
+        | gix_store::Error::Deserialize(_)
+        | gix_store::Error::UnsupportedObjectFormat { .. } => ExitClass::Other,
     }
 }
 
@@ -1342,7 +1343,11 @@ fn raw_git_dir(start: &Path) -> Option<PathBuf> {
 }
 
 /// Check invariants that depend on the repository object database rather than
-/// on a particular kind or ref namespace.
+/// on a particular kind or ref namespace, and print the result.
+///
+/// The checks themselves — object format and the meta-schema fixed point —
+/// live in [`gix_store::check_repository`]; this only gathers its inputs and
+/// formats its outcome.
 fn doctor(repo: &gix::Repository, store: &RepoStore<'_>) -> Result<()> {
     let observed = repo.object_hash();
     // A SHA-256 repository is reported as SHA-1 by gix builds without its
@@ -1352,30 +1357,25 @@ fn doctor(repo: &gix::Repository, store: &RepoStore<'_>) -> Result<()> {
         .config_snapshot()
         .string("extensions.objectformat")
         .is_some_and(|format| format.as_ref().eq_ignore_ascii_case(b"sha256"));
-    doctor_with(observed, configured_sha256, || {
-        SchemaSchema::check_fixed_point(store.objects()).map_err(Into::into)
-    })
+    doctor_with(|| gix_store::check_repository(observed, configured_sha256, store.objects()))
 }
 
+/// Format the outcome of one repository check, attaching CLI context to a
+/// fixed-point failure specifically.
 fn doctor_with(
-    observed: gix::hash::Kind,
-    configured_sha256: bool,
-    fixed_point: impl FnOnce() -> Result<()>,
+    check: impl FnOnce() -> Result<gix_store::DoctorReport, gix_store::Error>,
 ) -> Result<()> {
-    if observed != gix::hash::Kind::Sha1 || configured_sha256 {
-        let observed = if configured_sha256 {
-            "sha256".to_owned()
-        } else {
-            format!("{observed:?}")
-        };
-        bail!(
-            "unsupported Git object format: expected sha1, observed {observed}; this build's schema codec and fixed-point digest are SHA-1-only"
-        );
-    }
-
-    fixed_point()
-        .with_context(|| cli_context(ExitClass::Schema, "schema fixed-point validation failed"))?;
-    println!("git-store doctor: ok (object format: sha1; schema fixed point: valid)");
+    let report = check().map_err(|error| match error {
+        gix_store::Error::SchemaPin(_) => anyhow::Error::new(error).context(cli_context(
+            ExitClass::Schema,
+            "schema fixed-point validation failed",
+        )),
+        error => anyhow::Error::new(error),
+    })?;
+    println!(
+        "git-store doctor: ok (object format: {}; schema fixed point: valid)",
+        report.object_format
+    );
     Ok(())
 }
 
@@ -1787,18 +1787,26 @@ mod tests {
 
     #[test]
     fn doctor_reports_fixed_point_failure_with_context() {
-        let error = doctor_with(gix::hash::Kind::Sha1, false, || {
-            Err(anyhow::anyhow!("injected fixed-point failure"))
-        })
-        .expect_err("the injected fixed-point failure must reach the caller");
+        let injected = gix_store::Error::SchemaPin(facet_git_tree::SchemaPinError::Unpinned(
+            gix::ObjectId::null(gix::hash::Kind::Sha1),
+        ));
+        let error = doctor_with(|| Err(injected))
+            .expect_err("the injected fixed-point failure must reach the caller");
         let message = format!("{error:#}");
         assert!(message.contains("schema fixed-point validation failed"));
-        assert!(message.contains("injected fixed-point failure"));
+        assert!(message.contains("carries no schema-schema pin"));
     }
 
     #[test]
     fn doctor_rejects_a_configured_sha256_repository() {
-        let error = doctor_with(gix::hash::Kind::Sha1, true, || Ok(())).unwrap_err();
+        let error = doctor_with(|| {
+            gix_store::check_repository(
+                gix::hash::Kind::Sha1,
+                true,
+                &facet_git_tree::ObjectStore::default(),
+            )
+        })
+        .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("unsupported Git object format"));
         assert!(message.contains("sha256"));

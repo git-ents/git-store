@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod address;
+mod doctor;
 mod document;
 mod encoding;
 mod error;
@@ -24,6 +25,7 @@ mod tombstone;
 mod transaction;
 
 pub use address::At;
+pub use doctor::{DoctorReport, SUPPORTED_OBJECT_FORMAT, check_repository};
 pub use document::{
     DocumentBuilder, DocumentError, DocumentInspection, DocumentKind, DocumentShapeError,
     PreparedDocument, SchemaSnapshot,

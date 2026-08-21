@@ -230,6 +230,15 @@ pub enum Error {
     /// collision detection rejected the digest.
     #[error("could not compute kind fingerprint")]
     Fingerprint(#[source] gix::hash::hasher::Error),
+    /// The repository's object format is not the SHA-1 this build's schema
+    /// codec and fixed-point digest are written for.
+    #[error(
+        "unsupported Git object format: expected sha1, observed {observed}; this build's schema codec and fixed-point digest are SHA-1-only"
+    )]
+    UnsupportedObjectFormat {
+        /// The object hash algorithm actually observed, e.g. `"sha256"`.
+        observed: String,
+    },
     /// A backend failure from the ref store or object store.
     #[error(transparent)]
     Backend(Box<dyn std::error::Error + Send + Sync + 'static>),
