@@ -153,11 +153,7 @@ fn store_get_list_and_remove() {
     // `git store put recipe carbonara --legacy-name` — explicit compatibility
     // path; the name is positional and content comes from stdin.
     let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil","fry"]}"#;
-    let (_, err, ok) = run(
-        path,
-        Some(recipe),
-        &["put", "recipe", "carbonara", "--legacy-name"],
-    );
+    let (_, err, ok) = run(path, Some(recipe), &["put", "recipe", "carbonara"]);
     assert!(ok, "put failed: {err}");
 
     let (out, err, ok) = run(path, None, &["get", "recipe", "carbonara"]);
@@ -171,11 +167,7 @@ fn store_get_list_and_remove() {
     // A second version, then read the prior one via a revision folded into the
     // name (`carbonara~1`), and the same via the explicit `@` separator.
     let v2 = r#"{"title":"Carbonara","serves":6,"steps":["boil","fry"]}"#;
-    let (_, err, ok) = run(
-        path,
-        Some(v2),
-        &["put", "recipe", "carbonara", "--legacy-name"],
-    );
+    let (_, err, ok) = run(path, Some(v2), &["put", "recipe", "carbonara"]);
     assert!(ok, "second put failed: {err}");
 
     let (out, err, ok) = run(path, None, &["get", "recipe", "carbonara"]);
@@ -299,11 +291,7 @@ fn interactive_put_builds_value_from_prompts() {
     // name-keyed, not declaration-ordered): serves, then the steps list
     // (add? / value until a `n` closes it), then title.
     let answers = "4\ny\nboil\ny\nfry\nn\nCarbonara\n";
-    let (_, err, ok) = run(
-        path,
-        Some(answers),
-        &["put", "recipe", "carbonara", "-i", "--legacy-name"],
-    );
+    let (_, err, ok) = run(path, Some(answers), &["put", "recipe", "carbonara", "-i"]);
     assert!(ok, "interactive put failed: {err}");
 
     let (out, err, ok) = run(path, None, &["get", "recipe", "carbonara"]);
@@ -339,11 +327,7 @@ fn interactive_schema_builds_kind_from_prompts() {
 
     // The built schema accepts a conforming value round-trip.
     let value = r#"{"title":"ship","serves":3,"done":true}"#;
-    let (_, err, ok) = run(
-        path,
-        Some(value),
-        &["put", "task", "release", "--legacy-name"],
-    );
+    let (_, err, ok) = run(path, Some(value), &["put", "task", "release"]);
     assert!(ok, "put against built schema failed: {err}");
     let (out, err, ok) = run(path, None, &["get", "task", "release"]);
     assert!(ok, "get failed: {err}");
@@ -356,11 +340,7 @@ fn unknown_kind_reports_no_schema() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
 
-    let (_, err, ok) = run(
-        dir.path(),
-        Some("{}"),
-        &["put", "ghost", "x", "--legacy-name"],
-    );
+    let (_, err, ok) = run(dir.path(), Some("{}"), &["put", "ghost", "x"]);
     assert!(!ok);
     assert!(err.contains("no schema published"), "stderr: {err}");
 }
@@ -373,7 +353,7 @@ fn failures_have_typed_exit_codes() {
 
     // Malformed command input is an invalid-input failure, before any schema
     // lookup or object write is attempted.
-    let (_, err, code) = run_with_status(path, None, &["put", "recipe", "{"]);
+    let (_, err, code) = run_with_status(path, None, &["compile", "recipe", "{"]);
     assert_eq!(code, 2, "invalid JSON stderr: {err}");
 
     let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
@@ -382,7 +362,7 @@ fn failures_have_typed_exit_codes() {
 
     // A schema-directed mismatch is distinct from malformed JSON.
     let invalid_value = r#"{"title":"Carbonara","serves":"four","steps":[]}"#;
-    let (_, err, code) = run_with_status(path, Some(invalid_value), &["put", "recipe"]);
+    let (_, err, code) = run_with_status(path, Some(invalid_value), &["compile", "recipe"]);
     assert_eq!(code, 5, "schema validation stderr: {err}");
 
     let (_, err, code) = run_with_status(path, None, &["get", "recipe", "missing"]);
@@ -391,7 +371,7 @@ fn failures_have_typed_exit_codes() {
     // Publishing the same prepared document twice with `absent` exercises the
     // public typed ApplyError chain rather than its human-readable message.
     let value = r#"{"title":"Carbonara","serves":4,"steps":[]}"#;
-    let (document, err, code) = run_with_status(path, Some(value), &["put", "recipe"]);
+    let (document, err, code) = run_with_status(path, Some(value), &["compile", "recipe"]);
     assert_eq!(code, 0, "compile stderr: {err}");
     let document = document.trim().to_owned();
     let publish_args = [
@@ -446,7 +426,7 @@ fn hand_authored_schema_json_publishes_with_no_version_key() {
     // And it accepts a conforming value, exactly as a schema published from
     // a `#[derive(Facet)]` type would.
     let value = r#"{"title":"Dune","year":1965}"#;
-    let (_, err, ok) = run(path, Some(value), &["put", "book", "dune", "--legacy-name"]);
+    let (_, err, ok) = run(path, Some(value), &["put", "book", "dune"]);
     assert!(ok, "put against hand-authored schema failed: {err}");
 }
 
@@ -593,11 +573,7 @@ fn entity_names_may_nest() {
     assert!(ok, "schema put failed: {err}");
 
     let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
-    let (_, err, ok) = run(
-        path,
-        Some(recipe),
-        &["put", "recipe", "italian/carbonara", "--legacy-name"],
-    );
+    let (_, err, ok) = run(path, Some(recipe), &["put", "recipe", "italian/carbonara"]);
     assert!(ok, "nested put failed: {err}");
 
     let (out, err, ok) = run(path, None, &["get", "recipe", "italian/carbonara"]);
@@ -619,11 +595,11 @@ fn entity_names_may_nest() {
     );
 }
 
-/// The S1 CLI shape: `put <schema> <value>` compiles a document and prints
-/// its tree hash — no ref is touched — and `get <tree-ish>` decodes it back,
+/// `compile <kind> <value>` compiles a document and prints its tree hash —
+/// no ref is touched — and `get <tree-ish>` (soon `cat`) decodes it back,
 /// addressed purely by that hash.
 #[test]
-fn put_prints_a_tree_hash_and_get_decodes_it_back() {
+fn compile_prints_a_tree_hash_and_get_decodes_it_back() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let path = dir.path();
@@ -633,8 +609,8 @@ fn put_prints_a_tree_hash_and_get_decodes_it_back() {
     assert!(ok, "schema put failed: {err}");
 
     let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil","fry"]}"#;
-    let (out, err, ok) = run(path, None, &["put", "recipe", recipe]);
-    assert!(ok, "put failed: {err}");
+    let (out, err, ok) = run(path, None, &["compile", "recipe", recipe]);
+    assert!(ok, "compile failed: {err}");
     let hash = out.trim();
     assert_eq!(hash.len(), 40, "expected a hex object id, got {hash:?}");
 
@@ -652,15 +628,17 @@ fn put_prints_a_tree_hash_and_get_decodes_it_back() {
     );
 
     // Compiling byte-identical content twice is idempotent: same hash.
-    let (out2, err, ok) = run(path, None, &["put", "recipe", recipe]);
-    assert!(ok, "second put failed: {err}");
+    let (out2, err, ok) = run(path, None, &["compile", "recipe", recipe]);
+    assert!(ok, "second compile failed: {err}");
     assert_eq!(out2.trim(), hash, "compiling the same value twice diverged");
 }
 
-/// `put <schema>` with no inline value still gathers content from stdin (or
-/// `-F`/`$EDITOR`) and stays a pure compile.
+/// `compile <kind> [<value>]` never takes a name and `put <kind> <name>
+/// [<value>]` always does: arity distinguishes the two verbs, so a malformed
+/// inline value can no longer be mistaken for a named write — the ambiguity
+/// the old single `put --legacy-name` verb had to guard against with a flag.
 #[test]
-fn malformed_inline_json_does_not_fall_back_to_named_write() {
+fn compile_and_put_are_distinguished_by_arity_not_a_flag() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let path = dir.path();
@@ -669,32 +647,26 @@ fn malformed_inline_json_does_not_fall_back_to_named_write() {
     let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
     assert!(ok, "schema put failed: {err}");
 
-    // A bare token is malformed JSON but also a legal entity name. It must not
-    // be guessed as the legacy named-write form, because that would advance a
-    // ref when a caller's JSON quoting is lost.
-    let (out, err, ok) = run(path, None, &["put", "recipe", "carbonara"]);
+    // A bare token is malformed JSON: `compile` rejects it outright, and
+    // touches no ref either way.
+    let (out, err, ok) = run(path, None, &["compile", "recipe", "carbonara"]);
     assert!(!ok, "malformed JSON unexpectedly succeeded: {out}{err}");
     assert!(out.is_empty(), "unexpected stdout: {out}");
     assert!(err.contains("invalid JSON value"), "stderr: {err}");
-    assert!(err.contains("--legacy-name"), "stderr: {err}");
 
     let (out, err, ok) = run(path, None, &["list", "recipe"]);
-    assert!(ok, "list after rejected put failed: {err}");
+    assert!(ok, "list after rejected compile failed: {err}");
     assert!(out.is_empty(), "malformed input created an entity: {out}");
 
-    // The compatibility behavior remains available, but only when explicitly
-    // selected.
+    // The same token as a `put` name, with content on stdin, is a legitimate
+    // named write — no flag selects it, `put` always takes a name.
     let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
-    let (_, err, ok) = run(
-        path,
-        Some(recipe),
-        &["put", "recipe", "carbonara", "--legacy-name"],
-    );
-    assert!(ok, "explicit legacy put failed: {err}");
+    let (_, err, ok) = run(path, Some(recipe), &["put", "recipe", "carbonara"]);
+    assert!(ok, "named put failed: {err}");
 }
 
 #[test]
-fn put_without_an_inline_value_still_reads_stdin() {
+fn compile_without_an_inline_value_still_reads_stdin() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
     let path = dir.path();
@@ -704,8 +676,8 @@ fn put_without_an_inline_value_still_reads_stdin() {
     assert!(ok, "schema put failed: {err}");
 
     let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil","fry"]}"#;
-    let (out, err, ok) = run(path, Some(recipe), &["put", "recipe"]);
-    assert!(ok, "put failed: {err}");
+    let (out, err, ok) = run(path, Some(recipe), &["compile", "recipe"]);
+    assert!(ok, "compile failed: {err}");
     assert_eq!(out.trim().len(), 40);
     let hash = out.trim();
 
@@ -752,7 +724,7 @@ fn custom_layout_drives_schema_data_compatibility_and_ref_filtering() {
         Some(value),
         data_prefix,
         schema_prefix,
-        &["put", "recipe", "legacy", "--legacy-name"],
+        &["put", "recipe", "legacy"],
     );
     assert!(ok, "custom compatibility put failed: {err}");
 
@@ -772,7 +744,7 @@ fn custom_layout_drives_schema_data_compatibility_and_ref_filtering() {
         data_prefix,
         schema_prefix,
         &[
-            "put",
+            "compile",
             "recipe",
             r#"{"title":"Prepared","serves":5,"steps":[]}"#,
         ],
@@ -879,7 +851,7 @@ fn ref_list_kind_uses_selected_forge_data_prefix() {
         Some(value),
         "refs/forge",
         "refs/schema",
-        &["put", "recipe", "issue-1", "--legacy-name"],
+        &["put", "recipe", "issue-1"],
     );
     assert!(ok, "forge compatibility put failed: {err}");
 
@@ -932,7 +904,7 @@ fn embedded_document_reads_without_schema_ref_and_ignores_legacy_trailers() {
     let (_, err, ok) = run(
         path,
         Some(recipe),
-        &["put", "recipe", "carbonara", "--legacy-name", "-m", message],
+        &["put", "recipe", "carbonara", "-m", message],
     );
     assert!(!ok, "reserved trailers must be rejected: {err}");
     assert!(
@@ -946,14 +918,7 @@ fn embedded_document_reads_without_schema_ref_and_ignores_legacy_trailers() {
     let (_, err, ok) = run(
         path,
         Some(recipe),
-        &[
-            "put",
-            "recipe",
-            "carbonara",
-            "--legacy-name",
-            "-m",
-            "legacy write",
-        ],
+        &["put", "recipe", "carbonara", "-m", "legacy write"],
     );
     assert!(ok, "put failed: {err}");
     let tree = Command::new("git")
@@ -1052,11 +1017,7 @@ fn get_decodes_through_a_ref_naming_a_bound_commit() {
     assert!(ok, "schema put failed: {err}");
 
     let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
-    let (_, err, ok) = run(
-        path,
-        Some(recipe),
-        &["put", "recipe", "carbonara", "--legacy-name"],
-    );
+    let (_, err, ok) = run(path, Some(recipe), &["put", "recipe", "carbonara"]);
     assert!(ok, "named put failed: {err}");
 
     let (out, err, ok) = run(path, None, &["get", "refs/store/recipe/carbonara"]);
@@ -1304,8 +1265,8 @@ fn check_validates_a_value_tree_against_a_schema() {
     assert!(ok, "schema put failed: {err}");
 
     let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
-    let (out, err, ok) = run(path, None, &["put", "recipe", recipe]);
-    assert!(ok, "put failed: {err}");
+    let (out, err, ok) = run(path, None, &["compile", "recipe", recipe]);
+    assert!(ok, "compile failed: {err}");
     let hash = out.trim();
 
     let (_, err, ok) = run(path, None, &["check", &format!("{hash}:value"), "recipe"]);
@@ -1336,11 +1297,7 @@ fn porcelain_commands_honor_the_output_format() {
     assert!(ok, "schema put failed: {err}");
 
     let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
-    let (_, err, ok) = run(
-        path,
-        Some(recipe),
-        &["put", "recipe", "carbonara", "--legacy-name"],
-    );
+    let (_, err, ok) = run(path, Some(recipe), &["put", "recipe", "carbonara"]);
     assert!(ok, "put failed: {err}");
 
     let (out, err, ok) = run(path, None, &["ls", "--json"]);

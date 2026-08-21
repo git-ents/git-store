@@ -3,21 +3,22 @@
 //! [`Store`] underneath is oid-in/oid-out.
 //!
 //! Bare `git store` prints help, like any clap app; `git store list` (alias
-//! `ls`) lists kinds. Writing is `git store put <schema> <value>`,
-//! which compiles `<value>` under `<schema>` into the `{value/, schema/}`
-//! tree and prints its hash — the document's identity — without advancing
-//! any ref; reading is `git store get <tree-ish>`, which decodes any tree of
-//! that shape back to JSON; `git store check <tree-ish> <schema>` validates a
-//! bare value tree against a schema without decoding it. `<value>` may be
-//! omitted, taking content from `-F <file>`, stdin, `$EDITOR`, or — with
-//! `-i` — an interactive prompt walking the schema.
+//! `ls`) lists kinds. `git store compile <kind> [<value>]` compiles `<value>`
+//! under `<kind>`'s schema into the `{value/, schema/}` tree and prints its
+//! hash — the document's identity — without advancing any ref. `git store put
+//! <kind> <name> [<value>]` does the same, then publishes it under `<name>`,
+//! advancing that name's ref. Reading is `git store get <tree-ish>`, which
+//! decodes any tree of that shape back to JSON; `git store check <tree-ish>
+//! <schema>` validates a bare value tree against a schema without decoding
+//! it. `<value>` may be omitted, taking content from `-F <file>`, stdin,
+//! `$EDITOR`, or — with `-i` — an interactive prompt walking the schema.
 //!
-//! Named, ref-addressed, versioned entities — the pre-S1 shape of this CLI
-//! — remain reachable: `list`, `log`, `rm`, and the `schema` subgroup mirror
-//! git porcelain over them, and any entity ref under the selected data prefix
-//! is itself a valid `<tree-ish>` for `get`/`check`. `put`/`get` also accept
-//! their old two-argument forms as an explicit compatibility path (see
-//! [`PutArgs`] and [`Command::Get`]).
+//! Named, ref-addressed, versioned entities remain reachable: `list`, `log`,
+//! `rm`, and the `schema` subgroup mirror git porcelain over them, and any
+//! entity ref under the selected data prefix is itself a valid `<tree-ish>`
+//! for `get`/`check`. `get` also accepts an old two-argument
+//! `get <kind> <name>` form as an explicit compatibility path (see
+//! [`Command::Get`]).
 
 mod interactive;
 
@@ -31,8 +32,8 @@ use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use gix_store::{
     ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityState, Expectation,
-    GixRefStore, Kind, Layout, ObjectId, PublishOptions, RefName, RefPath, RefPrefix, RefSegment,
-    RefStore, RepoStore, SchemaTree, ValueTree,
+    GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions, RefName, RefPath, RefPrefix,
+    RefSegment, RefStore, RepoStore, SchemaTree, ValueTree,
 };
 
 /// A handle on one kind, over the CLI's own repo-backed store.
@@ -168,15 +169,12 @@ fn cli_context(class: ExitClass, message: impl Into<String>) -> ClassifiedContex
 
 #[derive(Subcommand)]
 enum Command {
-    /// Compile a value under a schema; prints the document's tree hash.
-    /// Content for `<value>` comes from the positional argument itself
-    /// (parsed as JSON) when given, else from `-F <file>`, stdin, or
-    /// `$EDITOR`.
-    ///
-    /// Compatibility: pass `--legacy-name` to use the old `put <kind> <name>`
-    /// form, committing forward under the selected data prefix and printing
-    /// the commit id instead. Without the switch, a positional value must be
-    /// valid JSON and malformed input is rejected without touching a ref.
+    /// Compile a value under a kind's schema; prints the document tree — a
+    /// pure operation, advancing no ref. Content for `<value>` comes from
+    /// the positional argument itself (parsed as JSON) when given, else
+    /// from `-F <file>`, stdin, or `$EDITOR`.
+    Compile(CompileArgs),
+    /// Store a value under a name, advancing that name's ref.
     Put(PutArgs),
     /// Decode a document back to JSON from any tree-ish of the
     /// `{value/, schema/}` shape `put` compiles — a bare tree hash, or any
@@ -236,23 +234,42 @@ enum Command {
     },
 }
 
+/// Arguments for `compile`.
+#[derive(clap::Args)]
+struct CompileArgs {
+    /// The kind: a schema published under the selected schema prefix.
+    kind: String,
+    /// An inline JSON value. Malformed JSON is rejected without touching a
+    /// ref — `compile` never advances one.
+    value: Option<String>,
+    /// JSON file to compile; stdin or `$EDITOR` is used when omitted.
+    #[arg(short = 'F', long = "file", value_name = "FILE")]
+    file: Option<PathBuf>,
+    /// Edit the content in `$VISUAL`/`$EDITOR` before compiling.
+    #[arg(short = 'e', long = "edit")]
+    edit: bool,
+    /// Build the value by prompting for each field the schema names, instead
+    /// of taking JSON from the positional argument, a file, stdin, or the
+    /// editor.
+    #[arg(short = 'i', long = "interactive", conflicts_with_all = ["file", "edit"])]
+    interactive: bool,
+}
+
 /// Arguments for `put`.
 #[derive(clap::Args)]
 struct PutArgs {
-    /// The schema: a schema published under the selected schema prefix.
-    schema: String,
-    /// An inline JSON value, or — with `--legacy-name` — an entity name.
+    /// The kind: a schema published under the selected schema prefix.
+    kind: String,
+    /// The entity name; the ref `put` advances.
+    name: String,
+    /// An inline JSON value; stdin, `-F <file>`, or `$EDITOR` is used when
+    /// omitted.
     value: Option<String>,
-    /// Explicitly use the old ref-addressed `put <kind> <name>` behavior.
-    /// Without this switch, a non-JSON positional value is an error.
-    #[arg(long)]
-    legacy_name: bool,
     /// JSON file to store; stdin or `$EDITOR` is used when omitted.
     #[arg(short = 'F', long = "file", value_name = "FILE")]
     file: Option<PathBuf>,
-    /// Commit message for the `--legacy-name` form. Reserved legacy trailer
-    /// lines (`Schema:`, `Schema-Version:`, or `Ents-Ref:`) are rejected. Has
-    /// no effect on a pure compile.
+    /// Commit message. Reserved legacy trailer lines (`Schema:`,
+    /// `Schema-Version:`, or `Ents-Ref:`) are rejected.
     #[arg(short = 'm', long = "message", value_name = "MSG")]
     message: Option<String>,
     /// Edit the content in `$VISUAL`/`$EDITOR` before storing.
@@ -421,6 +438,7 @@ fn run() -> Result<()> {
     let store = RepoStore::open_with_layout(&repo, layout);
 
     match cli.command {
+        Command::Compile(args) => compile(&store, args, output)?,
         Command::Put(args) => put(&store, args, output)?,
         Command::Get {
             args,
@@ -1178,17 +1196,21 @@ fn document_publish(
                 error.into()
             }
         })?;
-    if format.machine() {
-        let mut record = json_record();
-        record.insert("kind", kind);
-        record.insert("id", publication.entity_id().to_string());
-        record.insert("commit", oid_value(publication.commit()));
-        record.insert("document_tree", oid_value(document_tree));
-        emit_record(format, record)
-    } else {
-        println!("{}", publication.entity_id());
-        Ok(())
-    }
+    emit_publication(format, kind, publication)
+}
+
+/// Render a [`Publication`]: text prints the entity id and its publication
+/// commit, one per line; `json`/`ndjson` render the same two fields plus
+/// `kind` in one record. The id is the document-tree oid by construction, so
+/// no separate `document_tree` field is needed.
+fn emit_publication(format: OutputFormat, kind: &str, publication: Publication) -> Result<()> {
+    let id = publication.entity_id();
+    let commit = publication.commit();
+    let mut fields = VObject::new();
+    fields.insert("kind", kind.to_owned());
+    fields.insert("id", id.to_string());
+    fields.insert("commit", oid_value(commit));
+    emit_single(format, fields, || format!("{id}\n{commit}"))
 }
 
 fn entity_delete(
@@ -1385,66 +1407,18 @@ fn gathered_json(handle: &DynKind<'_, '_>, file: &Option<PathBuf>, edit: bool) -
     }
 }
 
-/// `put`: compile `<value>` under `<schema>`, printing the document's tree
-/// hash — a pure operation, advancing no ref.
-///
-/// The explicit compatibility form (`--legacy-name`) commits forward under
-/// the selected data prefix, printing the commit id — the pre-S1 named-entity
-/// write path. Without that switch, invalid inline JSON is rejected before any
-/// named write can be attempted.
-fn put(store: &RepoStore<'_>, args: PutArgs, format: OutputFormat) -> Result<()> {
-    let PutArgs {
-        schema,
+/// `compile <kind> [<value>]`: compile a value under a kind's current
+/// schema, printing the document tree — a pure operation, advancing no ref.
+fn compile(store: &RepoStore<'_>, args: CompileArgs, format: OutputFormat) -> Result<()> {
+    let CompileArgs {
+        kind,
         value,
         file,
-        message,
         edit,
         interactive,
-        legacy_name,
     } = args;
-
-    if legacy_name {
-        let name = value
-            .as_deref()
-            .context("--legacy-name requires an entity name as the positional value")?;
-        return put_named(
-            store,
-            schema,
-            name,
-            file,
-            message,
-            edit,
-            interactive,
-            format,
-        );
-    }
-
-    if let Some(value) = value {
-        if file.is_some() || edit || interactive {
-            bail!(
-                "a positional value cannot be combined with -F, --edit, or --interactive; use --legacy-name for a named write"
-            );
-        }
-        let value: Value = facet_json::from_str::<Value>(&value).map_err(|error| {
-            cli_error(
-                ExitClass::Invalid,
-                format!(
-                    "invalid JSON value: {error}; use --legacy-name to explicitly perform a legacy named write"
-                ),
-            )
-        })?;
-        let handle = store.dynamic(segment("schema", &schema)?);
-        return emit_tree(format, handle.compile(&value)?);
-    }
-
-    let handle = store.dynamic(segment("schema", &schema)?);
-    let value = if interactive {
-        interactive::value_for_kind(&handle)?
-    } else {
-        let json = gathered_json(&handle, &file, edit)?;
-        facet_json::from_str(&json)
-            .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))?
-    };
+    let handle = store.dynamic(segment("kind", &kind)?);
+    let value = gather_value(&handle, value, &file, edit, interactive)?;
     emit_tree(format, handle.compile(&value)?)
 }
 
@@ -1456,36 +1430,59 @@ fn emit_tree(format: OutputFormat, tree: ObjectId) -> Result<()> {
     emit_single(format, fields, || tree.to_string())
 }
 
-/// The explicit compatibility `put <kind> <name> --legacy-name` form: commit
-/// the gathered value forward under the selected data prefix, printing the
-/// commit id.
-fn put_named(
-    store: &RepoStore<'_>,
-    kind: String,
-    name: &str,
-    file: Option<PathBuf>,
-    message: Option<String>,
+/// `put <kind> <name> [<value>]`: compile a value and publish it under
+/// `name`, advancing that name's ref. The general form of the pipeline
+/// `value encode → document bind → document publish`.
+fn put(store: &RepoStore<'_>, args: PutArgs, format: OutputFormat) -> Result<()> {
+    let PutArgs {
+        kind,
+        name,
+        value,
+        file,
+        message,
+        edit,
+        interactive,
+    } = args;
+    let name_seg = entity(&name)?;
+    let handle = store.dynamic(segment("kind", &kind)?);
+    let value = gather_value(&handle, value, &file, edit, interactive)?;
+    let tree = handle.compile(&value)?;
+    let prepared = match store.inspect_document(DocumentTree::from(tree))? {
+        DocumentInspection::Bound(prepared) => prepared,
+        other => {
+            unreachable!("a just-compiled document is always bound, got {other:?}")
+        }
+    };
+    let message = message.unwrap_or_else(|| format!("store {kind}/{name}"));
+    let options = PublishOptions::new(message).with_alias(name_seg);
+    let publication = handle.publish_prepared(&prepared, options)?;
+    emit_publication(format, &kind, publication)
+}
+
+/// Take a value from the positional argument (as JSON), else `-F <file>`,
+/// stdin, `$EDITOR`, or — with `interactive` — a prompt walking `handle`'s
+/// schema. Shared by [`compile`] and [`put`].
+fn gather_value(
+    handle: &DynKind<'_, '_>,
+    inline: Option<String>,
+    file: &Option<PathBuf>,
     edit: bool,
     interactive: bool,
-    format: OutputFormat,
-) -> Result<()> {
-    let name_seg = entity(name)?;
-    let handle = store.dynamic(segment("kind", &kind)?);
-    let value = if interactive {
-        interactive::value_for_kind(&handle)?
-    } else {
-        let json = gathered_json(&handle, &file, edit)?;
-        facet_json::from_str(&json)
-            .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))?
-    };
-    let mut write = handle.write(&value);
-    if let Some(summary) = message {
-        write = write.message(summary);
+) -> Result<Value> {
+    if let Some(inline) = inline {
+        if file.is_some() || edit || interactive {
+            bail!("a positional value cannot be combined with -F, --edit, or --interactive");
+        }
+        return facet_json::from_str::<Value>(&inline).map_err(|error| {
+            cli_error(ExitClass::Invalid, format!("invalid JSON value: {error}"))
+        });
     }
-    let commit = write.at(&name_seg)?;
-    let mut fields = VObject::new();
-    fields.insert("commit", oid_value(commit));
-    emit_single(format, fields, || commit.to_string())
+    if interactive {
+        return interactive::value_for_kind(handle);
+    }
+    let json = gathered_json(handle, file, edit)?;
+    facet_json::from_str(&json)
+        .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))
 }
 
 /// `get <tree-ish>` or the hidden `get <kind> <name>` form: decode a document

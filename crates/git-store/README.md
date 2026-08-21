@@ -28,11 +28,12 @@ $ git store get <document-tree> | jq .serves
 4
 ```
 
-The positional `put <schema> [<value>]` form remains a convenient pure compile:
-it prints the bound document-tree OID and advances no ref. The hidden two-argument
-`put <kind> <name>` form publishes the value under that name. The explicit
-`value` and `document` commands make each
-step addressable for a manually scripted migration.
+`compile <kind> [<value>]` is a convenient pure compile: it prints the bound
+document-tree OID and advances no ref. `put <kind> <name> [<value>]` does the
+same, then publishes it under `<name>`, advancing that name's ref — arity
+alone distinguishes the two verbs, so there is no flag to select between a
+compile and a named write. The explicit `value` and `document` commands make
+each step addressable for a manually scripted migration.
 
 What landed is a real Git tree, not an opaque payload — `git ls-tree` and
 `git cat-file` are still useful query tools. A bound document's root is exactly
@@ -116,7 +117,8 @@ every field is its own object, addressed by content:
 
 ```
 git store                                   # list kinds
-git store put <schema> [<value>]            # pure compile; prints document-tree OID
+git store compile <kind> [<value>]          # pure compile; prints document-tree OID
+git store put <kind> <name> [<value>]       # compile, then publish under <name>
 git store get <tree-ish>                    # decode a bound document
 git store check <tree-ish> <schema>         # validate a value tree against a published schema
 git store list [<kind>]   (alias: ls)       # kinds, or live entity names
@@ -142,18 +144,19 @@ git store entity delete <kind> <name>        # typed tombstone over a name
 # Global layout options (defaults shown):
 git store --data-prefix refs/store --schema-prefix refs/schema <command>
 
-# Compatibility-only authoring flags on put:
+# Authoring flags on compile and put:
     -F, --file <FILE>                       # content from a file (else stdin, else $EDITOR)
-    -m, --message <MSG>                     # publication message in the named form
+    -m, --message <MSG>                     # publication message (put only)
     -e, --edit                              # edit content in $VISUAL/$EDITOR first
     -i, --interactive                       # build a value by prompting for each field
 ```
 
-Writing is always an explicit `put`, and a bare invocation defaults to listing
-— the same shape as `git remote`/`git branch`. At a terminal with no `-F` and
-nothing piped, `put` opens `$EDITOR` seeded from the selected schema, like `git
-notes add`. The explicit plumbing commands never infer a schema from a kind ref,
-commit trailer, or caller-selected name: pass `--schema` to `value encode`,
+Writing is always an explicit `compile` or `put`, and a bare invocation
+defaults to listing — the same shape as `git remote`/`git branch`. At a
+terminal with no `-F` and nothing piped, `compile`/`put` open `$EDITOR` seeded
+from the selected schema, like `git notes add`. The explicit plumbing commands
+never infer a schema from a kind ref, commit trailer, or caller-selected name:
+pass `--schema` to `value encode`,
 `value decode`, and `document bind`.
 
 All commands accept the global `--data-prefix` and `--schema-prefix` options.
