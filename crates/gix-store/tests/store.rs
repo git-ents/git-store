@@ -17,11 +17,12 @@ use facet_git_tree::{
 use facet_value::value;
 use gix::bstr::ByteSlice;
 use gix_refstore::RefEdit;
+use gix::objs::Write as _;
 use gix_store::{
-    ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
-    DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore, ObjectId, RefName, RefPath,
-    RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree, TargetSchema, entity_id_name,
-    entity_name, entity_name_under,
+    ApplyError, At, Committer, Compat, DeleteResult, DocumentInspection, DocumentKind,
+    DocumentShapeError, DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore,
+    ObjectId, RefName, RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree,
+    TargetSchema, ValueTree, entity_id_name, entity_name, entity_name_under,
 };
 
 fn seg(s: &str) -> RefSegment {
@@ -2339,4 +2340,80 @@ fn transaction_stale_expectation_leaves_every_staged_ref_untouched() {
     assert!(b.list_entries().unwrap().is_empty());
     assert_eq!(a.list_entries().unwrap().len(), 1);
     assert_eq!(a.read(existing).unwrap().value(), Some(value!({ "n": 1 })));
+}
+
+/// Rewrite a current-format object graph with the historical no-newline
+/// blob spelling, reproducing pre-newline leaf framing in memory.
+fn strip_leaf_newlines(store: &ObjectStore, oid: ObjectId) -> ObjectId {
+    match store.get(&oid).expect("fixture object") {
+        GitObject::Blob(blob) => {
+            let bytes = blob.data.strip_suffix(b"\n").unwrap_or(&blob.data);
+            store
+                .write_buf(gix::objs::Kind::Blob, bytes)
+                .expect("write legacy blob")
+        }
+        GitObject::Tree(tree) => {
+            let entries = tree
+                .entries
+                .into_iter()
+                .map(|entry| gix::objs::tree::Entry {
+                    mode: entry.mode,
+                    filename: entry.filename,
+                    oid: strip_leaf_newlines(store, entry.oid),
+                })
+                .collect();
+            store
+                .write(&gix::objs::Tree { entries })
+                .expect("write legacy tree")
+        }
+        other => panic!("unexpected fixture object: {other:?}"),
+    }
+}
+
+#[test]
+fn compat_strict_is_the_default_and_rejects_pre_newline_leaves() {
+    let store = store();
+    let schema_tree = schema_of::<Counter>()
+        .unwrap()
+        .write_pinned(store.objects())
+        .unwrap();
+    let ordinary = store
+        .encode_value(&value!({ "n": 7 }), SchemaTree::from(schema_tree))
+        .unwrap();
+    let legacy_value_tree = strip_leaf_newlines(store.objects(), ordinary.object_id());
+
+    let err = store
+        .decode_value(ValueTree::from(legacy_value_tree), SchemaTree::from(schema_tree))
+        .unwrap_err();
+    assert!(matches!(err, Error::SchemaRead(_)), "{err:?}");
+}
+
+#[test]
+fn compat_legacy_leaves_accepts_what_strict_rejects() {
+    let store = store();
+    let schema_tree = schema_of::<Counter>()
+        .unwrap()
+        .write_pinned(store.objects())
+        .unwrap();
+    let ordinary = store
+        .encode_value(&value!({ "n": 7 }), SchemaTree::from(schema_tree))
+        .unwrap();
+    let legacy_value_tree = strip_leaf_newlines(store.objects(), ordinary.object_id());
+
+    let store = store.with_compat(Compat::LegacyLeaves);
+    assert_eq!(
+        store
+            .decode_value(ValueTree::from(legacy_value_tree), SchemaTree::from(schema_tree))
+            .unwrap(),
+        value!({ "n": 7 })
+    );
+
+    // An ordinary, current-format tree still decodes identically under
+    // either setting.
+    assert_eq!(
+        store
+            .decode_value(ordinary, SchemaTree::from(schema_tree))
+            .unwrap(),
+        value!({ "n": 7 })
+    );
 }

@@ -38,7 +38,7 @@ pub use kind::{
 };
 pub use migrate::TargetSchema;
 
-pub use store::{Layout, Publication, PublishOptions, RepoStore, Store, decode};
+pub use store::{Compat, Layout, Publication, PublishOptions, RepoStore, Store, decode};
 pub use tombstone::{
     DeleteResult, EntityState, ReadResult, ReadState, Tombstone, TombstoneEntry, TombstoneState,
 };
@@ -63,9 +63,17 @@ where
     /// The commit is addressed directly and the resulting schema does not
     /// borrow the publication ref. This permits callers to retain a historical
     /// schema while the kind advances or its publication ref is removed.
+    /// Subject to the store's [`Compat`](crate::Compat) setting: `Strict`
+    /// (the default) rejects pre-`kind` documents, `LegacyLeaves` accepts
+    /// them.
     pub fn snapshot_at(&self, commit: ObjectId) -> Result<SchemaSnapshot, Error> {
         let schema_tree = self.store.commit_tree(commit)?;
-        let schema = Schema::read_pinned(&schema_tree, self.store.objects())?;
+        let schema = match self.store.compat() {
+            crate::Compat::Strict => Schema::read_pinned(&schema_tree, self.store.objects())?,
+            crate::Compat::LegacyLeaves => {
+                Schema::read_pinned_legacy(&schema_tree, self.store.objects())?
+            }
+        };
         Ok(SchemaSnapshot {
             commit,
             schema_tree: SchemaTree::from(schema_tree),
@@ -73,10 +81,13 @@ where
         })
     }
 
-    /// Read a historical schema publication using the explicit legacy decoder.
-    ///
-    /// This accepts pre-`kind` documents and pre-newline leaves; ordinary
-    /// [`snapshot_at`](Self::snapshot_at) remains strict.
+    /// Read a historical schema publication, unconditionally accepting
+    /// pre-`kind` documents and pre-newline leaves regardless of the store's
+    /// [`Compat`](crate::Compat) setting.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `Store::with_compat(Compat::LegacyLeaves)` then `KindSchema::snapshot_at` instead"
+    )]
     pub fn snapshot_at_legacy(&self, commit: ObjectId) -> Result<SchemaSnapshot, Error> {
         let schema_tree = self.store.commit_tree(commit)?;
         let schema = Schema::read_pinned_legacy(&schema_tree, self.store.objects())?;
@@ -87,7 +98,12 @@ where
         })
     }
 
-    /// Capture the current schema using the explicit legacy decoder.
+    /// Capture the current schema, unconditionally accepting legacy leaf
+    /// framing regardless of the store's [`Compat`](crate::Compat) setting.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `Store::with_compat(Compat::LegacyLeaves)` then `KindSchema::current_snapshot` instead"
+    )]
     pub fn current_snapshot_legacy(&self) -> Result<SchemaSnapshot, Error> {
         let commit = self
             .store
@@ -97,7 +113,13 @@ where
             .ok_or_else(|| Error::NoSchema {
                 kind: self.kind.clone(),
             })?;
-        self.snapshot_at_legacy(commit)
+        let schema_tree = self.store.commit_tree(commit)?;
+        let schema = Schema::read_pinned_legacy(&schema_tree, self.store.objects())?;
+        Ok(SchemaSnapshot {
+            commit,
+            schema_tree: SchemaTree::from(schema_tree),
+            schema,
+        })
     }
 
     /// Capture the schema currently published for this kind.
