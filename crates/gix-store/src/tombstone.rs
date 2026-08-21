@@ -108,12 +108,35 @@ impl<V> EntityState<V> {
         matches!(self, Self::Present(_))
     }
 
+    /// Consume the result, returning its entry when present.
+    ///
+    /// This narrows the result the way callers actually branch on it, rather
+    /// than naming a differently-shaped read method: `Absent` and `Deleted`
+    /// collapse to `None` here just as they do for [`value`](Self::value).
+    pub fn present(self) -> Option<Entry<V>> {
+        match self {
+            Self::Present(entry) => Some(entry),
+            Self::Absent | Self::Deleted(_) => None,
+        }
+    }
+
+    /// Consume the result, returning its value when present.
+    pub fn value(self) -> Option<V> {
+        self.present().map(|entry| entry.value)
+    }
+
     /// Consume the result, returning its tombstone when it is deleted.
-    pub fn into_deleted(self) -> Option<TombstoneEntry> {
+    pub fn deleted(self) -> Option<TombstoneEntry> {
         match self {
             Self::Deleted(entry) => Some(entry),
             Self::Absent | Self::Present(_) => None,
         }
+    }
+
+    /// Consume the result, returning its tombstone when it is deleted.
+    #[deprecated(since = "0.2.0", note = "renamed to `EntityState::deleted`")]
+    pub fn into_deleted(self) -> Option<TombstoneEntry> {
+        self.deleted()
     }
 }
 
@@ -159,4 +182,68 @@ where
         return Err(Error::InvalidTombstone);
     }
     Ok(Some(tombstone))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn oid() -> ObjectId {
+        ObjectId::from_hex(b"0123456789012345678901234567890123456789").unwrap()
+    }
+
+    fn entry() -> Entry<u32> {
+        Entry {
+            value: 7,
+            commit: oid(),
+            message: "commit".to_owned(),
+        }
+    }
+
+    fn tombstone_entry() -> TombstoneEntry {
+        TombstoneEntry {
+            tombstone: Tombstone {
+                state: TombstoneState::Deleted,
+                kind: "widget".to_owned(),
+                entity: oid().to_string(),
+            },
+            commit: oid(),
+            message: "delete".to_owned(),
+        }
+    }
+
+    #[test]
+    fn present_narrows_to_entry() {
+        let state = EntityState::Present(entry());
+        assert_eq!(state.present(), Some(entry()));
+    }
+
+    #[test]
+    fn present_is_none_off_the_present_branch() {
+        assert_eq!(EntityState::<u32>::Absent.present(), None);
+        assert_eq!(EntityState::<u32>::Deleted(tombstone_entry()).present(), None);
+    }
+
+    #[test]
+    fn value_narrows_to_the_decoded_value() {
+        let state = EntityState::Present(entry());
+        assert_eq!(state.value(), Some(7));
+        assert_eq!(EntityState::<u32>::Absent.value(), None);
+        assert_eq!(EntityState::<u32>::Deleted(tombstone_entry()).value(), None);
+    }
+
+    #[test]
+    fn deleted_narrows_to_the_tombstone() {
+        let state = EntityState::<u32>::Deleted(tombstone_entry());
+        assert_eq!(state.deleted(), Some(tombstone_entry()));
+        assert_eq!(EntityState::<u32>::Absent.deleted(), None);
+        assert_eq!(EntityState::Present(entry()).deleted(), None);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn into_deleted_matches_deleted() {
+        let state = EntityState::<u32>::Deleted(tombstone_entry());
+        assert_eq!(state.into_deleted(), Some(tombstone_entry()));
+    }
 }
