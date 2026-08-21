@@ -21,6 +21,63 @@ pub(crate) fn reference(kind: &RefSegment) -> RefName {
     .expect("encoded index ref is valid")
 }
 
+/// Every ref directly under `entities`, named relative to that prefix,
+/// ascending by name. Shared by [`crate::Kind`]'s own publications and by
+/// [`crate::Transaction`], which stages edits for entities across several
+/// kinds at once.
+pub(crate) fn source_entries<R, O>(
+    store: &Store<R, O>,
+    entities: &RefPrefix,
+) -> Result<Vec<(RefPath, ObjectId)>, Error>
+where
+    R: RefStore,
+    O: Find,
+{
+    let mut entries: Vec<_> = store
+        .refs()
+        .prefixed(entities)
+        .map_err(Error::backend)?
+        .into_iter()
+        .filter_map(|(name, commit)| name.relative_to(entities).map(|name| (name, commit)))
+        .collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Ok(entries)
+}
+
+/// The materialized-index [`RefEdit`](gix_refstore::RefEdit) that brings
+/// `kind`'s index ref (currently at `current`) to reflect `entries`, or
+/// `None` when it already does.
+pub(crate) fn edit<R, O>(
+    store: &Store<R, O>,
+    kind: &RefSegment,
+    current: Option<ObjectId>,
+    entries: &[(RefPath, ObjectId)],
+) -> Result<Option<gix_refstore::RefEdit>, Error>
+where
+    R: RefStore,
+    O: Find + Write,
+{
+    if entries.is_empty() {
+        return Ok(current.map(|expected| gix_refstore::RefEdit::Delete {
+            name: reference(kind),
+            expected,
+        }));
+    }
+    let tree = write(store, entries)?;
+    Ok(Some(match current {
+        Some(expected) if expected == tree => return Ok(None),
+        Some(expected) => gix_refstore::RefEdit::Update {
+            name: reference(kind),
+            expected,
+            new: tree,
+        },
+        None => gix_refstore::RefEdit::Create {
+            name: reference(kind),
+            new: tree,
+        },
+    }))
+}
+
 pub(crate) fn read_validated<R, O>(
     store: &Store<R, O>,
     kind: &RefSegment,

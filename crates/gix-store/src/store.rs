@@ -17,6 +17,7 @@ use crate::encoding::{Dynamic, Encoding, Typed};
 use crate::error::{Error, Subtree};
 use crate::identity::{DocumentTree, EntityId, SchemaTree, ValueTree};
 use crate::kind::Kind;
+use crate::transaction::Transaction;
 
 /// Options controlling publication of a prepared document.
 #[derive(Debug, Clone, Default)]
@@ -182,6 +183,18 @@ where
     pub fn with_signer(mut self, signer: impl Signer + 'static) -> Self {
         self.signer = Some(Box::new(signer));
         self
+    }
+
+    /// Stage publications and deletions, across any number of kinds, to
+    /// land as one all-or-nothing compare-and-swap batch. `message` is used
+    /// as the commit message for every publication and tombstone the
+    /// transaction writes.
+    pub fn transaction(&self, message: impl Into<String>) -> Transaction<'_, R, O>
+    where
+        R: Committer,
+        O: Write,
+    {
+        Transaction::new(self, message.into())
     }
 
     /// Return the opaque signature bytes carried by `commit`, or `None` when

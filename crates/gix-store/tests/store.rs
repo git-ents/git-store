@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! End-to-end [`Store`] behavior against [`MemoryRefStore`] and
 //! [`facet_git_tree::ObjectStore`] — no filesystem, no temp-dir repository.
 //! What genuinely needs a real `gix` repository (on-disk ref layout, a real
@@ -18,9 +19,9 @@ use gix::bstr::ByteSlice;
 use gix_refstore::RefEdit;
 use gix_store::{
     ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
-    DocumentTree, EntityState, Entry, Error, MemoryRefStore, ObjectId, RefName, RefPath, RefPrefix,
-    RefSegment, RefStore, SchemaTree, Store, Subtree, TargetSchema, entity_id_name, entity_name,
-    entity_name_under,
+    DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore, ObjectId, RefName, RefPath,
+    RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree, TargetSchema, entity_id_name,
+    entity_name, entity_name_under,
 };
 
 fn seg(s: &str) -> RefSegment {
@@ -2281,4 +2282,61 @@ fn commit_tree(store: &Store<MemoryRefStore, ObjectStore>, id: ObjectId) -> Obje
         panic!("expected a commit");
     };
     commit.tree
+}
+
+#[test]
+fn transaction_publishes_two_entities_across_kinds_atomically() {
+    let store = store();
+    let a = store.dynamic(seg("a"));
+    let b = store.dynamic(seg("b"));
+    a.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    b.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+
+    let doc_a = DocumentTree::from(a.compile(&value!({ "n": 1 })).unwrap());
+    let doc_b = DocumentTree::from(b.compile(&value!({ "n": 2 })).unwrap());
+
+    let publications = store
+        .transaction("batch publish")
+        .publish(&seg("a"), doc_a, Expectation::Absent)
+        .publish(&seg("b"), doc_b, Expectation::Absent)
+        .commit()
+        .unwrap();
+
+    assert_eq!(publications.len(), 2);
+    assert_eq!(a.read(publications[0].entity_id()).unwrap().value(), Some(value!({ "n": 1 })));
+    assert_eq!(b.read(publications[1].entity_id()).unwrap().value(), Some(value!({ "n": 2 })));
+    // The materialized index for each kind reflects the transaction too, not
+    // just the entity ref itself.
+    assert_eq!(a.list_entries().unwrap().len(), 1);
+    assert_eq!(b.list_entries().unwrap().len(), 1);
+}
+
+#[test]
+fn transaction_stale_expectation_leaves_every_staged_ref_untouched() {
+    let store = store();
+    let a = store.dynamic(seg("a"));
+    let b = store.dynamic(seg("b"));
+    a.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    b.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+
+    // `a` already has a published entity; `b` does not yet have one.
+    let existing = a.put_entity(&value!({ "n": 1 })).unwrap();
+    let new_doc_b = DocumentTree::from(b.compile(&value!({ "n": 2 })).unwrap());
+    // Republishing identical content at `existing` is a stale expectation:
+    // `Expectation::Absent` no longer holds, since the ref already exists.
+    let same_content_a = DocumentTree::from(a.compile(&value!({ "n": 1 })).unwrap());
+
+    let err = store
+        .transaction("batch publish")
+        .publish(&seg("b"), new_doc_b, Expectation::Absent)
+        .publish(&seg("a"), same_content_a, Expectation::Absent)
+        .commit()
+        .unwrap_err();
+    assert!(matches!(err, Error::Backend(_)), "{err:?}");
+
+    // Neither ref was touched: `b` is still absent, and `a` still names only
+    // the entity that existed before the transaction was attempted.
+    assert!(b.list_entries().unwrap().is_empty());
+    assert_eq!(a.list_entries().unwrap().len(), 1);
+    assert_eq!(a.read(existing).unwrap().value(), Some(value!({ "n": 1 })));
 }

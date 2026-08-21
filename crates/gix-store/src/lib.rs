@@ -21,6 +21,7 @@ mod migrate;
 
 mod store;
 mod tombstone;
+mod transaction;
 
 pub use address::At;
 pub use document::{
@@ -41,6 +42,7 @@ pub use store::{Layout, Publication, PublishOptions, RepoStore, Store, decode};
 pub use tombstone::{
     DeleteResult, EntityState, ReadResult, ReadState, Tombstone, TombstoneEntry, TombstoneState,
 };
+pub use transaction::Transaction;
 
 pub use facet_git_tree::{ObjectId, Schema, schema_of};
 

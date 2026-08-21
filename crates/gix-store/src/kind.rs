@@ -25,6 +25,30 @@ use crate::tombstone::{self, DeleteResult, EntityState, Tombstone, TombstoneEntr
 
 const KIND_FINGERPRINT_DOMAIN: &[u8] = b"gix-store\0kind-fingerprint\0v1\0";
 
+/// The result of [`Kind::resolve_publish`], resolving a publish attempt
+/// without applying it.
+pub(crate) enum PublishOutcome {
+    /// The requested expectation no longer holds `reference`'s current
+    /// value; nothing was resolved.
+    Stale { reference: RefName },
+    /// The publish may proceed as described.
+    Ready(ResolvedPublish),
+}
+
+/// One publish attempt resolved to a concrete commit and, if the entity's
+/// ref must move to reach it, the edit that moves it.
+pub(crate) struct ResolvedPublish {
+    /// The entity id the published document identifies.
+    pub(crate) id: EntityId,
+    /// The name it was resolved to publish under.
+    pub(crate) name: RefPath,
+    /// The commit its ref will point at once `edit` (if any) is applied.
+    pub(crate) commit: ObjectId,
+    /// The ref edit that must be applied to reach `commit`, or `None` when
+    /// the ref already points there.
+    pub(crate) edit: Option<RefEdit>,
+}
+
 /// One kind: its schema ref and the entities beneath it.
 pub struct Kind<'s, E, R, O> {
     store: &'s Store<R, O>,
@@ -626,18 +650,7 @@ where
     }
 
     fn source_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
-        let mut entries: Vec<_> = self
-            .store
-            .refs()
-            .prefixed(&self.entities)
-            .map_err(Error::backend)?
-            .into_iter()
-            .filter_map(|(name, commit)| {
-                name.relative_to(&self.entities).map(|name| (name, commit))
-            })
-            .collect();
-        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-        Ok(entries)
+        index::source_entries(self.store, &self.entities)
     }
 
     /// Decode only enough of a bound document to recognize a tombstone. This
@@ -718,6 +731,78 @@ where
         R: Committer,
         O: Write,
     {
+        loop {
+            let resolved = match self.resolve_publish(alias, message, tree, parent, expected_alias)? {
+                PublishOutcome::Ready(resolved) => resolved,
+                PublishOutcome::Stale { reference } => {
+                    if retry_on_race {
+                        return Ok(None);
+                    }
+                    return Err(self.expectation_error(
+                        &reference,
+                        expected_alias.expect("a stale outcome only occurs when an expectation was given"),
+                    ));
+                }
+            };
+
+            let mut edits = Vec::new();
+            if let Some(edit) = resolved.edit {
+                edits.push(edit);
+            }
+
+            let current_index = self
+                .store
+                .refs()
+                .read(&index::reference(&self.name))
+                .map_err(Error::backend)?;
+            let mut next = self.source_entries()?;
+            if let Some((_, current)) = next.iter_mut().find(|(entry, _)| entry == &resolved.name) {
+                *current = resolved.commit;
+            } else {
+                next.push((resolved.name.clone(), resolved.commit));
+                next.sort_by(|(a, _), (b, _)| a.cmp(b));
+            }
+            if let Some(edit) = self.index_edit(current_index, &next)? {
+                edits.push(edit);
+            }
+
+            if edits.is_empty() {
+                return Ok(Some((resolved.id, resolved.commit)));
+            }
+            match self.store.refs().apply_batch(edits) {
+                Ok(()) => return Ok(Some((resolved.id, resolved.commit))),
+                Err(ApplyError::LostRace { .. }) if retry_on_race => continue,
+                Err(lost @ ApplyError::LostRace { .. }) => {
+                    return Err(Error::backend(lost));
+                }
+                Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
+            }
+        }
+    }
+
+    /// Validate `tree`'s embedded kind, resolve the name and ref it
+    /// publishes to, and — when `expect` still holds — the commit it will
+    /// point at and the [`RefEdit`] (if any) that moves the ref there,
+    /// without writing or applying anything. `expect` of `None` skips the
+    /// compare-and-swap check entirely, so the ref advances unconditionally
+    /// like a branch.
+    ///
+    /// Shared by [`publish_document_checked`](Self::publish_document_checked),
+    /// which applies the resulting edit itself in a retry loop, and by
+    /// [`Transaction`](crate::Transaction), which collects edits resolved
+    /// against several kinds into one compare-and-swap batch.
+    pub(crate) fn resolve_publish(
+        &self,
+        alias: Option<&RefPath>,
+        message: &str,
+        tree: ObjectId,
+        parent: Option<ObjectId>,
+        expect: Option<gix_refstore::Expectation>,
+    ) -> Result<PublishOutcome, Error>
+    where
+        R: Committer,
+        O: Write,
+    {
         // Publication is only defined for a complete bound document, not for
         // an arbitrary tree that happens to have an object id. Reading the
         // embedded schema here also keeps compatibility writes subject to the
@@ -747,85 +832,53 @@ where
             self.store.commit_tree(parent)?;
         }
 
-        loop {
-            let current = self.store.refs().read(&reference).map_err(Error::backend)?;
-
-            if let Some(expected) = expected_alias {
-                let matches = match expected {
-                    gix_refstore::Expectation::Absent => current.is_none(),
-                    gix_refstore::Expectation::Exactly(old) => current == Some(old),
-                };
-                if !matches {
-                    if retry_on_race {
-                        return Ok(None);
-                    }
-                    return Err(self.expectation_error(&reference, expected));
-                }
-            }
-
-            // Republishing identical content is a no-op, which keeps migration
-            // and repeated writes idempotent. Otherwise the ref advances like a
-            // branch, so every previous publication stays reachable.
-            let (commit, edit) = match current {
-                Some(commit) if self.store.commit_tree(commit)? == tree => (commit, None),
-                Some(expected) => {
-                    let next =
-                        self.store
-                            .write_commit(message, tree, Some(parent.unwrap_or(expected)))?;
-                    (
-                        next,
-                        Some(RefEdit::Update {
-                            name: reference.clone(),
-                            expected,
-                            new: next,
-                        }),
-                    )
-                }
-                None => {
-                    let next = self.store.write_commit(message, tree, parent)?;
-                    (
-                        next,
-                        Some(RefEdit::Create {
-                            name: reference.clone(),
-                            new: next,
-                        }),
-                    )
-                }
+        let current = self.store.refs().read(&reference).map_err(Error::backend)?;
+        if let Some(expected) = expect {
+            let matches = match expected {
+                gix_refstore::Expectation::Absent => current.is_none(),
+                gix_refstore::Expectation::Exactly(old) => current == Some(old),
             };
-
-            let mut edits = Vec::new();
-            if let Some(edit) = edit {
-                edits.push(edit);
-            }
-
-            let current_index = self
-                .store
-                .refs()
-                .read(&index::reference(&self.name))
-                .map_err(Error::backend)?;
-            let mut next = self.source_entries()?;
-            if let Some((_, current)) = next.iter_mut().find(|(entry, _)| entry == &name) {
-                *current = commit;
-            } else {
-                next.push((name.clone(), commit));
-                next.sort_by(|(a, _), (b, _)| a.cmp(b));
-            }
-            if let Some(edit) = self.index_edit(current_index, &next)? {
-                edits.push(edit);
-            }
-
-            if edits.is_empty() {
-                return Ok(Some((id, commit)));
-            }
-            match self.store.refs().apply_batch(edits) {
-                Ok(()) => return Ok(Some((id, commit))),
-                Err(ApplyError::LostRace { .. }) if retry_on_race => continue,
-                Err(lost @ ApplyError::LostRace { .. }) => {
-                    return Err(Error::backend(lost));
-                }
-                Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
+            if !matches {
+                return Ok(PublishOutcome::Stale { reference });
             }
         }
+
+        // Republishing identical content is a no-op, which keeps migration
+        // and repeated writes idempotent. Otherwise the ref advances like a
+        // branch, so every previous publication stays reachable.
+        let (commit, edit) = match current {
+            Some(commit) if self.store.commit_tree(commit)? == tree => (commit, None),
+            Some(expected) => {
+                let next = self
+                    .store
+                    .write_commit(message, tree, Some(parent.unwrap_or(expected)))?;
+                (
+                    next,
+                    Some(RefEdit::Update {
+                        name: reference.clone(),
+                        expected,
+                        new: next,
+                    }),
+                )
+            }
+            None => {
+                let next = self.store.write_commit(message, tree, parent)?;
+                (
+                    next,
+                    Some(RefEdit::Create {
+                        name: reference.clone(),
+                        new: next,
+                    }),
+                )
+            }
+        };
+
+        Ok(PublishOutcome::Ready(ResolvedPublish {
+            id,
+            name,
+            commit,
+            edit,
+        }))
     }
 
     /// Publish a document under a name derived from its own publication
@@ -882,7 +935,7 @@ where
         }
     }
 
-    fn expectation_error(
+    pub(crate) fn expectation_error(
         &self,
         reference: &RefName,
         expectation: gix_refstore::Expectation,
@@ -904,25 +957,7 @@ where
     where
         O: Write,
     {
-        if entries.is_empty() {
-            return Ok(current.map(|expected| RefEdit::Delete {
-                name: index::reference(&self.name),
-                expected,
-            }));
-        }
-        let tree = index::write(self.store, entries)?;
-        Ok(Some(match current {
-            Some(expected) if expected == tree => return Ok(None),
-            Some(expected) => RefEdit::Update {
-                name: index::reference(&self.name),
-                expected,
-                new: tree,
-            },
-            None => RefEdit::Create {
-                name: index::reference(&self.name),
-                new: tree,
-            },
-        }))
+        index::edit(self.store, &self.name, current, entries)
     }
 
     /// The entity names published under this kind, ascending. Nesting is
