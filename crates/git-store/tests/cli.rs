@@ -415,13 +415,13 @@ fn hand_authored_schema_json_publishes_with_no_version_key() {
     let (_, err, ok) = run(path, Some(book_schema), &["schema", "put", "book"]);
     assert!(ok, "schema put failed: {err}");
 
-    let (out, err, ok) = run(path, None, &["schema", "get", "book"]);
-    assert!(ok, "schema get failed: {err}");
+    let (out, err, ok) = run(path, None, &["schema", "show", "book", "--json"]);
+    assert!(ok, "schema show --json failed: {err}");
     assert!(
         !out.contains("\"version\""),
-        "schema get output must carry no version key: {out}"
+        "schema show output must carry no version key: {out}"
     );
-    assert!(out.contains("\"kind\": \"book\""), "schema kind: {out}");
+    assert_eq!(json_string_field(&out, "kind"), "book");
 
     // And it accepts a conforming value, exactly as a schema published from
     // a `#[derive(Facet)]` type would.
@@ -482,12 +482,13 @@ fn schema_legacy_leaves_is_explicit_for_current_and_historical_reads() {
         "strict diagnostic: {err}"
     );
 
-    let (out, err, ok) = run(path, None, &["schema", "get", "recipe", "--legacy-leaves"]);
-    assert!(ok, "legacy schema get failed: {err}");
-    assert!(
-        out.contains("\"kind\": \"legacy-unknown\""),
-        "schema: {out}"
+    let (out, err, ok) = run(
+        path,
+        None,
+        &["schema", "get", "recipe", "--legacy-leaves", "--json"],
     );
+    assert!(ok, "legacy schema get failed: {err}");
+    assert_eq!(json_string_field(&out, "kind"), "legacy-unknown");
     assert!(out.contains("\"root\""), "schema: {out}");
     assert!(out.contains("\"defs\""), "schema: {out}");
 
@@ -733,8 +734,7 @@ fn custom_layout_drives_schema_data_compatibility_and_ref_filtering() {
     assert!(ok, "custom list failed: {err}");
     assert_eq!(out.trim(), "legacy");
 
-    let (out, err, ok) =
-        run_with_layout(path, None, data_prefix, schema_prefix, &["schema", "list"]);
+    let (out, err, ok) = run_with_layout(path, None, data_prefix, schema_prefix, &["ls"]);
     assert!(ok, "custom list failed: {err}");
     assert_eq!(out.trim(), "recipe");
 
@@ -1232,6 +1232,26 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
         "stale CAS: {stale_err}"
     );
 
+    // `entity delete` is id-addressed against the canonical (no-alias) ref;
+    // publishing under an alias only advances that alias, not the id ref
+    // (see `PublishOptions::with_alias`), so publish this document tree
+    // canonically too before addressing it by id.
+    let (_, err, ok) = run(
+        path,
+        None,
+        &[
+            "document",
+            "publish",
+            "recipe",
+            &document_tree,
+            "--expected",
+            "absent",
+            "--message",
+            "publish canonically",
+        ],
+    );
+    assert!(ok, "canonical document publish failed: {err}");
+
     let (deleted, err, ok) = run(
         path,
         None,
@@ -1239,7 +1259,7 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
             "entity",
             "delete",
             "recipe",
-            "carbonara",
+            &entity_id,
             "--format",
             "ndjson",
         ],
@@ -1249,7 +1269,7 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
     let (already, err, ok) = run(
         path,
         None,
-        &["entity", "delete", "recipe", "carbonara", "--json"],
+        &["entity", "delete", "recipe", &entity_id, "--json"],
     );
     assert!(ok, "repeated entity delete failed: {err}");
     assert_eq!(json_string_field(&already, "status"), "already_deleted");

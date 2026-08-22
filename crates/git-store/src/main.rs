@@ -31,9 +31,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use gix_store::{
-    ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityState, Expectation,
-    GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions, RefName, RefPath, RefPrefix,
-    RefSegment, RefStore, RepoStore, SchemaTree, ValueTree,
+    ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId, EntityState,
+    Expectation, GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions, RefName,
+    RefPath, RefPrefix, RefSegment, RefStore, RepoStore, SchemaTree, ValueTree,
 };
 
 /// A handle on one kind, over the CLI's own repo-backed store.
@@ -353,7 +353,9 @@ enum DocumentCommand {
 
 #[derive(Subcommand)]
 enum EntityCommand {
-    /// Publish a canonical tombstone for an entity id.
+    /// Publish a canonical tombstone for an entity, addressed by its
+    /// content-derived id — the document-tree hash `compile`/`put` print,
+    /// not a caller-chosen name. Use `rm` to delete by name.
     Delete { kind: String, entity_id: String },
 }
 
@@ -370,30 +372,41 @@ enum SchemaCommand {
         #[arg(short = 'i', long = "interactive", conflicts_with = "file")]
         interactive: bool,
     },
-    /// Print a kind's current or historical schema as JSON.
-    Get {
-        kind: String,
-        /// Address the schema publication commit directly.
+    /// Show a kind's schema: field layout as text, full schema record as
+    /// JSON. All kinds when `<kind>` is omitted; `--at` selects an explicit
+    /// historical publication commit instead of the current one (only valid
+    /// with a single `<kind>`).
+    Show {
+        kind: Option<String>,
+        /// Address a historical schema publication commit directly, instead
+        /// of the current one.
         #[arg(long)]
         at: Option<String>,
         /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
         #[arg(long)]
         legacy_leaves: bool,
     },
-    /// Inspect a schema publication commit directly.
+    /// Hidden alias for `schema show` with no kind.
+    #[command(hide = true)]
+    List,
+    /// Hidden alias for `schema show <kind>`.
+    #[command(hide = true)]
+    Get {
+        kind: String,
+        #[arg(long)]
+        at: Option<String>,
+        #[arg(long)]
+        legacy_leaves: bool,
+    },
+    /// Hidden alias for `schema show <kind> --at <rev>`.
+    #[command(hide = true)]
     Inspect {
         kind: String,
         #[arg(long)]
         at: String,
-        /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
         #[arg(long)]
         legacy_leaves: bool,
     },
-    /// Show a kind's field layout, human-readable (all kinds when omitted).
-    Show { kind: Option<String> },
-    /// List kinds that have a published schema.
-    #[command(visible_alias = "ls")]
-    List,
     /// Show a kind's schema evolution history, newest first.
     Log { kind: String },
 }
@@ -470,44 +483,39 @@ fn run() -> Result<()> {
                 fields.insert("commit", oid_value(commit));
                 emit_single(output, fields, || commit.to_string())?;
             }
+            SchemaCommand::Show {
+                kind,
+                at,
+                legacy_leaves,
+            } => schema_show(
+                &repo,
+                &store,
+                kind.as_deref(),
+                at.as_deref(),
+                legacy_leaves,
+                output,
+            )?,
+            // Hidden aliases: `get`/`inspect` were `show`'s json-format and
+            // `--at` modifiers, respectively, before this move; `list` was
+            // `show` with no kind, since both walked `store.kinds()`.
             SchemaCommand::Get {
                 kind,
                 at,
                 legacy_leaves,
-            } => {
-                let handle = store.dynamic(segment("kind", &kind)?);
-                let snapshot = match at {
-                    Some(at) => {
-                        let commit = resolve_commit(&repo, &at)?;
-                        if legacy_leaves {
-                            handle.schema().snapshot_at_legacy(commit)?
-                        } else {
-                            handle.schema().snapshot_at(commit)?
-                        }
-                    }
-                    None => {
-                        if legacy_leaves {
-                            handle.schema().current_snapshot_legacy()?
-                        } else {
-                            handle.schema().current_snapshot()?
-                        }
-                    }
-                };
-                if output.machine() {
-                    emit_record(output, schema_record(&snapshot)?)?;
-                } else {
-                    println!("{}", to_json(&snapshot.schema)?);
-                }
-            }
+            } => schema_show(
+                &repo,
+                &store,
+                Some(&kind),
+                at.as_deref(),
+                legacy_leaves,
+                output,
+            )?,
             SchemaCommand::Inspect {
                 kind,
                 at,
                 legacy_leaves,
-            } => {
-                schema_inspect(&repo, &store, &kind, &at, legacy_leaves, output)?;
-            }
-            SchemaCommand::Show { kind } => schema_show(&store, kind.as_deref(), output)?,
-            SchemaCommand::List => list_kinds(&store, output)?,
+            } => schema_show(&repo, &store, Some(&kind), Some(&at), legacy_leaves, output)?,
+            SchemaCommand::List => schema_show(&repo, &store, None, None, false, output)?,
             SchemaCommand::Log { kind } => log_commits(
                 &repo,
                 store.dynamic(segment("kind", &kind)?).schema().history()?,
@@ -790,44 +798,19 @@ fn resolve_schema_tree(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
     resolve_tree(repo, spec)
 }
 
-fn schema_record(snapshot: &gix_store::SchemaSnapshot) -> Result<VObject> {
+/// The bare (no `status`/`code`) machine fields for one schema snapshot,
+/// shared by [`schema_show`]'s single-kind path.
+fn schema_fields(snapshot: &gix_store::SchemaSnapshot) -> Result<VObject> {
     let schema_json = facet_json::to_string(&snapshot.schema)
         .map_err(|e| anyhow::anyhow!("encoding schema JSON: {e}"))?;
     let schema: Value = facet_json::from_str(&schema_json)
         .map_err(|e| anyhow::anyhow!("encoding schema JSON: {e}"))?;
-    let mut record = json_record();
-    record.insert("kind", snapshot.schema.kind.clone());
-    record.insert("commit", oid_value(snapshot.commit));
-    record.insert("schema_tree", oid_value(snapshot.schema_tree));
-    record.insert("schema", schema);
-    Ok(record)
-}
-
-fn schema_inspect(
-    repo: &gix::Repository,
-    store: &RepoStore<'_>,
-    kind: &str,
-    at: &str,
-    legacy_leaves: bool,
-    format: OutputFormat,
-) -> Result<()> {
-    let segment = segment("kind", kind)?;
-    let commit = resolve_commit(repo, at)?;
-    let schema = store.dynamic(segment).schema();
-    let snapshot = if legacy_leaves {
-        schema.snapshot_at_legacy(commit)?
-    } else {
-        schema.snapshot_at(commit)?
-    };
-    if format.machine() {
-        emit_record(format, schema_record(&snapshot)?)
-    } else {
-        println!("kind: {}", snapshot.schema.kind);
-        println!("commit: {}", snapshot.commit);
-        println!("schema tree: {}", snapshot.schema_tree);
-        println!("{}", type_layout(kind, &snapshot.schema));
-        Ok(())
-    }
+    let mut fields = VObject::new();
+    fields.insert("kind", snapshot.schema.kind.clone());
+    fields.insert("commit", oid_value(snapshot.commit));
+    fields.insert("schema_tree", oid_value(snapshot.schema_tree));
+    fields.insert("schema", schema);
+    Ok(fields)
 }
 
 fn layout_from_cli(data: &str, schema: &str) -> Result<Layout> {
@@ -1216,42 +1199,23 @@ fn emit_publication(format: OutputFormat, kind: &str, publication: Publication) 
     emit_single(format, fields, || format!("{id}\n{commit}"))
 }
 
+/// `entity delete <kind> <entity-id>`: publish a tombstone at the id's
+/// canonical ref, genuinely id-addressed — unlike `rm`, which resolves a
+/// caller-chosen name.
 fn entity_delete(
     store: &RepoStore<'_>,
     kind: &str,
-    entity_text: &str,
+    entity_id: &str,
     format: OutputFormat,
 ) -> Result<()> {
-    // Names are application policy: an entity may be published under a
-    // content-derived id or any other path, and either addresses it here.
-    let name = entity(entity_text)?;
-    let result = store.dynamic(segment("kind", kind)?).delete_name(&name)?;
-    let (status, code, commit) = match result {
-        DeleteResult::Deleted(entry) => ("deleted", "deleted", Some(entry.commit)),
-        DeleteResult::AlreadyDeleted(entry) => {
-            ("already_deleted", "already_deleted", Some(entry.commit))
-        }
-        DeleteResult::Absent => {
-            return Err(cli_error(
-                ExitClass::NotFound,
-                format!("no entity {kind}/{entity_text}"),
-            ));
-        }
-    };
-    if format.machine() {
-        let mut record = json_record();
-        record.insert("status", status);
-        record.insert("code", code);
-        record.insert("kind", kind);
-        record.insert("id", entity_text.to_owned());
-        if let Some(commit) = commit {
-            record.insert("commit", oid_value(commit));
-        }
-        emit_record(format, record)
-    } else {
-        println!("{status} {kind}/{entity_text}");
-        Ok(())
-    }
+    let id: EntityId = entity_id.parse().with_context(|| {
+        cli_context(
+            ExitClass::Invalid,
+            format!("invalid entity id {entity_id:?}"),
+        )
+    })?;
+    let result = store.dynamic(segment("kind", kind)?).delete_entity(id)?;
+    emit_deletion(format, kind, entity_id, result)
 }
 
 /// Validate a CLI argument as a [`RefSegment`], with context naming which
@@ -1633,15 +1597,66 @@ fn emit_deletion(
     emit_single(format, fields, || text)
 }
 
-/// `schema show [<kind>]`: field layout, human-readable, of one kind or every
-/// published kind.
-fn schema_show(store: &RepoStore<'_>, kind: Option<&str>, format: OutputFormat) -> Result<()> {
-    let kinds = match kind {
-        Some(kind) => vec![segment("kind", kind)?],
-        None => store.kinds()?,
+/// `schema show [<kind>] [--at <rev>]`: one verb for reading a kind's
+/// schema. With no `<kind>`, every published kind's field layout
+/// (`--at` is invalid here — there is no single kind to select a revision
+/// of). With `<kind>` and no `--at`, the current schema. With both, the
+/// schema at that historical publication commit. Text renders the field
+/// layout (plus, with `--at`, the commit and schema-tree ids); `json`/
+/// `ndjson` render the full schema record.
+fn schema_show(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    kind: Option<&str>,
+    at: Option<&str>,
+    legacy_leaves: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    let Some(kind) = kind else {
+        if at.is_some() {
+            return Err(cli_error(
+                ExitClass::Invalid,
+                "--at requires a single <kind>",
+            ));
+        }
+        return schema_show_all(store, format);
     };
+    let handle = store.dynamic(segment("kind", kind)?);
+    let snapshot = match at {
+        Some(at) => {
+            let commit = resolve_commit(repo, at)?;
+            if legacy_leaves {
+                handle.schema().snapshot_at_legacy(commit)?
+            } else {
+                handle.schema().snapshot_at(commit)?
+            }
+        }
+        None => {
+            if legacy_leaves {
+                handle.schema().current_snapshot_legacy()?
+            } else {
+                handle.schema().current_snapshot()?
+            }
+        }
+    };
+    let fields = schema_fields(&snapshot)?;
+    emit_single(format, fields, || {
+        let mut text = String::new();
+        if at.is_some() {
+            text.push_str(&format!(
+                "kind: {}\ncommit: {}\nschema tree: {}\n",
+                snapshot.schema.kind, snapshot.commit, snapshot.schema_tree
+            ));
+        }
+        text.push_str(&type_layout(kind, &snapshot.schema));
+        text
+    })
+}
+
+/// `schema show` with no kind: every published kind's field layout.
+fn schema_show_all(store: &RepoStore<'_>, format: OutputFormat) -> Result<()> {
     let mut items = Vec::new();
-    for seg in kinds {
+    for seg in store.kinds()? {
         let handle = store.dynamic(seg);
         let Some(doc) = handle.schema().get()? else {
             continue;
