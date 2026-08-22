@@ -109,7 +109,7 @@ fn custom_layout_lands_refs_under_the_custom_namespace() {
 /// never had it — must still read back. Before subtree binding, the schema
 /// commit was only named in a `Schema:` trailer, unreachable from the data
 /// commit, so a real `git fetch` of just the data ref left it looking present
-/// (`git ls-tree` works) but unreadable (`Kind::get_at` fails looking up an
+/// (`git ls-tree` works) but unreadable (`Kind::read` fails looking up an
 /// object nothing brought along). The fix makes the schema part of the data
 /// commit's own tree, so ordinary tree reachability — which `git fetch`
 /// already respects — carries it along for free.
@@ -167,7 +167,9 @@ fn fetched_data_ref_reads_back_without_any_schema_ref() {
     assert_eq!(
         consumer_store
             .dynamic(seg("recipe"))
-            .get_at(commit)
+            .read(commit)
+            .unwrap()
+            .value()
             .unwrap(),
         carbonara
     );
@@ -175,8 +177,9 @@ fn fetched_data_ref_reads_back_without_any_schema_ref() {
     assert_eq!(
         consumer_store
             .dynamic(seg("recipe"))
-            .get(&entity("carbonara"))
-            .unwrap(),
+            .read(entity("carbonara"))
+            .unwrap()
+            .value(),
         Some(carbonara)
     );
 }
@@ -229,7 +232,7 @@ fn fetched_tombstone_is_deleted_without_schema_ref_or_index() {
 
     match RepoStore::open(&consumer)
         .dynamic(seg("counter"))
-        .read_entity(id)
+        .read(id)
         .unwrap()
     {
         EntityState::Deleted(entry) => {
@@ -349,7 +352,12 @@ fn concurrent_writers_land_a_linear_history() {
     let stored: HashSet<u32> = history
         .iter()
         .map(|&id| {
-            let v = store.dynamic(seg("counter")).get_at(id).unwrap();
+            let v = store
+                .dynamic(seg("counter"))
+                .read(id)
+                .unwrap()
+                .value()
+                .unwrap();
             v.as_object()
                 .unwrap()
                 .get("n")

@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! End-to-end [`Store`] behavior against [`MemoryRefStore`] and
 //! [`facet_git_tree::ObjectStore`] — no filesystem, no temp-dir repository.
 //! What genuinely needs a real `gix` repository (on-disk ref layout, a real
@@ -16,8 +15,8 @@ use facet_git_tree::{
 };
 use facet_value::value;
 use gix::bstr::ByteSlice;
-use gix_refstore::RefEdit;
 use gix::objs::Write as _;
+use gix_refstore::RefEdit;
 use gix_store::{
     ApplyError, At, Committer, Compat, DeleteResult, DocumentInspection, DocumentKind,
     DocumentShapeError, DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore,
@@ -304,15 +303,17 @@ fn store_retrieve_list_and_schema_roundtrip() {
     assert_eq!(
         store
             .dynamic(seg("recipe"))
-            .get(&entity("carbonara"))
-            .unwrap(),
+            .read(entity("carbonara"))
+            .unwrap()
+            .value(),
         Some(carbonara)
     );
     assert_eq!(
         store
             .dynamic(seg("recipe"))
-            .get(&entity("missing"))
-            .unwrap(),
+            .read(entity("missing"))
+            .unwrap()
+            .value(),
         None
     );
     assert_eq!(
@@ -357,7 +358,7 @@ fn entities_nest_under_a_single_kind_and_schema() {
         "refs/store/note/dead/one"
     );
     assert_eq!(
-        note.get(&entity("dead/one")).unwrap(),
+        note.read(entity("dead/one")).unwrap().value(),
         Some(value!({ "n": 1 }))
     );
     assert!(note.remove(&entity("dead/one")).unwrap());
@@ -411,7 +412,11 @@ fn old_versions_stay_readable_after_schema_evolves() {
     let v2 = value!({ "name": "new", "rank": 1 });
     store.dynamic(seg("thing")).put(&entity("b"), &v2).unwrap();
     assert_eq!(
-        store.dynamic(seg("thing")).get(&entity("b")).unwrap(),
+        store
+            .dynamic(seg("thing"))
+            .read(entity("b"))
+            .unwrap()
+            .value(),
         Some(v2)
     );
 
@@ -432,7 +437,15 @@ fn old_versions_stay_readable_after_schema_evolves() {
     // The old commit reads back through its own `schema/` subtree, even when
     // the current schema publication ref is unavailable.
     assert_eq!(store.dynamic(seg("thing")).schema().get().unwrap(), None);
-    assert_eq!(store.dynamic(seg("thing")).get_at(old_commit).unwrap(), v1);
+    assert_eq!(
+        store
+            .dynamic(seg("thing"))
+            .read(old_commit)
+            .unwrap()
+            .value()
+            .unwrap(),
+        v1
+    );
 
     let document_tree = match store.objects().get(&old_commit).unwrap() {
         GitObject::Commit(commit) => commit.tree,
@@ -471,8 +484,8 @@ fn explicit_target_migration_uses_captured_schema_history() {
         kind.schema().history().unwrap(),
     );
     assert_eq!(
-        kind.get_at_migrated_to(old, &target).unwrap(),
-        value!({ "n": 1, "label": "migrated" })
+        kind.read_as(old, &target).unwrap().value(),
+        Some(value!({ "n": 1, "label": "migrated" }))
     );
 
     // The explicit target is self-contained. The live schema ref may disappear
@@ -487,12 +500,12 @@ fn explicit_target_migration_uses_captured_schema_history() {
         })
         .unwrap();
     assert_eq!(
-        kind.get_at_migrated_to(old, &target).unwrap(),
-        value!({ "n": 1, "label": "migrated" })
+        kind.read_as(old, &target).unwrap().value(),
+        Some(value!({ "n": 1, "label": "migrated" }))
     );
 
     let unavailable = TargetSchema::new(target.schema().clone(), vec![target.history()[0]]);
-    let err = kind.get_at_migrated_to(old, &unavailable).unwrap_err();
+    let err = kind.read_as(old, &unavailable).unwrap_err();
     assert!(
         matches!(err, Error::TargetSchemaNotInHistory { .. }),
         "expected an explicit target-history error, got {err:?}"
@@ -606,7 +619,7 @@ fn tombstone_migrated_read_bypasses_an_unavailable_target() {
         .unwrap();
 
     assert!(matches!(
-        kind.read_at_migrated_to(tombstone, &target).unwrap(),
+        kind.read_as(tombstone, &target).unwrap(),
         EntityState::Deleted(entry) if entry.commit == tombstone
     ));
 }
@@ -650,7 +663,11 @@ fn custom_layout_roundtrips_store_retrieve_and_history() {
         .unwrap();
 
     assert_eq!(
-        store.dynamic(seg("module")).get(&entity("a")).unwrap(),
+        store
+            .dynamic(seg("module"))
+            .read(entity("a"))
+            .unwrap()
+            .value(),
         Some(value!({ "n": 2 }))
     );
     assert_eq!(
@@ -742,7 +759,7 @@ fn legacy_schema_and_provenance_trailers_are_ignored() {
         commit.tree,
         None,
     );
-    assert_eq!(kind.get_at(legacy).unwrap(), value);
+    assert_eq!(kind.read(legacy).unwrap().value().unwrap(), value);
 }
 
 /// A commit whose tree is not the `{schema/, value/}` split — anything not
@@ -768,7 +785,7 @@ fn retrieve_at_reports_a_commit_that_is_not_subtree_bound() {
         None,
     );
 
-    let err = store.dynamic(seg("x")).get_at(bogus).unwrap_err();
+    let err = store.dynamic(seg("x")).read(bogus).unwrap_err();
     assert!(
         matches!(
             err,
@@ -803,7 +820,7 @@ fn a_pre_binding_commit_whose_value_has_value_and_schema_fields_is_not_mistaken_
         None,
     );
 
-    let err = store.dynamic(seg("colliding")).get_at(old).unwrap_err();
+    let err = store.dynamic(seg("colliding")).read(old).unwrap_err();
     assert!(
         matches!(
             err,
@@ -818,7 +835,11 @@ fn a_pre_binding_commit_whose_value_has_value_and_schema_fields_is_not_mistaken_
         .put(&entity("new"), &colliding)
         .expect("store colliding value");
     assert_eq!(
-        store.dynamic(seg("colliding")).get(&entity("new")).unwrap(),
+        store
+            .dynamic(seg("colliding"))
+            .read(entity("new"))
+            .unwrap()
+            .value(),
         Some(colliding)
     );
 }
@@ -877,7 +898,7 @@ fn retrieve_at_reports_a_subtree_object_that_is_not_present() {
         None,
     );
 
-    let err = store.dynamic(seg("counter")).get_at(severed).unwrap_err();
+    let err = store.dynamic(seg("counter")).read(severed).unwrap_err();
     assert!(
         matches!(
             err,
@@ -926,14 +947,20 @@ fn store_anonymous_binds_the_schema_by_subtree() {
     );
     // And self-contained: readable with no consultation of refs/schema/*.
     assert_eq!(
-        store.dynamic(seg("counter")).get_at(commit).unwrap(),
+        store
+            .dynamic(seg("counter"))
+            .read(commit)
+            .unwrap()
+            .value()
+            .unwrap(),
         counter
     );
     assert_eq!(
         store
             .dynamic(seg("counter"))
-            .get(&entity_name(commit))
-            .unwrap(),
+            .read(entity_name(commit))
+            .unwrap()
+            .value(),
         Some(counter)
     );
 }
@@ -960,7 +987,12 @@ fn delete_name_tombstones_the_name_and_retains_its_history() {
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let name = entity("legacy/history");
     kind.put(&name, &value!({ "n": 1 })).unwrap();
-    let first_commit = kind.get_entry(&name).unwrap().unwrap().commit;
+    let first_commit = kind
+        .read(&name)
+        .map(|state| state.present())
+        .unwrap()
+        .unwrap()
+        .commit;
     kind.put(&name, &value!({ "n": 2 })).unwrap();
 
     assert_eq!(kind.list().unwrap(), vec![name.clone()]);
@@ -976,7 +1008,10 @@ fn delete_name_tombstones_the_name_and_retains_its_history() {
     assert!(kind.list().unwrap().is_empty());
     // Deletion publishes over the name rather than pruning it, so every
     // earlier publication stays reachable.
-    assert_eq!(kind.get_at(first_commit).unwrap(), value!({ "n": 1 }));
+    assert_eq!(
+        kind.read(first_commit).unwrap().value().unwrap(),
+        value!({ "n": 1 })
+    );
     assert_eq!(kind.history(&name).unwrap().len(), 3);
 
     match kind.delete_name(&name).unwrap() {
@@ -1026,7 +1061,7 @@ fn deleting_one_name_leaves_other_names_for_the_same_content_alone() {
     ));
     // Names are independent: what one name means is not what another means,
     // even when both currently address identical content.
-    assert_eq!(kind.get(&second).unwrap(), Some(value));
+    assert_eq!(kind.read(&second).unwrap().value(), Some(value));
     assert_eq!(kind.list().unwrap(), vec![second]);
 }
 #[test]
@@ -1036,9 +1071,19 @@ fn delete_name_tombstones_a_rewound_name_from_its_current_target() {
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let name = entity("legacy/history");
     kind.put(&name, &value!({ "n": 1 })).unwrap();
-    let first_commit = kind.get_entry(&name).unwrap().unwrap().commit;
+    let first_commit = kind
+        .read(&name)
+        .map(|state| state.present())
+        .unwrap()
+        .unwrap()
+        .commit;
     kind.put(&name, &value!({ "n": 2 })).unwrap();
-    let second_commit = kind.get_entry(&name).unwrap().unwrap().commit;
+    let second_commit = kind
+        .read(&name)
+        .map(|state| state.present())
+        .unwrap()
+        .unwrap()
+        .commit;
 
     // Simulate a fetched or rewound ref that still names the historical
     // publication.
@@ -1083,7 +1128,8 @@ fn ordinary_reads_and_canonical_recognition_reject_cross_kind_documents() {
         .unwrap();
     let foreign_id = foreign.put_entity(&value!({ "n": 1 })).unwrap();
     let foreign_commit = foreign
-        .get_entry_entity(foreign_id)
+        .read(foreign_id)
+        .map(|state| state.present())
         .unwrap()
         .unwrap()
         .commit;
@@ -1097,7 +1143,7 @@ fn ordinary_reads_and_canonical_recognition_reject_cross_kind_documents() {
         })
         .unwrap();
     assert!(matches!(
-        counter.get(&entity("out-of-band")),
+        counter.read(entity("out-of-band")),
         Err(Error::KindMismatch { .. })
     ));
 
@@ -1152,7 +1198,11 @@ fn delete_removes_an_entity() {
 
     assert!(store.dynamic(seg("counter")).remove(&entity("c")).unwrap());
     assert_eq!(
-        store.dynamic(seg("counter")).get(&entity("c")).unwrap(),
+        store
+            .dynamic(seg("counter"))
+            .read(entity("c"))
+            .unwrap()
+            .value(),
         None
     );
     assert!(!store.dynamic(seg("counter")).remove(&entity("c")).unwrap());
@@ -1165,7 +1215,12 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let value = value!({ "n": 1 });
     let id = kind.put_entity(&value).unwrap();
-    let live_commit = kind.get_entry_entity(id).unwrap().unwrap().commit;
+    let live_commit = kind
+        .read(id)
+        .map(|state| state.present())
+        .unwrap()
+        .unwrap()
+        .commit;
 
     let deleted = kind.delete_entity(id).unwrap();
     let tombstone_commit = match &deleted {
@@ -1173,7 +1228,7 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
         other => panic!("expected a new tombstone, got {other:?}"),
     };
     assert_ne!(tombstone_commit, live_commit);
-    match kind.read_entity(id).unwrap() {
+    match kind.read(id).unwrap() {
         EntityState::Deleted(entry) => {
             assert_eq!(entry.commit, tombstone_commit);
             assert_eq!(entry.tombstone.entity_id(), Some(id));
@@ -1181,7 +1236,7 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
         }
         other => panic!("expected deleted state, got {other:?}"),
     }
-    assert_eq!(kind.get_entity(id).unwrap(), None);
+    assert_eq!(kind.read(id).map(|state| state.value()).unwrap(), None);
     assert!(kind.list().unwrap().is_empty());
     assert_eq!(
         kind.list_entries().unwrap(),
@@ -1190,6 +1245,7 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
 
     // The migrated reader classifies the embedded tombstone before looking
     // for schema history, so deleting the schema ref does not affect it.
+    let target = kind.schema().current_target().unwrap();
     let schema_ref = RefName::new("refs/schema/counter").unwrap();
     let schema_tip = store.refs().read(&schema_ref).unwrap().unwrap();
     store
@@ -1200,7 +1256,7 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
         })
         .unwrap();
     assert!(matches!(
-        kind.read_migrated(&entity_id_name(id)).unwrap(),
+        kind.read_as(entity_id_name(id), &target).unwrap(),
         EntityState::Deleted(_)
     ));
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
@@ -1213,7 +1269,7 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
     // The same complete document identity can be explicitly restored. A new
     // publication commit replaces the tombstone and retains its history.
     assert_eq!(kind.put_entity(&value).unwrap(), id);
-    match kind.read_entity(id).unwrap() {
+    match kind.read(id).unwrap() {
         EntityState::Present(entry) => {
             assert_eq!(entry.value, value);
             assert_ne!(entry.commit, tombstone_commit);
@@ -1265,7 +1321,7 @@ fn hard_deleted_canonical_refs_remain_absent_not_deleted() {
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let id = kind.put_entity(&value!({ "n": 1 })).unwrap();
     assert!(kind.remove(&entity_id_name(id)).unwrap());
-    assert!(matches!(kind.read_entity(id).unwrap(), EntityState::Absent));
+    assert!(matches!(kind.read(id).unwrap(), EntityState::Absent));
     assert!(matches!(
         kind.delete_entity(id).unwrap(),
         DeleteResult::Absent
@@ -1287,7 +1343,10 @@ fn typed_kind_publish_put_get_roundtrips_a_real_value() {
     };
     recipe.put(&entity("carbonara"), &carbonara).unwrap();
 
-    assert_eq!(recipe.get(&entity("carbonara")).unwrap(), Some(carbonara));
+    assert_eq!(
+        recipe.read(entity("carbonara")).unwrap().value(),
+        Some(carbonara)
+    );
 }
 
 /// The native `Typed` encoding and the schema-directed `Dynamic` one are
@@ -1313,7 +1372,11 @@ fn typed_and_dynamic_kinds_interoperate_over_the_same_refs() {
         .put(&entity("a"), &carbonara)
         .unwrap();
     assert_eq!(
-        store.dynamic(seg("recipe")).get(&entity("a")).unwrap(),
+        store
+            .dynamic(seg("recipe"))
+            .read(entity("a"))
+            .unwrap()
+            .value(),
         Some(carbonara_value.clone())
     );
 
@@ -1325,8 +1388,9 @@ fn typed_and_dynamic_kinds_interoperate_over_the_same_refs() {
     assert_eq!(
         store
             .kind::<Recipe>(seg("recipe"))
-            .get(&entity("b"))
-            .unwrap(),
+            .read(entity("b"))
+            .unwrap()
+            .value(),
         Some(carbonara.clone())
     );
 
@@ -1418,13 +1482,13 @@ fn put_message_rejects_reserved_schema_and_provenance_trailers() {
     }
 }
 
-/// [`gix_store::Kind::get_entry`]/[`gix_store::Kind::get_entry_at`]: the
-/// returned [`Entry`] names the exact commit the value came from — the same
+/// [`gix_store::EntityState::present`]: the returned [`Entry`] names the exact
+/// commit the value came from — the same
 /// one [`gix_store::Kind::history`] reports as the tip — and carries that
 /// commit's summary, both for a default message and for one set through
 /// [`gix_store::kind::Put::message`].
 #[test]
-fn get_entry_carries_the_commit_and_message_the_value_was_written_with() {
+fn a_read_entry_carries_the_commit_and_message_it_was_written_with() {
     let store = store();
     store
         .dynamic(seg("counter"))
@@ -1449,8 +1513,9 @@ fn get_entry_carries_the_commit_and_message_the_value_was_written_with() {
         message,
     } = store
         .dynamic(seg("counter"))
-        .get_entry(&entity("c"))
+        .read(entity("c"))
         .unwrap()
+        .present()
         .expect("entity was written");
     assert_eq!(value, value!({ "n": 2 }));
     assert_eq!(commit, second);
@@ -1458,12 +1523,17 @@ fn get_entry_carries_the_commit_and_message_the_value_was_written_with() {
     assert_eq!(
         store.dynamic(seg("counter")).history(&entity("c")).unwrap()[0],
         commit,
-        "get_entry's commit must be the same tip history() reports"
+        "the read entry's commit must be the same tip history() reports"
     );
 
-    // The earlier commit reads back through get_entry_at with its own
-    // default-summary message, distinct from the tip's.
-    let earlier = store.dynamic(seg("counter")).get_entry_at(first).unwrap();
+    // The earlier commit reads back with its own default-summary message,
+    // distinct from the tip's.
+    let earlier = store
+        .dynamic(seg("counter"))
+        .read(first)
+        .unwrap()
+        .present()
+        .expect("the commit holds a value");
     assert_eq!(earlier.value, value!({ "n": 1 }));
     assert_eq!(earlier.commit, first);
     assert_eq!(earlier.message, "store counter/c");
@@ -1471,7 +1541,7 @@ fn get_entry_carries_the_commit_and_message_the_value_was_written_with() {
 
 /// [`gix_store::kind::Put::anonymous`] derives the canonical entity ref from
 /// the complete document tree, so writing identical content twice is
-/// idempotent even though the compatibility API returns a commit id.
+/// idempotent even though it returns a commit id.
 /// Identity is derived from the bound frame, so the same content published
 /// under two names has one id and two independent refs.
 #[test]
@@ -1497,8 +1567,11 @@ fn content_identity_is_shared_across_names() {
         kind.list().unwrap(),
         vec![entity("first"), entity("second")]
     );
-    assert_eq!(kind.get(&entity("first")).unwrap(), Some(value.clone()));
-    assert_eq!(kind.get(&entity("second")).unwrap(), Some(value));
+    assert_eq!(
+        kind.read(entity("first")).unwrap().value(),
+        Some(value.clone())
+    );
+    assert_eq!(kind.read(entity("second")).unwrap().value(), Some(value));
 }
 #[test]
 fn schema_changes_change_the_entity_id_even_for_the_same_value() {
@@ -1541,9 +1614,19 @@ fn republishing_identical_content_under_a_name_is_idempotent() {
     let name = entity("one");
 
     kind.write(&value).message("one").at(&name).unwrap();
-    let first_commit = kind.get_entry(&name).unwrap().unwrap().commit;
+    let first_commit = kind
+        .read(&name)
+        .map(|state| state.present())
+        .unwrap()
+        .unwrap()
+        .commit;
     kind.write(&value).message("two").at(&name).unwrap();
-    let second_commit = kind.get_entry(&name).unwrap().unwrap().commit;
+    let second_commit = kind
+        .read(&name)
+        .map(|state| state.present())
+        .unwrap()
+        .unwrap()
+        .commit;
 
     // New metadata over unchanged content does not manufacture a commit.
     assert_eq!(first_commit, second_commit);
@@ -1707,7 +1790,12 @@ fn delete_retries_over_a_concurrent_update_and_keeps_the_winner_in_history() {
     let counter = store.kind::<Counter>(seg("counter"));
     counter.publish().unwrap();
     let id = counter.put_entity(&Counter { n: 1 }).unwrap();
-    let original = counter.get_entry_entity(id).unwrap().unwrap().commit;
+    let original = counter
+        .read(id)
+        .map(|state| state.present())
+        .unwrap()
+        .unwrap()
+        .commit;
 
     let gix::objs::Object::Commit(original_object) = store.objects().get(&original).unwrap() else {
         panic!("expected a commit");
@@ -1738,10 +1826,7 @@ fn delete_retries_over_a_concurrent_update_and_keeps_the_winner_in_history() {
         counter.history(&entity_id_name(id)).unwrap(),
         vec![deleted, winner, original]
     );
-    assert!(matches!(
-        counter.read_entity(id).unwrap(),
-        EntityState::Deleted(_)
-    ));
+    assert!(matches!(counter.read(id).unwrap(), EntityState::Deleted(_)));
 }
 
 /// [`Kind::update`]'s whole reason to exist: `rebuild` must see the entry
@@ -1782,7 +1867,7 @@ fn update_rebuilds_from_the_entry_the_retry_actually_commits_over() {
         .unwrap();
 
     assert_eq!(
-        counter.get_at(commit).unwrap(),
+        counter.read(commit).unwrap().value().unwrap(),
         Counter { n: 51 },
         "rebuilt off the race winner's n=50, not the stale n=1 read before the race"
     );
@@ -1827,7 +1912,7 @@ fn try_update_lets_rebuild_refuse_an_absent_entry() {
 
     assert!(matches!(refused, Err(Refusal::Absent)));
     assert_eq!(
-        counter.get(&entity("missing")).unwrap(),
+        counter.read(entity("missing")).unwrap().value(),
         None,
         "a refused rebuild writes no ref"
     );
@@ -1853,7 +1938,12 @@ fn anonymous_retries_to_success_on_pure_contention() {
         .anonymous()
         .unwrap();
     assert_eq!(
-        store.dynamic(seg("counter")).get_at(commit).unwrap(),
+        store
+            .dynamic(seg("counter"))
+            .read(commit)
+            .unwrap()
+            .value()
+            .unwrap(),
         value!({ "n": 1 })
     );
 }
@@ -2073,7 +2163,7 @@ fn put_schema_still_republishes_over_an_unpinned_tip() {
 /// value/}`) precisely so a fetched value stays readable where its kind was
 /// never published — which makes the data path the one that most needs this
 /// gate, and the one a reader in another repository actually travels.
-/// `get_at` resolves `schema/` through the same pin-checked `read_pinned` as
+/// `read` resolves `schema/` through the same pin-checked `read_pinned` as
 /// everything else; without this test, a refactor inlining a plain
 /// deserialize there would drop the gate on exactly that path and leave the
 /// rest of the suite green.
@@ -2096,8 +2186,9 @@ fn an_unrecognized_pin_in_a_data_commits_schema_subtree_is_refused_on_retrieve()
     assert_eq!(
         store
             .dynamic(seg("recipe"))
-            .get(&entity("carbonara"))
-            .unwrap(),
+            .read(entity("carbonara"))
+            .unwrap()
+            .value(),
         Some(carbonara)
     );
 
@@ -2142,7 +2233,7 @@ fn an_unrecognized_pin_in_a_data_commits_schema_subtree_is_refused_on_retrieve()
 
     let err = store
         .dynamic(seg("recipe"))
-        .get(&entity("carbonara"))
+        .read(entity("carbonara"))
         .unwrap_err();
     assert!(
         matches!(
@@ -2208,12 +2299,15 @@ fn an_old_value_upcasts_to_the_current_schema() {
 
     // Reading under the value's own bound schema is unchanged...
     assert_eq!(
-        thing().get(&entity("a")).unwrap(),
+        thing().read(entity("a")).unwrap().value(),
         Some(value!({ "name": "old" }))
     );
     // ...and reading it as the current schema fills the added field.
     assert_eq!(
-        thing().get_migrated(&entity("a")).unwrap(),
+        thing()
+            .read_as(entity("a"), &thing().schema().current_target().unwrap())
+            .unwrap()
+            .value(),
         Some(value!({ "name": "old", "rank": 0 }))
     );
 }
@@ -2238,7 +2332,9 @@ fn upcasting_leaves_the_stored_value_untouched() {
         .schema()
         .write(&schema_of::<v2::Thing>().unwrap(), &rank_defaulted())
         .unwrap();
-    thing().get_migrated(&entity("a")).unwrap();
+    thing()
+        .read_as(entity("a"), &thing().schema().current_target().unwrap())
+        .unwrap();
 
     assert_eq!(
         before,
@@ -2270,10 +2366,9 @@ fn a_foreign_schema_tree_has_no_chain() {
         .put(&schema_of::<v2::Thing>().unwrap())
         .unwrap();
 
-    let err = store
-        .dynamic(seg("other"))
-        .get_at_migrated(commit)
-        .unwrap_err();
+    let other = store.dynamic(seg("other"));
+    let target = other.schema().current_target().unwrap();
+    let err = other.read_as(commit, &target).unwrap_err();
     assert!(matches!(err, Error::KindMismatch { .. }), "{err:?}");
 }
 
@@ -2304,8 +2399,14 @@ fn transaction_publishes_two_entities_across_kinds_atomically() {
         .unwrap();
 
     assert_eq!(publications.len(), 2);
-    assert_eq!(a.read(publications[0].entity_id()).unwrap().value(), Some(value!({ "n": 1 })));
-    assert_eq!(b.read(publications[1].entity_id()).unwrap().value(), Some(value!({ "n": 2 })));
+    assert_eq!(
+        a.read(publications[0].entity_id()).unwrap().value(),
+        Some(value!({ "n": 1 }))
+    );
+    assert_eq!(
+        b.read(publications[1].entity_id()).unwrap().value(),
+        Some(value!({ "n": 2 }))
+    );
     // The materialized index for each kind reflects the transaction too, not
     // just the entity ref itself.
     assert_eq!(a.list_entries().unwrap().len(), 1);
@@ -2383,7 +2484,10 @@ fn compat_strict_is_the_default_and_rejects_pre_newline_leaves() {
     let legacy_value_tree = strip_leaf_newlines(store.objects(), ordinary.object_id());
 
     let err = store
-        .decode_value(ValueTree::from(legacy_value_tree), SchemaTree::from(schema_tree))
+        .decode_value(
+            ValueTree::from(legacy_value_tree),
+            SchemaTree::from(schema_tree),
+        )
         .unwrap_err();
     assert!(matches!(err, Error::SchemaRead(_)), "{err:?}");
 }
@@ -2403,7 +2507,10 @@ fn compat_legacy_leaves_accepts_what_strict_rejects() {
     let store = store.with_compat(Compat::LegacyLeaves);
     assert_eq!(
         store
-            .decode_value(ValueTree::from(legacy_value_tree), SchemaTree::from(schema_tree))
+            .decode_value(
+                ValueTree::from(legacy_value_tree),
+                SchemaTree::from(schema_tree)
+            )
             .unwrap(),
         value!({ "n": 7 })
     );

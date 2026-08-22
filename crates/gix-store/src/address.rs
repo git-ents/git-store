@@ -41,3 +41,9 @@ impl From<ObjectId> for At {
         At::Commit(commit)
     }
 }
+
+impl From<&RefPath> for At {
+    fn from(name: &RefPath) -> Self {
+        At::Name(name.clone())
+    }
+}

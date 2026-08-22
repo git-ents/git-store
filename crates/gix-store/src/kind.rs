@@ -195,7 +195,7 @@ where
         at: impl Into<At>,
         target: &TargetSchema,
     ) -> Result<EntityState<Value>, Error> {
-        self.read_dynamic(at, Some(target))
+        self.read_dynamic(at, target)
     }
 
     fn resolve_named(&self, name: &RefPath) -> Result<Option<ObjectId>, Error> {
@@ -250,7 +250,7 @@ where
     fn read_commit_migrated(
         &self,
         commit: ObjectId,
-        target: Option<&TargetSchema>,
+        target: &TargetSchema,
     ) -> Result<EntityState<Value>, Error> {
         let (value_tree, schema_tree, doc, message) = self.read_bound(commit)?;
         self.migrated_state(value_tree, schema_tree, doc, commit, message, target)
@@ -259,7 +259,7 @@ where
     fn read_tree_migrated(
         &self,
         tree: ObjectId,
-        target: Option<&TargetSchema>,
+        target: &TargetSchema,
     ) -> Result<EntityState<Value>, Error> {
         let (value_tree, schema_tree) = self.store.split(tree, tree)?;
         let doc = self.store.schema(schema_tree)?;
@@ -273,7 +273,7 @@ where
         doc: Rc<Schema>,
         commit: ObjectId,
         message: String,
-        target: Option<&TargetSchema>,
+        target: &TargetSchema,
     ) -> Result<EntityState<Value>, Error> {
         if let Some(tombstone) = tombstone::read(self.store, &value_tree, &doc)? {
             self.ensure_kind(&tombstone.kind)?;
@@ -286,10 +286,7 @@ where
         self.ensure_document_kind(&doc)?;
         let value = deserialize_value_with_schema(&value_tree, &doc, self.store.objects())?;
         let schema = self.schema();
-        let value = match target {
-            Some(target) => schema.upcast_to(&value, &schema_tree, target)?,
-            None => schema.upcast_current(&value, &schema_tree)?,
-        };
+        let value = schema.upcast_to(&value, &schema_tree, target)?;
         Ok(EntityState::Present(Entry {
             value,
             commit,
@@ -297,14 +294,11 @@ where
         }))
     }
 
-    /// The dynamic read shared by [`read_as`](Self::read_as) and the
-    /// deprecated current-schema shims: `target: None` resolves this kind's
-    /// current published schema lazily, only once a present (non-tombstone)
-    /// value is actually reached, matching those shims' historical laziness.
+    /// The address dispatch behind [`read_as`](Self::read_as).
     fn read_dynamic(
         &self,
         at: impl Into<At>,
-        target: Option<&TargetSchema>,
+        target: &TargetSchema,
     ) -> Result<EntityState<Value>, Error> {
         match at.into() {
             At::Name(name) => match self.resolve_named(&name)? {
@@ -320,54 +314,8 @@ where
         }
     }
 
-    /// Read the current state addressed by its content-derived id.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read(id)` instead")]
-    pub fn read_entity(&self, id: EntityId) -> Result<EntityState<E::Value>, Error> {
-        self.read(id)
-    }
-
-    /// The current value at an alias or canonical ref path, or `None` when
-    /// absent or explicitly deleted. This is the compatibility adapter for
-    /// callers that cannot represent a deleted state.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read(name).value()` instead")]
-    pub fn get(&self, name: &RefPath) -> Result<Option<E::Value>, Error> {
-        Ok(self.read(name.clone())?.value())
-    }
-
-    /// Read the current value addressed by its content-derived id, retaining
-    /// the old `Option` behavior for compatibility.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read(id).value()` instead")]
-    pub fn get_entity(&self, id: EntityId) -> Result<Option<E::Value>, Error> {
-        Ok(self.read(id)?.value())
-    }
-
-    /// The state as of one data commit, read entirely out of that commit's
-    /// own tree.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read(commit)` instead")]
-    pub fn read_at(&self, commit: ObjectId) -> Result<EntityState<E::Value>, Error> {
-        self.read(commit)
-    }
-
-    /// The value as of one data commit, preserving the old typed API.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read(commit)` instead")]
-    pub fn get_at(&self, commit: ObjectId) -> Result<E::Value, Error> {
-        match self.read(commit)? {
-            EntityState::Present(entry) => Ok(entry.value),
-            EntityState::Deleted(_) => Err(Error::Deleted { commit }),
-            EntityState::Absent => unreachable!("a commit is always present"),
-        }
-    }
-
-    /// The current value at the canonical entity ref, together with its
-    /// publication commit. Tombstones are represented as `None` for
-    /// compatibility; use [`read`](Self::read) to observe them.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read(id).present()` instead")]
-    pub fn get_entry_entity(&self, id: EntityId) -> Result<Option<Entry<E::Value>>, Error> {
-        Ok(self.read(id)?.present())
-    }
-
     /// Decode a `{value/, schema/}` tree directly — the read-side mirror of
-    /// [`compile`](Self::compile). Unlike [`get_at`](Self::get_at), `tree`
+    /// [`compile`](Self::compile). Unlike [`read`](Self::read), `tree`
     /// need not be a commit's tree, and no ref is consulted: any tree of that
     /// shape decodes, however it was reached.
     pub fn decode(&self, tree: ObjectId) -> Result<E::Value, Error> {
@@ -411,151 +359,6 @@ where
         ))
     }
 
-    /// The current value at `name` together with the commit it came from, or
-    /// `None` when absent or deleted. Use [`read`](Self::read) for the
-    /// distinct state result.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read(name).present()` instead")]
-    pub fn get_entry(&self, name: &RefPath) -> Result<Option<Entry<E::Value>>, Error> {
-        Ok(self.read(name.clone())?.present())
-    }
-
-    /// [`get_entry`](Self::get_entry) for one data commit directly, read
-    /// entirely out of that commit's own tree. A tombstone is reported as
-    /// [`Error::Deleted`] for this compatibility API.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read(commit)` instead")]
-    pub fn get_entry_at(&self, commit: ObjectId) -> Result<Entry<E::Value>, Error> {
-        match self.read(commit)? {
-            EntityState::Present(entry) => Ok(entry),
-            EntityState::Deleted(_) => Err(Error::Deleted { commit }),
-            EntityState::Absent => unreachable!("a commit is always present"),
-        }
-    }
-
-    /// The current value at `name`, upcast to this kind's current schema.
-    ///
-    /// This is a compatibility convenience: it resolves the current schema
-    /// ref after reading a non-tombstone value. New code that already has a
-    /// selected target should use
-    /// [`read_as`](Self::read_as).
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Kind::read_as(name, target).value()` with an explicit `TargetSchema` instead"
-    )]
-    pub fn get_migrated(&self, name: &RefPath) -> Result<Option<Value>, Error> {
-        Ok(self.read_dynamic(name.clone(), None)?.value())
-    }
-
-    /// Read `name` upcast to an explicitly selected target schema and history.
-    ///
-    /// The target is used only after the value's embedded schema has decoded,
-    /// and tombstones are returned as [`EntityState::Deleted`] without
-    /// validating or consulting the target history.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read_as(name, target)` instead")]
-    pub fn read_migrated_to(
-        &self,
-        name: &RefPath,
-        target: &TargetSchema,
-    ) -> Result<EntityState<Value>, Error> {
-        self.read_as(name.clone(), target)
-    }
-
-    /// The current value at `name`, upcast to an explicit target, or `None`
-    /// when absent or deleted.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Kind::read_as(name, target).value()` instead"
-    )]
-    pub fn get_migrated_to(
-        &self,
-        name: &RefPath,
-        target: &TargetSchema,
-    ) -> Result<Option<Value>, Error> {
-        Ok(self.read_as(name.clone(), target)?.value())
-    }
-
-    /// [`get_migrated`](Self::get_migrated) for one data commit.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Kind::read_as(commit, target)` with an explicit `TargetSchema` instead"
-    )]
-    pub fn get_at_migrated(&self, commit: ObjectId) -> Result<Value, Error> {
-        match self.read_dynamic(commit, None)? {
-            EntityState::Present(entry) => Ok(entry.value),
-            EntityState::Deleted(_) => Err(Error::Deleted { commit }),
-            EntityState::Absent => unreachable!("a commit is always present"),
-        }
-    }
-
-    /// Read one data commit upcast to an explicitly selected target schema and
-    /// history.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read_as(commit, target)` instead")]
-    pub fn read_at_migrated_to(
-        &self,
-        commit: ObjectId,
-        target: &TargetSchema,
-    ) -> Result<EntityState<Value>, Error> {
-        self.read_as(commit, target)
-    }
-
-    /// [`get_at_migrated`](Self::get_at_migrated) for an explicit target.
-    #[deprecated(since = "0.2.0", note = "use `Kind::read_as(commit, target)` instead")]
-    pub fn get_at_migrated_to(
-        &self,
-        commit: ObjectId,
-        target: &TargetSchema,
-    ) -> Result<Value, Error> {
-        match self.read_as(commit, target)? {
-            EntityState::Present(entry) => Ok(entry.value),
-            EntityState::Deleted(_) => Err(Error::Deleted { commit }),
-            EntityState::Absent => unreachable!("a commit is always present"),
-        }
-    }
-
-    /// Read the current state upcast to this kind's current schema.
-    ///
-    /// This compatibility convenience resolves the current schema only for a
-    /// non-tombstone value. Tombstones remain readable without a schema ref.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Kind::read_as(name, target)` with an explicit `TargetSchema` instead"
-    )]
-    pub fn read_migrated(&self, name: &RefPath) -> Result<EntityState<Value>, Error> {
-        self.read_dynamic(name.clone(), None)
-    }
-
-    /// [`get_migrated`](Self::get_migrated), together with the commit the
-    /// value was read from. Tombstones are represented as `None` for
-    /// compatibility; use [`read_migrated`](Self::read_migrated) instead.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Kind::read_as(name, target).present()` with an explicit `TargetSchema` instead"
-    )]
-    pub fn get_entry_migrated(&self, name: &RefPath) -> Result<Option<Entry<Value>>, Error> {
-        Ok(self.read_dynamic(name.clone(), None)?.present())
-    }
-
-    /// [`get_entry_migrated`](Self::get_entry_migrated) for one data commit.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Kind::read_as(commit, target)` with an explicit `TargetSchema` instead"
-    )]
-    pub fn get_entry_at_migrated(&self, commit: ObjectId) -> Result<Entry<Value>, Error> {
-        match self.read_dynamic(commit, None)? {
-            EntityState::Present(entry) => Ok(entry),
-            EntityState::Deleted(_) => Err(Error::Deleted { commit }),
-            EntityState::Absent => unreachable!("a commit is always present"),
-        }
-    }
-
-    /// [`read_migrated`](Self::read_migrated) for one data commit.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Kind::read_as(commit, target)` with an explicit `TargetSchema` instead"
-    )]
-    pub fn read_at_migrated(&self, commit: ObjectId) -> Result<EntityState<Value>, Error> {
-        self.read_dynamic(commit, None)
-    }
-
     fn read_bound(
         &self,
         commit: ObjectId,
@@ -587,7 +390,7 @@ where
     }
 
     /// Commit `rebuild`'s result forward at `name`, retried with a fresh
-    /// [`get_entry`](Self::get_entry) whenever the compare-and-swap loses a
+    /// [`read`](Self::read) whenever the compare-and-swap loses a
     /// race — so `rebuild` always sees the entry it actually commits over
     /// (`None` when `name` is absent or deleted), never one read before a
     /// concurrent write landed.
@@ -732,18 +535,21 @@ where
         O: Write,
     {
         loop {
-            let resolved = match self.resolve_publish(alias, message, tree, parent, expected_alias)? {
-                PublishOutcome::Ready(resolved) => resolved,
-                PublishOutcome::Stale { reference } => {
-                    if retry_on_race {
-                        return Ok(None);
+            let resolved =
+                match self.resolve_publish(alias, message, tree, parent, expected_alias)? {
+                    PublishOutcome::Ready(resolved) => resolved,
+                    PublishOutcome::Stale { reference } => {
+                        if retry_on_race {
+                            return Ok(None);
+                        }
+                        return Err(self.expectation_error(
+                            &reference,
+                            expected_alias.expect(
+                                "a stale outcome only occurs when an expectation was given",
+                            ),
+                        ));
                     }
-                    return Err(self.expectation_error(
-                        &reference,
-                        expected_alias.expect("a stale outcome only occurs when an expectation was given"),
-                    ));
-                }
-            };
+                };
 
             let mut edits = Vec::new();
             if let Some(edit) = resolved.edit {
@@ -849,9 +655,9 @@ where
         let (commit, edit) = match current {
             Some(commit) if self.store.commit_tree(commit)? == tree => (commit, None),
             Some(expected) => {
-                let next = self
-                    .store
-                    .write_commit(message, tree, Some(parent.unwrap_or(expected)))?;
+                let next =
+                    self.store
+                        .write_commit(message, tree, Some(parent.unwrap_or(expected)))?;
                 (
                     next,
                     Some(RefEdit::Update {

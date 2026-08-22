@@ -116,9 +116,6 @@ struct Cli {
     /// `legacy-leaves` accepts them.
     #[arg(long, global = true, value_enum, default_value = "strict")]
     compat: CompatArg,
-    /// Deprecated alias for `--compat legacy-leaves`.
-    #[arg(long, global = true, hide = true)]
-    legacy_leaves: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -447,23 +444,6 @@ enum SchemaCommand {
         #[arg(long)]
         at: Option<String>,
     },
-    /// Hidden alias for `schema show` with no kind.
-    #[command(hide = true)]
-    List,
-    /// Hidden alias for `schema show <kind>`.
-    #[command(hide = true)]
-    Get {
-        kind: String,
-        #[arg(long)]
-        at: Option<String>,
-    },
-    /// Hidden alias for `schema show <kind> --at <rev>`.
-    #[command(hide = true)]
-    Inspect {
-        kind: String,
-        #[arg(long)]
-        at: String,
-    },
     /// Show a kind's schema evolution history, newest first.
     Log { kind: String },
 }
@@ -507,12 +487,7 @@ fn run() -> Result<()> {
         }
     };
     repo.object_cache_size_if_unset(4 * 1024 * 1024);
-    let compat = if cli.legacy_leaves {
-        Compat::LegacyLeaves
-    } else {
-        cli.compat.into()
-    };
-    let store = RepoStore::open_with_layout(&repo, layout).with_compat(compat);
+    let store = RepoStore::open_with_layout(&repo, layout).with_compat(cli.compat.into());
 
     match cli.command {
         Command::Compile(args) => compile(&store, args, output)?,
@@ -545,16 +520,6 @@ fn run() -> Result<()> {
             SchemaCommand::Show { kind, at } => {
                 schema_show(&repo, &store, kind.as_deref(), at.as_deref(), output)?
             }
-            // Hidden aliases: `get`/`inspect` were `show`'s json-format and
-            // `--at` modifiers, respectively, before this move; `list` was
-            // `show` with no kind, since both walked `store.kinds()`.
-            SchemaCommand::Get { kind, at } => {
-                schema_show(&repo, &store, Some(&kind), at.as_deref(), output)?
-            }
-            SchemaCommand::Inspect { kind, at } => {
-                schema_show(&repo, &store, Some(&kind), Some(&at), output)?
-            }
-            SchemaCommand::List => schema_show(&repo, &store, None, None, output)?,
             SchemaCommand::Log { kind } => log_commits(
                 &repo,
                 store.dynamic(segment("kind", &kind)?).schema().history()?,
@@ -1945,7 +1910,7 @@ fn to_json<T: facet::Facet<'static>>(value: &T) -> Result<String> {
 /// A kind's top-level field layout, resolving the root through `defs`, as
 /// `print_type` used to print directly.
 fn type_layout(kind: &str, doc: &Schema) -> String {
-    let mut out = format!("{kind}");
+    let mut out = kind.to_string();
     match resolve(&doc.root, doc) {
         Node::Struct(fields) => {
             for (name, field) in fields {

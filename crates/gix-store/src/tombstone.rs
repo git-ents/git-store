@@ -132,12 +132,6 @@ impl<V> EntityState<V> {
             Self::Absent | Self::Present(_) => None,
         }
     }
-
-    /// Consume the result, returning its tombstone when it is deleted.
-    #[deprecated(since = "0.2.0", note = "renamed to `EntityState::deleted`")]
-    pub fn into_deleted(self) -> Option<TombstoneEntry> {
-        self.deleted()
-    }
 }
 
 pub(crate) fn schema() -> Result<Schema, Error> {
@@ -241,12 +235,5 @@ mod tests {
         assert_eq!(state.deleted(), Some(tombstone_entry()));
         assert_eq!(EntityState::<u32>::Absent.deleted(), None);
         assert_eq!(EntityState::Present(entry()).deleted(), None);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn into_deleted_matches_deleted() {
-        let state = EntityState::<u32>::Deleted(tombstone_entry());
-        assert_eq!(state.into_deleted(), Some(tombstone_entry()));
     }
 }

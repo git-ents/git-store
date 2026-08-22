@@ -68,7 +68,12 @@ impl<'s, R, O> Transaction<'s, R, O> {
     /// caller-chosen name instead. `document`'s embedded schema must name
     /// `kind`; a mismatch is reported when [`commit`](Self::commit) checks
     /// every staged operation.
-    pub fn publish(mut self, kind: &RefSegment, document: DocumentTree, expect: Expectation) -> Self {
+    pub fn publish(
+        mut self,
+        kind: &RefSegment,
+        document: DocumentTree,
+        expect: Expectation,
+    ) -> Self {
         self.staged.push(Staged::Publish(StagedPublish {
             kind: kind.clone(),
             document,
@@ -191,7 +196,9 @@ impl<'s, R: RefStore + Committer, O: Find + Write> Transaction<'s, R, O> {
             None,
             Some(publish.expect),
         )? {
-            PublishOutcome::Stale { reference } => Err(kind.expectation_error(&reference, publish.expect)),
+            PublishOutcome::Stale { reference } => {
+                Err(kind.expectation_error(&reference, publish.expect))
+            }
             PublishOutcome::Ready(resolved) => {
                 if let Some(edit) = resolved.edit {
                     edits.push(edit);
@@ -210,7 +217,12 @@ impl<'s, R: RefStore + Committer, O: Find + Write> Transaction<'s, R, O> {
         edits: &mut Vec<RefEdit>,
     ) -> Result<Option<ObjectId>, Error> {
         let name = entity_id_name(delete.id);
-        let reference = self.store.layout().data.child(&delete.kind).join_path(&name);
+        let reference = self
+            .store
+            .layout()
+            .data
+            .child(&delete.kind)
+            .join_path(&name);
         let current = self.store.refs().read(&reference).map_err(Error::backend)?;
         if !matches_expectation(delete.expect, current) {
             return Err(self.expectation_error(&reference, delete.expect));

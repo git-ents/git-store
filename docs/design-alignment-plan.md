@@ -218,8 +218,9 @@ sites. Add tests for:
 - migrated reads explicitly requiring the target schema/history and failing
   clearly when it is unavailable.
 
-Do not remove the old named API until callers in the CLI and workspace tests
-have migrated; mark it deprecated if a compatibility release is required.
+The old named API has been removed outright rather than deprecated: the CLI
+and workspace tests were the only callers, so no compatibility release was
+required.
 
 ## Phase 4: make entity identity content-derived
 

@@ -68,7 +68,7 @@ fn publishes_complete_document_at_the_requested_name() {
         vec![(path("friendly"), commit)]
     );
     assert_eq!(
-        kind.get(&path("friendly")).unwrap(),
+        kind.read(path("friendly")).unwrap().value(),
         Some(value!({ "n": 7 }))
     );
 }
@@ -109,7 +109,7 @@ fn explicit_parent_appends_above_legacy_tip_while_creating_absent_alias() {
     };
     assert_eq!(commit.parents.as_ref(), &[legacy_commit]);
     assert_eq!(
-        kind.get(&path("imported")).unwrap(),
+        kind.read(path("imported")).unwrap().value(),
         Some(value!({ "n": 2 }))
     );
 }
@@ -147,7 +147,12 @@ fn stale_explicit_expectation_is_not_retried_or_published() {
         .unwrap();
     let alias = path("friendly");
     kind.put_with_alias(&alias, &value!({ "n": 1 })).unwrap();
-    let old_commit = kind.get_entry(&alias).unwrap().unwrap().commit;
+    let old_commit = kind
+        .read(&alias)
+        .map(|state| state.present())
+        .unwrap()
+        .unwrap()
+        .commit;
     kind.put_with_alias(&alias, &value!({ "n": 2 })).unwrap();
     let tree = kind.compile(&value!({ "n": 3 })).unwrap();
     let prepared = prepared(&store, tree);
@@ -159,11 +164,14 @@ fn stale_explicit_expectation_is_not_retried_or_published() {
         )
         .is_err()
     );
-    assert_eq!(kind.get(&alias).unwrap(), Some(value!({ "n": 2 })));
+    assert_eq!(kind.read(&alias).unwrap().value(), Some(value!({ "n": 2 })));
     // The rejected write left no trace, and the name's history still reaches
     // the superseded publication.
     assert_eq!(kind.history(&alias).unwrap().len(), 2);
-    assert_eq!(kind.get_at(old_commit).unwrap(), value!({ "n": 1 }));
+    assert_eq!(
+        kind.read(old_commit).unwrap().value().unwrap(),
+        value!({ "n": 1 })
+    );
 }
 
 #[test]
@@ -193,7 +201,10 @@ fn the_same_prepared_document_may_be_published_under_several_names() {
     // while remaining independent refs.
     assert_eq!(second.id, id);
     for name in ["first", "second"] {
-        assert_eq!(kind.get(&path(name)).unwrap(), Some(value!({ "n": 9 })));
+        assert_eq!(
+            kind.read(path(name)).unwrap().value(),
+            Some(value!({ "n": 9 }))
+        );
     }
     assert_eq!(kind.list().unwrap(), vec![path("first"), path("second")]);
 }

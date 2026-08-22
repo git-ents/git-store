@@ -83,47 +83,6 @@ where
         })
     }
 
-    /// Read a historical schema publication, unconditionally accepting
-    /// pre-`kind` documents and pre-newline leaves regardless of the store's
-    /// [`Compat`](crate::Compat) setting.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Store::with_compat(Compat::LegacyLeaves)` then `KindSchema::snapshot_at` instead"
-    )]
-    pub fn snapshot_at_legacy(&self, commit: ObjectId) -> Result<SchemaSnapshot, Error> {
-        let schema_tree = self.store.commit_tree(commit)?;
-        let schema = Schema::read_pinned_legacy(&schema_tree, self.store.objects())?;
-        Ok(SchemaSnapshot {
-            commit,
-            schema_tree: SchemaTree::from(schema_tree),
-            schema,
-        })
-    }
-
-    /// Capture the current schema, unconditionally accepting legacy leaf
-    /// framing regardless of the store's [`Compat`](crate::Compat) setting.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Store::with_compat(Compat::LegacyLeaves)` then `KindSchema::current_snapshot` instead"
-    )]
-    pub fn current_snapshot_legacy(&self) -> Result<SchemaSnapshot, Error> {
-        let commit = self
-            .store
-            .refs()
-            .read(&self.reference)
-            .map_err(Error::backend)?
-            .ok_or_else(|| Error::NoSchema {
-                kind: self.kind.clone(),
-            })?;
-        let schema_tree = self.store.commit_tree(commit)?;
-        let schema = Schema::read_pinned_legacy(&schema_tree, self.store.objects())?;
-        Ok(SchemaSnapshot {
-            commit,
-            schema_tree: SchemaTree::from(schema_tree),
-            schema,
-        })
-    }
-
     /// Capture the schema currently published for this kind.
     pub fn current_snapshot(&self) -> Result<SchemaSnapshot, Error> {
         let commit = self

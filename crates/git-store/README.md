@@ -212,15 +212,13 @@ renders the field layout (plus, with `--at`, the commit and schema-tree OIDs);
 schema-tree OID, and schema). With no `<kind>` at all, it lists every
 published kind's field layout, and `--at` is rejected since there is no
 single kind to select a revision of. This is the historical schema selection
-surface; it does not mutate history. (`schema get`, `schema inspect`, and
-`schema list` remain as hidden, deprecated aliases.)
+surface; it does not mutate history.
 
 This and every other decoding command are strict by default. Pass the global
 `--compat legacy-leaves` only when reading pre-`kind` schema documents or
 schema trees whose leaf blobs predate the newline framing. It applies the
 explicit compatibility decoder for the whole invocation and exports the
-normalized JSON without changing ordinary reads. (`--legacy-leaves` remains
-as a hidden, deprecated per-invocation alias.)
+normalized JSON without changing ordinary reads.
 
 ### Refs, objects, and machine output
 

@@ -25,7 +25,7 @@ let id = recipes.put_with_alias(
     &RefPath::new("carbonara")?,
     &Recipe { title: "Carbonara".into(), serves: 4 },
 )?;
-match recipes.read_entity(id)? {
+match recipes.read(id)? {
     EntityState::Present(entry) => assert_eq!(entry.value.serves, 4),
     EntityState::Absent | EntityState::Deleted(_) => unreachable!(),
 }
@@ -56,7 +56,7 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   schema fails with the offending path instead of writing a lossy tree.
 - **Documents are self-contained.** Every data commit's tree is exactly a
   two-entry root, `{schema/, value/}`: `value/` contains the data and `schema/`
-  contains the exact schema tree used to validate it. `get`/`get_at` read both
+  contains the exact schema tree used to validate it. `read` takes both
   directly from the one commit, so old versions stay readable after a schema
   evolves and after a fetch, push, or mirror that moves only the data ref.
   Newly written commits contain none of the `Schema:`, `Schema-Version:`, or
@@ -74,12 +74,11 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   a branch, so every earlier publication stays reachable, and distinct names
   are independent even when they address identical content. An application
   that wants content-addressed storage names an entity by its `EntityId`;
-  `put_entity`, `read_entity`, and `entity_reference` are the shorthand for
+  `put_entity`, `read(id)`, and `entity_reference` are the shorthand for
   that policy, and the store treats those refs like any other. A name or schema
   publication never replaces the document's embedded schema or content
-  identity. Option-returning `get` methods also map
-  both absent and deleted entities to `None`; use `read`/`read_entity` and
-  `EntityState` when that distinction matters.
+  identity. `EntityState::value` collapses both absent and deleted entities to
+  `None`; match on `EntityState` when that distinction matters.
 - **Prepared documents expose the plumbing boundary.** `Store::encode_value`
   and `Store::decode_value` take an explicit schema tree and operate on an
   unbound value tree. `Store::bind_document` creates the complete
@@ -186,10 +185,11 @@ CAS may remain unreachable. Bash, Git, or another caller owns traversal,
 transforms, batching, retry/resume, and policy. There is no hard-coded CLI
 `migrate` workflow, and these commands never silently rewrite a stored tree.
 
-The `get_migrated` family remains an explicit library convenience for in-memory
-upcasting toward the selected `Kind`'s current published schema and history.
-It fails when the source schema or migration edge is unavailable and does not
-rewrite the stored tree.
+`Kind::read_as` is the explicit library convenience for in-memory upcasting
+toward a caller-selected `TargetSchema`, which `KindSchema::current_target`
+builds from the kind's current published schema and history. It fails when the
+source schema or migration edge is unavailable and does not rewrite the stored
+tree.
 
 A schema document must carry the embedded kind name and a schema-schema pin
 recognized by this build. Old schema objects lacking the kind name cannot be

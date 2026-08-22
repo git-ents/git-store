@@ -392,7 +392,7 @@ fn failures_have_typed_exit_codes() {
 /// `crates/git-store/schemas/*.json` has — carries an explicit `kind` but no
 /// `version` key because there is no such field any more: the schema-schema pin
 /// is a storage-layer splice `schema put` adds on write, not something a caller
-/// declares. The publication kind is selected by the CLI/ref, and `schema get`
+/// declares. The publication kind is selected by the CLI/ref, and `schema show`
 /// prints the normalized document.
 #[test]
 fn hand_authored_schema_json_publishes_with_no_version_key() {
@@ -472,10 +472,10 @@ fn schema_legacy_leaves_is_explicit_for_current_and_historical_reads() {
         "schema ref update unexpectedly wrote output"
     );
 
-    let (_, err, ok) = run(path, None, &["schema", "get", "recipe"]);
+    let (_, err, ok) = run(path, None, &["schema", "show", "recipe"]);
     assert!(
         !ok,
-        "strict schema get unexpectedly accepted legacy schema: {err}"
+        "strict schema show unexpectedly accepted legacy schema: {err}"
     );
     assert!(
         err.contains("no schema-schema pin") || err.contains("unpinned"),
@@ -485,9 +485,16 @@ fn schema_legacy_leaves_is_explicit_for_current_and_historical_reads() {
     let (out, err, ok) = run(
         path,
         None,
-        &["schema", "get", "recipe", "--legacy-leaves", "--json"],
+        &[
+            "schema",
+            "show",
+            "recipe",
+            "--compat",
+            "legacy-leaves",
+            "--json",
+        ],
     );
-    assert!(ok, "legacy schema get failed: {err}");
+    assert!(ok, "legacy schema show failed: {err}");
     assert_eq!(json_string_field(&out, "kind"), "legacy-unknown");
     assert!(out.contains("\"root\""), "schema: {out}");
     assert!(out.contains("\"defs\""), "schema: {out}");
@@ -497,15 +504,16 @@ fn schema_legacy_leaves_is_explicit_for_current_and_historical_reads() {
         None,
         &[
             "schema",
-            "get",
+            "show",
             "recipe",
             "--at",
             &legacy_commit,
-            "--legacy-leaves",
+            "--compat",
+            "legacy-leaves",
             "--json",
         ],
     );
-    assert!(ok, "historical legacy schema get failed: {err}");
+    assert!(ok, "historical legacy schema show failed: {err}");
     assert!(out.contains("\"commit\""), "machine schema record: {out}");
     assert!(out.contains(&legacy_commit), "machine schema record: {out}");
     assert!(
@@ -516,11 +524,11 @@ fn schema_legacy_leaves_is_explicit_for_current_and_historical_reads() {
     let (_, err, ok) = run(
         path,
         None,
-        &["schema", "inspect", "recipe", "--at", &legacy_commit],
+        &["schema", "show", "recipe", "--at", &legacy_commit],
     );
     assert!(
         !ok,
-        "strict schema inspect unexpectedly accepted legacy schema: {err}"
+        "strict schema show unexpectedly accepted legacy schema at a revision: {err}"
     );
 
     let (out, err, ok) = run(
@@ -528,14 +536,15 @@ fn schema_legacy_leaves_is_explicit_for_current_and_historical_reads() {
         None,
         &[
             "schema",
-            "inspect",
+            "show",
             "recipe",
             "--at",
             &legacy_commit,
-            "--legacy-leaves",
+            "--compat",
+            "legacy-leaves",
         ],
     );
-    assert!(ok, "legacy schema inspect failed: {err}");
+    assert!(ok, "legacy schema show at a revision failed: {err}");
     assert!(out.contains("kind: legacy-unknown"), "inspect: {out}");
     assert!(out.contains("schema tree:"), "inspect: {out}");
     assert!(out.contains("serves: uint"), "inspect: {out}");
@@ -1145,25 +1154,18 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
     let (historical, err, ok) = run(
         path,
         None,
-        &["schema", "get", "recipe", "--at", &schema_commit, "--json"],
+        &["schema", "show", "recipe", "--at", &schema_commit, "--json"],
     );
-    assert!(ok, "historical schema get failed: {err}");
+    assert!(ok, "historical schema show failed: {err}");
     assert_eq!(json_string_field(&historical, "commit"), schema_commit);
     assert_eq!(json_string_field(&historical, "kind"), "recipe");
 
     let (schema_info, err, ok) = run(
         path,
         None,
-        &[
-            "schema",
-            "inspect",
-            "recipe",
-            "--at",
-            &schema_commit,
-            "--json",
-        ],
+        &["schema", "show", "recipe", "--at", &schema_commit, "--json"],
     );
-    assert!(ok, "historical schema inspect failed: {err}");
+    assert!(ok, "historical schema show as json failed: {err}");
     assert_eq!(json_string_field(&schema_info, "schema_tree").len(), 40);
 
     let (refs, err, ok) = run(path, None, &["ref", "list", "--format", "ndjson"]);

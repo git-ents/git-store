@@ -310,55 +310,13 @@ where
         }
     }
 
-    /// [`decode_value`](Self::decode_value) taking bare object ids.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Store::decode_value(ValueTree, SchemaTree)` instead"
-    )]
-    pub fn decode_value_untyped(
-        &self,
-        value_tree: ObjectId,
-        schema_tree: ObjectId,
-    ) -> Result<Value, Error> {
-        self.decode_value(ValueTree::from(value_tree), SchemaTree::from(schema_tree))
-    }
-
-    /// Decode a historical unbound value tree to JSON-compatible [`Value`],
-    /// unconditionally accepting legacy leaf framing regardless of this
-    /// store's [`Compat`] setting.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Store::with_compat(Compat::LegacyLeaves)` then `Store::decode_value` instead"
-    )]
-    pub fn decode_value_legacy(
-        &self,
-        value_tree: ObjectId,
-        schema_tree: ObjectId,
-    ) -> Result<Value, Error> {
-        self.decode_value_compat(value_tree, schema_tree)
-    }
-
-    /// Decode a historical bound document to JSON-compatible [`Value`],
-    /// unconditionally accepting legacy leaf framing regardless of this
-    /// store's [`Compat`] setting.
-    ///
-    /// This is the opt-in normalization path for old objects: the result is a
-    /// value callers can serialize as JSON and then write through the current
-    /// format. No old object is rewritten by this method.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Store::with_compat(Compat::LegacyLeaves)` then `Store::decode` instead"
-    )]
-    pub fn decode_legacy(&self, document_tree: ObjectId) -> Result<Value, Error> {
-        let (value_tree, schema_tree) =
-            split_document(document_tree, document_tree, self.objects())?;
-        self.decode_value_compat(value_tree, schema_tree)
-    }
-
     /// The legacy-leaves decode path shared by [`decode`](Self::decode) and
-    /// [`decode_value`](Self::decode_value) under [`Compat::LegacyLeaves`],
-    /// and by their deprecated `_legacy` counterparts unconditionally.
-    fn decode_value_compat(&self, value_tree: ObjectId, schema_tree: ObjectId) -> Result<Value, Error> {
+    /// [`decode_value`](Self::decode_value) under [`Compat::LegacyLeaves`].
+    fn decode_value_compat(
+        &self,
+        value_tree: ObjectId,
+        schema_tree: ObjectId,
+    ) -> Result<Value, Error> {
         let doc = Schema::read_pinned_legacy(&schema_tree, self.objects())?;
         Ok(deserialize_value_with_schema_legacy_leaves(
             &value_tree,
@@ -381,24 +339,6 @@ where
             &doc,
             self.objects(),
         )?))
-    }
-
-    /// [`encode_value`](Self::encode_value) taking and returning bare object ids.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Store::encode_value(value, SchemaTree)` instead"
-    )]
-    pub fn encode_value_untyped(
-        &self,
-        value: &Value,
-        schema_tree: ObjectId,
-    ) -> Result<ObjectId, Error>
-    where
-        O: Write,
-    {
-        Ok(self
-            .encode_value(value, SchemaTree::from(schema_tree))?
-            .object_id())
     }
 
     /// Bind already-written value and schema subtrees into a prepared document.
@@ -431,22 +371,6 @@ where
             value_tree,
             schema_tree,
         })
-    }
-
-    /// [`bind_document`](Self::bind_document) taking bare object ids.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Store::bind_document(ValueTree, SchemaTree)` instead"
-    )]
-    pub fn bind_document_untyped(
-        &self,
-        value_tree: ObjectId,
-        schema_tree: ObjectId,
-    ) -> Result<PreparedDocument, Error>
-    where
-        O: Write,
-    {
-        self.bind_document(ValueTree::from(value_tree), SchemaTree::from(schema_tree))
     }
 
     /// Inspect a document boundary without consulting a kind or schema ref.
@@ -535,18 +459,6 @@ where
             found: found.clone(),
             reason: DocumentShapeError::UnexpectedEntries { found },
         })
-    }
-
-    /// [`inspect_document`](Self::inspect_document) taking a bare object id.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `Store::inspect_document(DocumentTree)` instead"
-    )]
-    pub fn inspect_document_untyped(
-        &self,
-        document_tree: ObjectId,
-    ) -> Result<DocumentInspection, Error> {
-        self.inspect_document(DocumentTree::from(document_tree))
     }
 
     pub(crate) fn decode_with<E: Encoding>(&self, tree: ObjectId) -> Result<E::Value, Error> {

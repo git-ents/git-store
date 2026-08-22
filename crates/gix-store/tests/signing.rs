@@ -76,7 +76,7 @@ fn an_unsigned_write_carries_no_signature() {
 
     assert_eq!(store.signature(commit).unwrap(), None);
     assert_eq!(
-        store.kind::<Counter>(kind()).get(&name()).unwrap(),
+        store.kind::<Counter>(kind()).read(name()).unwrap().value(),
         Some(Counter { n: 1 })
     );
 }
@@ -103,7 +103,7 @@ fn a_signed_write_returns_its_bytes_verbatim() {
         Some(OPAQUE)
     );
     assert_eq!(
-        store.kind::<Counter>(kind()).get(&name()).unwrap(),
+        store.kind::<Counter>(kind()).read(name()).unwrap().value(),
         Some(Counter { n: 1 })
     );
 }

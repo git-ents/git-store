@@ -97,9 +97,9 @@ ref. `Deleted` means a ref still exists and points to a typed tombstone whose
 value carries an explicit `Deleted` state, kind, and original `EntityId`.
 Tombstones use the same bound `{schema, value}` frame as ordinary documents, so
 they remain readable after the entity ref is fetched without the schema ref or
-materialized index. `get`/`get_entity` and other `Option`-returning methods are
-compatibility conveniences: they map both `Absent` and `Deleted` to `None`; use
-`read`/`read_entity` when the distinction matters.
+materialized index. `read` returns that state; project it with `value()` when
+`Absent` and `Deleted` may both collapse to `None`, and match on
+`EntityState` when the distinction matters.
 
 Writing the same bound content after deletion restores the original canonical
 entity: a normal value commit is appended after the tombstone, and aliases that
@@ -108,11 +108,11 @@ content creates a new `EntityId`; the old ID remains deleted. There is no CLI
 restore command—recreation/restoration is performed through the library write
 APIs.
 
-The current `Kind`/named `put`, `get`, `reference`, `entity_name`, `anonymous`,
-and related APIs are compatibility conveniences around the canonical content
-model. Prefer `put_entity`, `put_with_alias`, `compile_entity`,
-`read_entity`, and `entity_reference` when the content-derived identity or
-stateful result is part of the contract. `refs/schema/<publication>` remains a
+`Kind::read` takes an `At` address — a name, an `EntityId`, a commit, or a
+bound tree — so the content-derived identity and the caller-chosen name reach
+the same reads. Prefer `put_entity`, `put_with_alias`, `compile_entity`, and
+`entity_reference` when the content-derived identity is part of the
+contract. `refs/schema/<publication>` remains a
 schema publication/history ref, not the type definition of an existing
 document. `entity delete <kind> <entity-id>` publishes a typed tombstone and
 keeps the canonical ref; it does not hard-delete or prune the entity.
@@ -129,9 +129,9 @@ field cannot be made self-describing by inferring a name from a ref; they are
 not automatically upgraded. They require an explicit compatibility conversion
 or republishing under the current schema format before new self-contained data
 can be written against them. Likewise, base reads do not guess a migration
-source or target: `get_migrated` and its related APIs are explicit opt-in
-operations, but their current target is the selected `Kind`'s current published
-schema and history. If the source schema is not in that history, or a migration
+source or target: `read_as` is an explicit opt-in operation taking a
+`TargetSchema` the caller selects, which `KindSchema::current_target` builds
+from the selected `Kind`'s current published schema and history. If the source schema is not in that history, or a migration
 edge is missing, the operation fails rather than silently guessing or rewriting
 the stored object.
 
