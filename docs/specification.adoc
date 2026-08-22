@@ -790,12 +790,11 @@ one used to validate the value subtree.
 [role="requirement", id="plumbing.schema.history"]
 .Historical Schema Addressing
 --
-`git store schema get <kind> --at <commit>` and
-`git store schema inspect <kind> --at <commit>` MUST address the named schema
-publication commit directly. Omitting `--at` from `schema get` selects the
-current publication. Historical inspection MUST report the publication commit
-OID and the schema-tree OID; it MUST NOT replace the historical selection with
-the current schema.
+`git store schema show <kind> --at <commit>` MUST address the named schema
+publication commit directly. Omitting `--at` selects the current publication.
+Historical inspection MUST report the publication commit OID and the
+schema-tree OID; it MUST NOT replace the historical selection with the current
+schema.
 --
 
 [role="requirement", id="plumbing.inspect"]

@@ -1677,3 +1677,83 @@ fn every_command_the_help_advertises_exists() {
         }
     }
 }
+
+/// The docs are the other place a command name can be invented. The help
+/// template has [`every_command_the_help_advertises_exists`]; this is the
+/// same guard for every `git store …` line in the READMEs and the
+/// specification, which prose review has repeatedly failed to catch after a
+/// rename.
+#[test]
+fn every_command_the_docs_show_exists() {
+    /// The commands that nest a subcommand under themselves.
+    const GROUPS: [&str; 6] = ["value", "document", "entity", "object", "ref", "schema"];
+    /// Global options that consume the token after them.
+    const VALUED: [&str; 4] = ["--format", "--data-prefix", "--schema-prefix", "--compat"];
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_owned();
+    let docs = [
+        "README.md",
+        "crates/git-store/README.md",
+        "crates/gix-store/README.md",
+        "docs/specification.adoc",
+        "docs/design-alignment-plan.md",
+    ];
+
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let mut checked = 0usize;
+    for doc in docs {
+        let text = std::fs::read_to_string(root.join(doc)).unwrap();
+        for (offset, _) in text.match_indices("git store ") {
+            let mut tokens = text[offset..]
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .skip(2)
+                .peekable();
+
+            // Step over any global options before the command itself.
+            while let Some(token) = tokens.peek() {
+                if !token.starts_with('-') {
+                    break;
+                }
+                let token = tokens.next().unwrap();
+                if VALUED.contains(&token) {
+                    tokens.next();
+                }
+            }
+
+            let is_command = |token: &&str| {
+                !token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+            };
+            // A placeholder, a pipe, or prose: not a command to check.
+            let Some(command) = tokens.next().filter(is_command) else {
+                continue;
+            };
+            let mut argv = vec![command];
+            if GROUPS.contains(&command) {
+                let Some(sub) = tokens.next().filter(is_command) else {
+                    continue;
+                };
+                argv.push(sub);
+            }
+            argv.push("--help");
+
+            let (_, err, ok) = run(path, None, &argv);
+            assert!(
+                ok,
+                "{doc} documents `git store {}`, which does not exist: {err}",
+                argv[..argv.len() - 1].join(" ")
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 30, "expected to check many commands, got {checked}");
+}

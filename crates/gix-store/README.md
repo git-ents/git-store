@@ -149,13 +149,13 @@ with no filesystem behind it, which is what most of this crate's own tests use.
 ## CLI and migration boundaries
 
 The CLI is a composable Git-plumbing boundary, not a migration engine. Its pure
-forms are `git store put <schema> <value>` (compile and print a bound
-document-tree OID) and `git store get <tree-ish>` (decode that tree directly).
-The explicit library operations behind the plumbing are
-`encode_value`/`decode_value`, `bind_document`, `inspect_document`, and
-`publish_prepared`. The hidden two-argument forms are compatibility paths:
-`get <kind> <name>` reads a named ref, while `rm <kind> <name>` publishes a
-tombstone over that ref rather than removing it.
+forms are `git store compile <kind> <value>` (compile and print a bound
+document-tree OID) and `git store cat <tree-ish>` (decode that tree directly,
+needing no name and no schema ref). The explicit library operations behind the
+plumbing are `encode_value`/`decode_value`, `bind_document`,
+`inspect_document`, and `publish_prepared`. The name-resolving forms are
+`get <kind> <name>`, which reads a named ref, and `rm <kind> <name>`, which
+publishes a tombstone over that ref rather than removing it.
 
 Schema selection for an unbound value is always explicit. The CLI equivalents
 are `git store value encode --schema <tree-ish>`,
@@ -163,9 +163,8 @@ are `git store value encode --schema <tree-ish>`,
 `git store document bind <value-tree> --schema <tree-ish>`. The schema argument
 may name a schema tree, publication commit, or revision peeling to that tree;
 no kind lookup, schema-history guess, or commit trailer is consulted.
-`git store schema get <kind> --at <commit>` and
-`git store schema inspect <kind> --at <commit>` address historical schema
-publications directly. A base document read uses the schema embedded in that
+`git store schema show <kind> --at <commit>` addresses a historical schema
+publication directly, reporting its publication commit and schema-tree OIDs. A base document read uses the schema embedded in that
 document and does not consult schema history.
 
 The CLI also exposes `ref list`, `ref resolve`, `object inspect`, and

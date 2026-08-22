@@ -17,24 +17,29 @@ cargo install --path crates/git-store
 
 ```console
 git store schema put recipe -F <schema.json>
+git store put recipe carbonara -F <value.json>
+git store get recipe carbonara
+git store compile recipe <value.json>
 git store value encode --schema refs/schema/recipe -F <value.json>
 git store value decode <value-tree> --schema <schema-tree-or-commit>
 git store document bind <value-tree> --schema <schema-tree-or-commit>
 git store document inspect <document-tree>
 git store document publish recipe <document-tree> --expected absent --alias <name>
-git store get <document-tree>
+git store cat <document-tree>
 ```
 
-`git store put <schema> [<value>]` is the short pure-compile form: it creates a
-bound document whose root contains exactly `schema/` and `value/`, then prints
-the document-tree OID without advancing a ref. The explicit `value` and
-`document` commands expose the same steps for scripts. `value encode` and
+`git store put <kind> <name> [<value>]` is the everyday write: it encodes,
+binds, and publishes in one step, advancing that name's ref.
+`git store compile <kind> [<value>]` is the pure form of the same composition:
+it creates a bound document whose root contains exactly `schema/` and `value/`,
+then prints the document-tree OID without advancing a ref. The explicit `value`
+and `document` commands expose the individual steps for scripts. `value encode` and
 `value decode` always take an explicit schema tree or schema publication commit;
 `document bind` does too. They do not infer a schema from a kind ref, commit
 trailer, or caller-selected name.
 
 The `schema/` tree is the exact schema used to validate `value/`, so
-`git store get` can decode the document from its own tree even when no
+`git store cat` can decode the document from its own tree even when no
 `refs/schema/*` ref is available. A published schema ref is a discovery,
 history, or authoring index; it does not define the type of an existing
 document.
@@ -47,10 +52,12 @@ Canonical entity refs use that ID as the final segment:
 alias, and aliases are not the source of truth for identity or the canonical
 entity index.
 
-`schema get <kind> --at <commit>` reads a historical schema snapshot, while
-`schema inspect <kind> --at <commit>` reports its kind, publication commit OID,
-and schema-tree OID before showing its field layout. Current schema reads omit
-`--at`.
+`schema show <kind>` prints a kind's field layout as text and its full schema
+record as JSON, reporting the publication commit OID and schema-tree OID
+alongside it; omit `<kind>` to show every kind. `--at <commit>` addresses a
+historical publication instead of the current one, and never substitutes the
+current schema for it. `schema log <kind>` traces a kind's schema evolution,
+newest first.
 
 The plumbing inspection surface is deliberately Git-shaped:
 `ref list [--prefix <full-prefix>] [--kind <kind>]`, `ref resolve <full-ref>`,
@@ -72,22 +79,22 @@ advance in one CAS batch. A stale expectation fails without retry; objects
 written before a lost CAS may remain unreachable. Scripts own retry, resume,
 and conflict policy.
 
-The normal one-argument `get <tree-ish>` resolves a tree-ish and decodes the
-bound document directly. The two-argument `get <kind> <name>` form is hidden
-compatibility syntax for reading a named ref (and supports Git revision suffixes
-such as `name~1` and `name@<revision>`). The `rm <kind> <name>` command is also
-compatibility-oriented: it publishes a typed tombstone over the canonical ref
-and any alias that points at that publication; it does not hard-delete the
-refs. `get` reports a tombstoned entity as deleted and a missing ref as absent,
+`cat <tree-ish>` resolves a tree-ish and decodes the bound document directly:
+content-addressed, like `git cat-file`, needing neither a name nor a schema
+ref. `get <kind> <name>` resolves a name first, and accepts Git revision
+suffixes on it (`carbonara~1`, `carbonara@{yesterday}`, `carbonara@<oid>`); it
+also reports the publication commit, so a caller holds the compare-and-swap
+token for the value it just read. The `rm <kind> <name>` command publishes a
+typed tombstone over the canonical ref and any alias that points at that
+publication; it does not hard-delete the refs. `get` reports a tombstoned entity as deleted and a missing ref as absent,
 while repeated `rm` reports `already deleted` and `rm` of an absent ref fails.
 
 New commits do not write `Schema:`, `Schema-Version:`, or `Ents-Ref:` trailers,
 and new messages containing lines beginning with those reserved legacy trailer
 names are rejected. Readers ignore those trailers when they occur on older Git
 objects, including malformed or conflicting values, and never use them to
-select a schema. The old `put <kind> <name>` and `get <kind> <name>` forms remain
-historical compatibility paths; named writes return a publication commit OID
-while maintaining the canonical ID/ref underneath.
+select a schema. A named write returns a publication commit OID while
+maintaining the canonical ID/ref underneath.
 
 ## Entity state and compatibility
 

@@ -28,10 +28,10 @@ buildable and should add regression coverage before removing the old behavior.
 >   the kind, and the original entity ID. Repeating delete is idempotent; exact
 >   content restores the tombstoned ID, while different content creates a new
 >   ID.
-> - `git store get <tree-ish>` decodes a bound tree directly. The two-argument
->   `get <kind> <name>` and `rm <kind> <name>` forms are compatibility paths:
->   `get` distinguishes deleted from absent, and `rm` publishes a tombstone
->   rather than removing refs.
+> - `git store cat <tree-ish>` decodes a bound tree directly. The name-resolving
+>   `get <kind> <name>` and `rm <kind> <name>` forms sit on top of it: `get`
+>   distinguishes deleted from absent, and `rm` publishes a tombstone rather
+>   than removing refs.
 > - New commits reject and do not emit lines beginning with the reserved
 >   `Schema:`, `Schema-Version:`, or `Ents-Ref:` trailer names. Readers ignore
 >   those trailers on historical objects and select schemas from the embedded
@@ -39,9 +39,9 @@ buildable and should add regression coverage before removing the old behavior.
 > - Old schema documents without an embedded kind name are not repaired by
 >   guessing from a ref and are not automatically upgraded. They need an
 >   explicit conversion or republishing under the current format. Base reads do
->   not use migration history; the `get_migrated` family is an explicit opt-in
->   compatibility convenience whose current target is the selected `Kind`'s
->   current published schema/history. Missing source history or migration edges
+>   not use migration history; `read_as` is an explicit opt-in taking a
+>   `TargetSchema` the caller selects, which `KindSchema::current_target`
+>   builds from the selected `Kind`'s current published schema and history. Missing source history or migration edges
 >   fail rather than being guessed, and stored objects are not rewritten.
 
 ## Target invariants
