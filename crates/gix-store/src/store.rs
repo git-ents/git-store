@@ -22,7 +22,7 @@ use crate::transaction::Transaction;
 /// Options controlling publication of a prepared document.
 #[derive(Debug, Clone, Default)]
 pub struct PublishOptions {
-    /// An optional compatibility alias to maintain alongside the canonical ref.
+    /// The ref name to publish under, replacing the content-derived default.
     pub alias: Option<RefPath>,
     /// The publication commit message.
     pub message: String,
@@ -47,7 +47,7 @@ impl PublishOptions {
         }
     }
 
-    /// Maintain `alias` as a compatibility ref.
+    /// Publish under `alias` instead of the content-derived entity-id name.
     pub fn with_alias(mut self, alias: RefPath) -> Self {
         self.alias = Some(alias);
         self
