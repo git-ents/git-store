@@ -10,8 +10,8 @@
 //! advancing that name's ref. Reading mirrors writing: `git store cat
 //! <tree-ish>` decodes any tree of that shape back to JSON, content-addressed
 //! like `git cat-file`; `git store get <kind> <name>` resolves a name first,
-//! then decodes it. `git store check <tree-ish> <schema>` validates a bare
-//! value tree against a schema without decoding it. `<value>` may be
+//! then decodes it. `git store check <tree-ish> --schema <schema>` validates
+//! a bare value tree against a schema without decoding it. `<value>` may be
 //! omitted, taking content from `-F <file>`, stdin, `$EDITOR`, or — with
 //! `-i` — an interactive prompt walking the schema.
 //!
@@ -39,12 +39,54 @@ use gix_store::{
 /// A handle on one kind, over the CLI's own repo-backed store.
 pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, GixRefStore<'r>, &'r gix::OdbHandle>;
 
+/// clap does not group subcommands natively, so the "Commands:" section is
+/// replaced wholesale by this layered listing: everyday porcelain, the
+/// composable oid-in/oid-out plumbing it's built from, and maintenance.
+const HELP_TEMPLATE: &str = "\
+{about}
+
+{usage-heading} {usage}
+
+Everyday
+  put       Store a value under a name
+  get       Read a stored value as JSON
+  cat       Decode any document tree, ref, or commit
+  ls        List kinds, or entities within a kind
+  log       Show an entity's history
+  rm        Delete an entity
+  check     Validate a value against a schema
+  schema    Define, read, or trace a kind's schema
+
+Plumbing — composable, oid in, oid out
+  value     encode | decode
+  document  bind | inspect | publish
+  entity    resolve | delete
+  object    inspect | tree
+  ref       list | resolve
+
+Maintenance
+  doctor    Check object format and schema bootstrap
+
+Options:
+{options}
+{after-help}";
+
+/// What ties the layered command groups together: the plumbing pipeline
+/// `put` is shorthand for, and the exit-code taxonomy scripts rely on.
+const AFTER_HELP: &str = "\
+The pipeline: value encode → document bind → document publish
+`put` is shorthand for exactly that composition.
+
+Exit codes: 1 error · 2 invalid args or shape · 3 not found · 4 CAS conflict · 5 schema/value/document failure";
+
 #[derive(Parser)]
 #[command(
     name = "git-store",
     about = "Store anything in Git as a real tree",
     version,
-    arg_required_else_help = true
+    arg_required_else_help = true,
+    help_template = HELP_TEMPLATE,
+    after_help = AFTER_HELP
 )]
 struct Cli {
     /// Output format, honored by every command.
@@ -215,7 +257,11 @@ enum Command {
     Get { kind: String, name: String },
     /// Check whether a tree-ish's value conforms to a schema, without
     /// decoding it. Exits non-zero, with a diagnostic, when it does not.
-    Check { tree_ish: String, schema: String },
+    Check {
+        tree_ish: String,
+        #[arg(long)]
+        schema: String,
+    },
     /// Validate the repository's supported object format and schema bootstrap.
     Doctor,
     /// List kinds, or the entity names within a kind.
@@ -1501,7 +1547,7 @@ fn emit_value(format: OutputFormat, value: Value) -> Result<()> {
     emit_single(format, fields, || to_json(&value).unwrap_or_default())
 }
 
-/// `check <tree-ish> <schema>`: validate a value tree against a published
+/// `check <tree-ish> --schema <schema>`: validate a value tree against a published
 /// schema, without decoding it. Silent on success in text mode, matching
 /// `git`'s own validating subcommands; `json`/`ndjson` emit a confirming
 /// record so a script never has to infer success from silence.

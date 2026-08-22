@@ -65,8 +65,8 @@ $ git store get recipe 'carbonara~1' | jq .serves   # name-addressed, with revis
 
 The schema is data too — the current publication lives at
 `refs/schema/<kind>` in the same repository, stored through the same tree
-encoding, with the same history. `schema get --at` and `schema inspect --at`
-address an historical publication commit directly:
+encoding, with the same history. `schema show <kind> --at <commit>` addresses
+an historical publication commit directly:
 
 ```console
 $ git ls-tree refs/schema/recipe^{tree}
@@ -80,9 +80,9 @@ recipe
   ingredients: [string]
   steps: [string]
 
-$ git store schema get recipe --at <schema-commit>
-{ ... schema JSON ... }
-$ git store schema inspect recipe --at <schema-commit>
+$ git store schema show recipe --at <schema-commit> --json
+{ ... schema record: kind, commit, schema_tree, schema ... }
+$ git store schema show recipe --at <schema-commit>
 kind: recipe
 commit: <schema-commit>
 schema tree: <schema-tree>
@@ -116,20 +116,17 @@ every field is its own object, addressed by content:
 ## Commands
 
 ```
-git store                                   # list kinds
+git store                                   # print help
 git store compile <kind> [<value>]          # pure compile; prints document-tree OID
 git store put <kind> <name> [<value>]       # compile, then publish under <name>
 git store cat <tree-ish>                    # decode any document tree, ref, or commit
 git store get <kind> <name>                 # resolve a name, then decode it
-git store check <tree-ish> <schema>         # validate a value tree against a published schema
+git store check <tree-ish> --schema <kind>  # validate a value tree against a published schema
 git store list [<kind>]   (alias: ls)       # kinds, or live entity names
 git store log  <kind> <name>                # commit OID + date per publication
 git store rm   <kind> <name>                # publish a tombstone over a name
 git store schema put <kind> [-F <file>]    # define/evolve a kind (else stdin, or -i)
-git store schema get <kind> [--at <commit>] [--legacy-leaves] # schema as JSON
-git store schema inspect <kind> --at <commit> [--legacy-leaves] # inspect publication
-git store schema show [<kind>]              # field layout, human-readable
-git store schema list     (alias: ls)       # kinds with a published schema
+git store schema show [<kind>] [--at <commit>] # field layout, or full schema record as json
 git store schema log <kind>                 # schema evolution history
 git store ref list [--prefix <ref>] [--kind <kind>]
 git store ref resolve <full-ref>            # resolve a full ref to an OID
@@ -140,10 +137,11 @@ git store value decode <value-tree> --schema <tree-ish>
 git store document inspect <document-tree>
 git store document bind <value-tree> --schema <schema-tree>
 git store document publish <kind> <document-tree> --expected <absent|OID> [--alias <name>]
-git store entity delete <kind> <name>        # typed tombstone over a name
+git store entity delete <kind> <entity-id>  # typed tombstone over a canonical entity id
 
 # Global layout options (defaults shown):
 git store --data-prefix refs/store --schema-prefix refs/schema <command>
+git store --compat strict|legacy-leaves <command>  # how every decode reads stored leaves
 
 # Authoring flags on compile and put:
     -F, --file <FILE>                       # content from a file (else stdin, else $EDITOR)
@@ -153,11 +151,11 @@ git store --data-prefix refs/store --schema-prefix refs/schema <command>
 ```
 
 Writing is always an explicit `compile` or `put`, and a bare invocation
-defaults to listing — the same shape as `git remote`/`git branch`. At a
-terminal with no `-F` and nothing piped, `compile`/`put` open `$EDITOR` seeded
-from the selected schema, like `git notes add`. The explicit plumbing commands
-never infer a schema from a kind ref, commit trailer, or caller-selected name:
-pass `--schema` to `value encode`,
+prints help, like any clap app; `list` (alias `ls`) is the explicit way to
+list kinds. At a terminal with no `-F` and nothing piped, `compile`/`put`
+open `$EDITOR` seeded from the selected schema, like `git notes add`. The
+explicit plumbing commands never infer a schema from a kind ref, commit
+trailer, or caller-selected name: pass `--schema` to `check`, `value encode`,
 `value decode`, and `document bind`.
 
 All commands accept the global `--data-prefix` and `--schema-prefix` options.
@@ -207,16 +205,22 @@ tree; no kind lookup, schema-history guess, or trailer is consulted.
 then commits a prepared bound tree and updates the named ref and materialized
 index in one compare-and-swap batch.
 
-`schema get <kind> --at <commit>` returns the schema snapshot at an explicit
-publication commit; without `--at` it returns the current snapshot. `schema
-inspect <kind> --at <commit>` includes the kind, commit OID, schema-tree OID,
-and human-readable field layout. These commands are the historical schema
-selection surface; they do not mutate history.
+`schema show <kind> --at <commit>` returns the schema snapshot at an explicit
+publication commit; without `--at` it returns the current snapshot. Text
+renders the field layout (plus, with `--at`, the commit and schema-tree OIDs);
+`--json`/`--format json` render the full schema record (kind, commit,
+schema-tree OID, and schema). With no `<kind>` at all, it lists every
+published kind's field layout, and `--at` is rejected since there is no
+single kind to select a revision of. This is the historical schema selection
+surface; it does not mutate history. (`schema get`, `schema inspect`, and
+`schema list` remain as hidden, deprecated aliases.)
 
-Both commands are strict by default. Pass `--legacy-leaves` only when reading
-pre-`kind` schema documents or schema trees whose leaf blobs predate the
-newline framing. The flag uses the explicit compatibility decoder and exports
-the normalized schema JSON without changing ordinary schema reads.
+This and every other decoding command are strict by default. Pass the global
+`--compat legacy-leaves` only when reading pre-`kind` schema documents or
+schema trees whose leaf blobs predate the newline framing. It applies the
+explicit compatibility decoder for the whole invocation and exports the
+normalized JSON without changing ordinary reads. (`--legacy-leaves` remains
+as a hidden, deprecated per-invocation alias.)
 
 ### Refs, objects, and machine output
 
@@ -260,9 +264,10 @@ the document is published. Ref layout is application policy: an entity lives at
 `<entity-id>` is one such choice rather than a rule the store imposes. The
 per-kind index under `refs/cache/` is a materialized cache of the entity refs:
 those refs remain authoritative, and readers can fall back to them when the
-index is absent, malformed, or stale. `entity delete <kind> <name>` publishes a
-typed tombstone over that ref and updates the index atomically; it does not
-prune the ref.
+index is absent, malformed, or stale. `entity delete <kind> <entity-id>`
+addresses an entity by its canonical, content-derived id and publishes a typed
+tombstone over that ref, updating the index atomically without pruning the
+ref; `rm <kind> <name>` is the equivalent name-addressed porcelain.
 
 ### Script boundary
 

@@ -1285,10 +1285,14 @@ fn check_validates_a_value_tree_against_a_schema() {
     assert!(ok, "compile failed: {err}");
     let hash = out.trim();
 
-    let (_, err, ok) = run(path, None, &["check", &format!("{hash}:value"), "recipe"]);
+    let (_, err, ok) = run(
+        path,
+        None,
+        &["check", &format!("{hash}:value"), "--schema", "recipe"],
+    );
     assert!(ok, "check of a conforming value tree failed: {err}");
 
-    let (_, err, ok) = run(path, None, &["check", hash, "recipe"]);
+    let (_, err, ok) = run(path, None, &["check", hash, "--schema", "recipe"]);
     assert!(!ok, "check should refuse a non-value tree: {err}");
 }
 
