@@ -122,7 +122,7 @@ git store put <kind> <name> [<value>]       # compile, then publish under <name>
 git store cat <tree-ish>                    # decode any document tree, ref, or commit
 git store get <kind> <name>                 # resolve a name, then decode it
 git store check <tree-ish> --schema <kind>  # validate a value tree against a published schema
-git store list [<kind>]   (alias: ls)       # kinds, or live entity names
+git store list [<kind>] [--stale] (alias: ls) # kinds, or live entity names + commits
 git store log  <kind> <name>                # commit OID + date per publication
 git store rm   <kind> <name>                # publish a tombstone over a name
 git store schema put <kind> [-F <file>]    # define/evolve a kind (else stdin, or -i)
@@ -137,6 +137,8 @@ git store value decode <value-tree> --schema <tree-ish>
 git store document inspect <document-tree>
 git store document bind <value-tree> --schema <schema-tree>
 git store document publish <kind> <document-tree> --expected <absent|OID> [--alias <name>]
+git store document publish --batch [-F <file>]  # NDJSON records, one atomic CAS
+git store entity resolve <kind> <name>      # name -> content-derived id + CAS token
 git store entity delete <kind> <entity-id>  # typed tombstone over a canonical entity id
 
 # Global layout options (defaults shown):
@@ -275,3 +277,38 @@ batching, retry/resume, and policy. `git-store` supplies stable plumbing for
 reading and composing objects, plus explicit CAS publication. The library's
 read-time migration APIs are separate opt-in conveniences; neither the CLI's
 base reads nor its plumbing commands silently rewrite stored objects.
+
+What the plumbing does supply is everything that loop needs to be written from
+outside, without reconstructing a ref path — since ref layout is application
+policy and `--data-prefix` moves it:
+
+```sh
+# The worklist: entities not bound to the kind's current schema tree.
+# Documents carry their own schema, so a kind mid-migration is a legitimate
+# mixed state, and re-running this is how a resumed migration finds its place.
+schema_tree=$(git store --format json schema show recipe | jq -r .schema_tree)
+git store --format ndjson ls recipe --stale | jq -r .name | while read -r name; do
+  # `get` returns the value and the commit to expect on it, in one record.
+  git store --format json get recipe "$name" > cur.json
+  expected=$(jq -r .commit cur.json)
+
+  # ... the caller transforms the value; nothing here does it for you ...
+  jq '.value | .servings = .serves | del(.serves)' cur.json > new.json
+
+  value=$(git store value encode --schema "$schema_tree" -F new.json)
+  document=$(git store document bind "$value" --schema "$schema_tree")
+  printf '{"kind":"recipe","document_tree":"%s","expected":"%s","alias":"%s"}\n' \
+    "$document" "$expected" "$name"
+done > batch.ndjson
+
+# One compare-and-swap: every expectation is checked before any ref moves, so
+# a single stale one leaves the whole kind untouched (exit 4) rather than
+# half-migrated.
+git store document publish --batch -F batch.ndjson -m "recipe: serves -> servings"
+```
+
+`entity resolve <kind> <name>` yields the same commit as a standalone step,
+alongside the content-derived id, for callers that need the compare-and-swap
+token without decoding the value. Encoding is validation, so a transform that
+does not conform to the new schema fails at `value encode` — before any
+document is bound and long before a ref moves.

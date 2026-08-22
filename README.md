@@ -119,7 +119,13 @@ keeps the canonical ref; it does not hard-delete or prune the entity.
 
 Bash, Git, or another caller owns migration traversal, source/target selection,
 transforms, batching, retry/resume, and policy. The CLI provides no `migrate`
-subcommand and does not silently rewrite stored objects.
+subcommand and does not silently rewrite stored objects. It does supply the
+plumbing such a caller needs: `ls <kind> --stale` is the worklist of entities
+not bound to the kind's current schema tree, `get` and `entity resolve` return
+the compare-and-swap token alongside the value so no caller constructs a ref
+path, and `document publish --batch` lands a rewritten set as one
+all-or-nothing compare-and-swap. See the migration recipe in
+[`crates/git-store/README.md`](crates/git-store/README.md#script-boundary).
 
 ## Compatibility limitations
 

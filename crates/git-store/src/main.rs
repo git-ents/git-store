@@ -22,6 +22,7 @@
 
 mod interactive;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -76,6 +77,13 @@ Options:
 const AFTER_HELP: &str = "\
 The pipeline: value encode → document bind → document publish
 `put` is shorthand for exactly that composition.
+
+Migrating a kind to a new schema is that pipeline in a loop. There is no
+`migrate` command: nothing here transforms a value, the caller does.
+  ls <kind> --stale             what is not on the current schema yet
+  get <kind> <name>             the value, and the commit to expect on it
+  entity resolve <kind> <name>  that commit again, without a ref path
+  document publish --batch      land the rewritten set atomically
 
 Exit codes: 1 error · 2 invalid args or shape · 3 not found · 4 CAS conflict · 5 schema/value/document failure";
 
@@ -262,8 +270,17 @@ enum Command {
     /// Validate the repository's supported object format and schema bootstrap.
     Doctor,
     /// List kinds, or the entity names within a kind.
+    ///
+    /// With `--stale`, list only those entities whose bound schema tree is
+    /// not the kind's current one — the worklist a schema migration has left
+    /// to do, and the question a resumed migration asks first.
     #[command(visible_alias = "ls")]
-    List { kind: Option<String> },
+    List {
+        kind: Option<String>,
+        /// Only entities not bound to the kind's current schema tree.
+        #[arg(long, requires = "kind")]
+        stale: bool,
+    },
     /// Show an entity's version history, newest first.
     Log { kind: String, name: String },
     /// Delete an entity.
@@ -397,23 +414,43 @@ enum DocumentCommand {
         schema: String,
     },
     /// Publish a prepared document using an explicit compare-and-swap.
+    ///
+    /// With `--batch`, read many publications as NDJSON instead of taking
+    /// them as arguments, and land them as one all-or-nothing
+    /// compare-and-swap: every record's `expected` is checked before any ref
+    /// moves, so a single stale expectation leaves the whole batch unwritten.
+    /// Each line is an object of `kind`, `document_tree`, `expected`, and an
+    /// optional `alias`.
     Publish {
-        kind: String,
-        document_tree_ish: String,
-        #[arg(long)]
+        #[arg(required_unless_present = "batch")]
+        kind: Option<String>,
+        #[arg(required_unless_present = "batch")]
+        document_tree_ish: Option<String>,
+        #[arg(long, conflicts_with = "batch")]
         alias: Option<String>,
-        #[arg(long)]
-        expected: String,
+        #[arg(long, required_unless_present = "batch", conflicts_with = "batch")]
+        expected: Option<String>,
         /// Parent commit for a newly written publication commit.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "batch")]
         parent: Option<String>,
         #[arg(short = 'm', long = "message")]
         message: Option<String>,
+        /// Read NDJSON publication records instead of taking one as
+        /// arguments, and commit them atomically.
+        #[arg(long, conflicts_with_all = ["kind", "document_tree_ish"])]
+        batch: bool,
+        /// NDJSON file to read `--batch` records from; stdin when omitted.
+        #[arg(short = 'F', long = "file", value_name = "FILE", requires = "batch")]
+        file: Option<PathBuf>,
     },
 }
 
 #[derive(Subcommand)]
 enum EntityCommand {
+    /// Resolve a name to the content-derived id and publication commit it
+    /// currently holds — the compare-and-swap token `document publish
+    /// --expected` wants, without constructing a ref path by hand.
+    Resolve { kind: String, name: String },
     /// Publish a canonical tombstone for an entity, addressed by its
     /// content-derived id — the document-tree hash `compile`/`put` print,
     /// not a caller-chosen name. Use `rm` to delete by name.
@@ -496,8 +533,11 @@ fn run() -> Result<()> {
         Command::Get { kind, name } => get(&repo, &store, &kind, &name, output)?,
         Command::Check { tree_ish, schema } => check(&repo, &store, &tree_ish, &schema, output)?,
         Command::Doctor => doctor(&repo, &store, output)?,
-        Command::List { kind: Some(kind) } => list_entities(&store, &kind, output)?,
-        Command::List { kind: None } => list_kinds(&store, output)?,
+        Command::List {
+            kind: Some(kind),
+            stale,
+        } => list_entities(&repo, &store, &kind, stale, output)?,
+        Command::List { kind: None, .. } => list_kinds(&store, output)?,
         Command::Log { kind, name } => log(&repo, &store, &kind, &name, output)?,
         Command::Rm { kind, name } => rm(&store, &kind, &name, output)?,
         Command::Schema { command } => match command {
@@ -553,20 +593,28 @@ fn run() -> Result<()> {
                 schema,
             } => document_bind(&repo, &store, &value_tree_ish, &schema, output)?,
             DocumentCommand::Publish {
+                batch: true,
+                file,
+                message,
+                ..
+            } => document_publish_batch(&repo, &store, file.as_ref(), message.as_deref(), output)?,
+            DocumentCommand::Publish {
                 kind,
                 document_tree_ish,
                 alias,
                 expected,
                 parent,
                 message,
+                ..
             } => document_publish(
                 &repo,
                 &store,
                 DocumentPublishRequest {
-                    kind: &kind,
-                    document_spec: &document_tree_ish,
+                    kind: &kind.expect("clap requires <kind> without --batch"),
+                    document_spec: &document_tree_ish
+                        .expect("clap requires <document-tree-ish> without --batch"),
                     alias: alias.as_deref(),
-                    expected: &expected,
+                    expected: &expected.expect("clap requires --expected without --batch"),
                     parent: parent.as_deref(),
                     message: message.as_deref(),
                 },
@@ -574,6 +622,9 @@ fn run() -> Result<()> {
             )?,
         },
         Command::Entity { command } => match command {
+            EntityCommand::Resolve { kind, name } => {
+                entity_resolve(&repo, &store, &kind, &name, output)?
+            }
             EntityCommand::Delete { kind, entity_id } => {
                 entity_delete(&store, &kind, &entity_id, output)?
             }
@@ -1182,6 +1233,115 @@ fn document_publish(
     emit_publication(format, kind, publication)
 }
 
+/// `document publish --batch`: publish many prepared documents as one
+/// all-or-nothing compare-and-swap.
+///
+/// [`gix_store::Transaction`] checks every staged expectation before writing
+/// anything, so a migration over many entities either lands whole or leaves
+/// the store exactly as it was — no half-migrated kind to reason about on the
+/// next run. Records are read as NDJSON so a caller can generate them a line
+/// at a time; a malformed line names its own line number and nothing is
+/// published.
+fn document_publish_batch(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    file: Option<&PathBuf>,
+    message: Option<&str>,
+    format: OutputFormat,
+) -> Result<()> {
+    let source = read_source(file)?;
+    let records = parse_batch(&source)?;
+    if records.is_empty() {
+        return Err(cli_error(ExitClass::Invalid, "no publication records"));
+    }
+    let mut transaction = store.transaction(message.unwrap_or("publish prepared documents"));
+    let mut kinds = Vec::with_capacity(records.len());
+    for record in &records {
+        let kind = segment("kind", &record.kind)?;
+        let document = resolve_tree(repo, &record.document_tree)?;
+        transaction = transaction.publish(
+            &kind,
+            DocumentTree::from(document),
+            parse_expectation(&record.expected)?,
+        );
+        if let Some(alias) = &record.alias {
+            transaction = transaction.alias(entity(alias)?);
+        }
+        kinds.push(record.kind.clone());
+    }
+    let publications = transaction.commit().map_err(|error| {
+        if matches!(error, gix_store::Error::Backend(_)) {
+            // As in `document_publish`: this command supplies explicit
+            // expectations, so a backend failure here is a lost race.
+            cli_error(ExitClass::Cas, error.to_string())
+        } else {
+            error.into()
+        }
+    })?;
+    let items = kinds
+        .into_iter()
+        .zip(publications)
+        .map(|(kind, publication)| {
+            let id = publication.entity_id();
+            let commit = publication.commit();
+            let mut fields = VObject::new();
+            fields.insert("kind", kind);
+            fields.insert("id", id.to_string());
+            fields.insert("commit", oid_value(commit));
+            ListItem {
+                text: format!("{id} {commit}"),
+                fields,
+            }
+        })
+        .collect();
+    emit_list(format, "publications", items)
+}
+
+/// One `document publish --batch` NDJSON record.
+struct BatchRecord {
+    kind: String,
+    document_tree: String,
+    expected: String,
+    alias: Option<String>,
+}
+
+/// Parse NDJSON publication records, skipping blank lines.
+fn parse_batch(source: &str) -> Result<Vec<BatchRecord>> {
+    let mut records = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let at = |what: &str| cli_error(ExitClass::Invalid, format!("line {}: {what}", index + 1));
+        let value: Value =
+            facet_json::from_str(line).map_err(|error| at(&format!("invalid JSON: {error}")))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| at("expected a JSON object"))?;
+        let field = |name: &str| -> Result<Option<String>> {
+            match object.get(name) {
+                Some(found) => Ok(Some(
+                    found
+                        .as_string()
+                        .ok_or_else(|| at(&format!("{name} must be a string")))?
+                        .as_str()
+                        .to_owned(),
+                )),
+                None => Ok(None),
+            }
+        };
+        let required = |name: &str| field(name)?.ok_or_else(|| at(&format!("missing {name}")));
+        records.push(BatchRecord {
+            kind: required("kind")?,
+            document_tree: required("document_tree")?,
+            expected: required("expected")?,
+            alias: field("alias")?,
+        });
+    }
+    Ok(records)
+}
+
 /// Render a [`Publication`]: text prints the entity id and its publication
 /// commit, one per line; `json`/`ndjson` render the same two fields plus
 /// `kind` in one record. The id is the document-tree oid by construction, so
@@ -1194,6 +1354,45 @@ fn emit_publication(format: OutputFormat, kind: &str, publication: Publication) 
     fields.insert("id", id.to_string());
     fields.insert("commit", oid_value(commit));
     emit_single(format, fields, || format!("{id}\n{commit}"))
+}
+
+/// `entity resolve <kind> <name>`: the content-derived id and publication
+/// commit `name` currently holds.
+///
+/// Ref layout is application policy, so a caller must not have to spell
+/// `refs/store/<kind>/<name>` to obtain a compare-and-swap token; this is the
+/// supported way to turn a name into the `--expected` `document publish`
+/// wants, and into the `<entity-id>` `entity delete` addresses.
+fn entity_resolve(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    kind: &str,
+    name: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    let handle = store.dynamic(segment("kind", kind)?);
+    let entry = match handle.read(entity(name)?)? {
+        EntityState::Present(entry) => entry,
+        EntityState::Deleted(_) => bail!("entity {kind}/{name} is deleted"),
+        EntityState::Absent => {
+            return Err(cli_error(
+                ExitClass::NotFound,
+                format!("no entity {kind}/{name}"),
+            ));
+        }
+    };
+    // The publication commit's tree is the bound document, and a bound
+    // document's tree hash is the entity id by construction.
+    let id = EntityId::from(DocumentTree::from(resolve_tree(
+        repo,
+        &entry.commit.to_string(),
+    )?));
+    let mut fields = VObject::new();
+    fields.insert("kind", kind.to_owned());
+    fields.insert("name", name.to_owned());
+    fields.insert("id", id.to_string());
+    fields.insert("commit", oid_value(entry.commit));
+    emit_single(format, fields, || format!("{id}\n{}", entry.commit))
 }
 
 /// `entity delete <kind> <entity-id>`: publish a tombstone at the id's
@@ -1491,8 +1690,8 @@ fn get(
         }
         None => handle.read(name_seg)?,
     };
-    let value = match state {
-        EntityState::Present(entry) => entry.value,
+    let entry = match state {
+        EntityState::Present(entry) => entry,
         EntityState::Deleted(_) => bail!("entity {kind}/{name} is deleted"),
         EntityState::Absent => {
             return Err(cli_error(
@@ -1501,14 +1700,25 @@ fn get(
             ));
         }
     };
-    emit_value(format, value)
+    emit_value_at(format, entry.value, Some(entry.commit))
 }
 
 /// Render a decoded document value: `{value}` under `json`/`ndjson`, its
 /// pretty JSON alone as text. Shared by `cat` and `get`.
 fn emit_value(format: OutputFormat, value: Value) -> Result<()> {
+    emit_value_at(format, value, None)
+}
+
+/// [`emit_value`], plus the publication commit the value was read from when
+/// there is one. `get` carries it so a reader has the compare-and-swap token
+/// for the value it just read, in the same record; `cat` decodes a tree that
+/// need not be published at all, and passes `None`.
+fn emit_value_at(format: OutputFormat, value: Value, commit: Option<ObjectId>) -> Result<()> {
     let mut fields = VObject::new();
     fields.insert("value", value.clone());
+    if let Some(commit) = commit {
+        fields.insert("commit", oid_value(commit));
+    }
     emit_single(format, fields, || to_json(&value).unwrap_or_default())
 }
 
@@ -1789,22 +1999,67 @@ fn list_kinds(store: &RepoStore<'_>, format: OutputFormat) -> Result<()> {
     emit_list(format, "kinds", items)
 }
 
-/// `list`/`ls <kind>`: the live entity names published under `kind`.
-fn list_entities(store: &RepoStore<'_>, kind: &str, format: OutputFormat) -> Result<()> {
-    let items = store
-        .dynamic(segment("kind", kind)?)
-        .list()?
-        .into_iter()
-        .map(|name| {
-            let mut fields = VObject::new();
-            fields.insert("name", name.to_string());
-            ListItem {
-                text: name.to_string(),
-                fields,
-            }
-        })
-        .collect();
+/// `list`/`ls <kind>`: the live entity names published under `kind`, each
+/// with the publication commit that names it — so enumerating a kind and
+/// collecting its compare-and-swap tokens is one invocation, not one per
+/// entity over a hand-built ref path.
+///
+/// `--stale` narrows the list to entities whose bound schema tree is not the
+/// kind's current one. Documents carry their own schema, so a kind mid-
+/// migration is a legitimate mixed state; this is how a caller asks what is
+/// left of it.
+fn list_entities(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    kind: &str,
+    stale: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    let handle = store.dynamic(segment("kind", kind)?);
+    // `list_entries` includes tombstoned names; `list` is the live set. Read
+    // both rather than filtering by hand, so "live" keeps one definition.
+    let live: BTreeSet<RefPath> = handle.list()?.into_iter().collect();
+    let current = if stale {
+        Some(handle.schema().current_snapshot()?.schema_tree())
+    } else {
+        None
+    };
+    let mut items = Vec::new();
+    for (name, commit) in handle.list_entries()? {
+        if !live.contains(&name) {
+            continue;
+        }
+        if let Some(current) = current
+            && bound_schema_tree(repo, store, commit)? == Some(current)
+        {
+            continue;
+        }
+        let mut fields = VObject::new();
+        fields.insert("name", name.to_string());
+        fields.insert("commit", oid_value(commit));
+        items.push(ListItem {
+            text: name.to_string(),
+            fields,
+        });
+    }
     emit_list(format, "entities", items)
+}
+
+/// The schema tree a publication commit's document is bound to, or `None`
+/// when its tree is not a bound `{schema/, value/}` document — a legacy
+/// unbound root is never "current", so `--stale` keeps it.
+fn bound_schema_tree(
+    repo: &gix::Repository,
+    store: &RepoStore<'_>,
+    commit: ObjectId,
+) -> Result<Option<SchemaTree>> {
+    let tree = resolve_tree(repo, &commit.to_string())?;
+    match store.inspect_document(DocumentTree::from(tree))? {
+        DocumentInspection::Bound(prepared) => Ok(Some(prepared.schema_tree())),
+        DocumentInspection::LegacyValueRoot { .. } | DocumentInspection::Malformed { .. } => {
+            Ok(None)
+        }
+    }
 }
 
 /// `log <kind> <name>`: `name`'s publication history, newest first.

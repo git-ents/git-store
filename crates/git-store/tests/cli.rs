@@ -1355,3 +1355,325 @@ fn porcelain_commands_honor_the_output_format() {
     assert_parses_as_json(out.trim());
     assert_eq!(json_string_field(&out, "status"), "deleted");
 }
+
+/// A `Recipe` with one field renamed, to migrate toward.
+#[derive(Facet)]
+struct Dish {
+    title: String,
+    servings: u32,
+    steps: Vec<String>,
+}
+
+/// The whole point of the plumbing: drive a schema migration from outside,
+/// without a `migrate` subcommand and without the CLI transforming anything.
+///
+/// This is the loop an external caller (a script, or an LLM asked to rename a
+/// field) actually runs, so it exercises the three things that loop needs and
+/// nothing else can supply: `ls --stale` for the worklist, `entity resolve`
+/// for a compare-and-swap token that costs no ref-path construction, and
+/// `document publish --batch` to land the result atomically.
+#[test]
+fn the_plumbing_drives_an_external_schema_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let v1 = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&v1), &["schema", "put", "recipe"]);
+    assert!(ok, "schema put failed: {err}");
+    for name in ["carbonara", "cacio"] {
+        let (_, err, ok) = run(
+            path,
+            None,
+            &[
+                "put",
+                "recipe",
+                name,
+                r#"{"title":"x","serves":4,"steps":["boil"]}"#,
+            ],
+        );
+        assert!(ok, "put {name} failed: {err}");
+    }
+
+    // Nothing is stale while every entity is bound to the published schema.
+    let (stale, err, ok) = run(
+        path,
+        None,
+        &["--format", "ndjson", "ls", "recipe", "--stale"],
+    );
+    assert!(ok, "ls --stale failed: {err}");
+    assert!(stale.trim().is_empty(), "nothing should be stale: {stale}");
+
+    let v2 = facet_json::to_string(&schema_of::<Dish>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&v2), &["schema", "put", "recipe"]);
+    assert!(ok, "schema evolve failed: {err}");
+    let (schema, err, ok) = run(
+        path,
+        None,
+        &["--format", "json", "schema", "show", "recipe"],
+    );
+    assert!(ok, "schema show failed: {err}");
+    let schema_tree = json_string_field(&schema, "schema_tree");
+
+    // Advancing the schema makes every existing entity stale, and that is the
+    // worklist — no ref path was spelled to obtain it.
+    let (stale, err, ok) = run(
+        path,
+        None,
+        &["--format", "ndjson", "ls", "recipe", "--stale"],
+    );
+    assert!(ok, "ls --stale failed: {err}");
+    let names: Vec<String> = stale
+        .lines()
+        .map(|line| json_string_field(line, "name"))
+        .collect();
+    assert_eq!(names, vec!["cacio", "carbonara"]);
+
+    let mut batch = String::new();
+    for name in &names {
+        let (encoded, err, ok) = run(
+            path,
+            Some(r#"{"title":"x","servings":4,"steps":["boil"]}"#),
+            &["value", "encode", "--schema", &schema_tree],
+        );
+        assert!(ok, "value encode failed: {err}");
+        let (bound, err, ok) = run(
+            path,
+            None,
+            &["document", "bind", encoded.trim(), "--schema", &schema_tree],
+        );
+        assert!(ok, "document bind failed: {err}");
+        let (resolved, err, ok) = run(
+            path,
+            None,
+            &["--format", "json", "entity", "resolve", "recipe", name],
+        );
+        assert!(ok, "entity resolve failed: {err}");
+        batch.push_str(&format!(
+            r#"{{"kind":"recipe","document_tree":"{}","expected":"{}","alias":"{name}"}}"#,
+            bound.trim(),
+            json_string_field(&resolved, "commit"),
+        ));
+        batch.push('\n');
+    }
+
+    let (published, err, ok) = run(
+        path,
+        Some(&batch),
+        &["--format", "json", "document", "publish", "--batch"],
+    );
+    assert!(ok, "batch publish failed: {err}");
+    assert_eq!(
+        published.lines().count(),
+        1,
+        "json is one record: {published}"
+    );
+
+    // The migration is complete, and the values read back under the new
+    // schema — the stored trees were never rewritten, only republished.
+    let (stale, err, ok) = run(
+        path,
+        None,
+        &["--format", "ndjson", "ls", "recipe", "--stale"],
+    );
+    assert!(ok, "ls --stale failed: {err}");
+    assert!(
+        stale.trim().is_empty(),
+        "migration left stale entities: {stale}"
+    );
+    let (value, err, ok) = run(
+        path,
+        None,
+        &["--format", "json", "get", "recipe", "carbonara"],
+    );
+    assert!(ok, "get failed: {err}");
+    assert!(value.contains("servings"), "not migrated: {value}");
+}
+
+/// A batch is one compare-and-swap: a single stale expectation anywhere in it
+/// leaves every ref it would have touched unchanged, so an interrupted or
+/// raced migration never leaves a half-migrated kind to reason about.
+#[test]
+fn a_batch_publish_lands_whole_or_not_at_all() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "schema put failed: {err}");
+    let (schema_out, err, ok) = run(
+        path,
+        None,
+        &["--format", "json", "schema", "show", "recipe"],
+    );
+    assert!(ok, "schema show failed: {err}");
+    let schema_tree = json_string_field(&schema_out, "schema_tree");
+    let (_, err, ok) = run(
+        path,
+        None,
+        &[
+            "put",
+            "recipe",
+            "carbonara",
+            r#"{"title":"x","serves":4,"steps":["boil"]}"#,
+        ],
+    );
+    assert!(ok, "put failed: {err}");
+
+    let (encoded, err, ok) = run(
+        path,
+        Some(r#"{"title":"changed","serves":9,"steps":["stir"]}"#),
+        &["value", "encode", "--schema", &schema_tree],
+    );
+    assert!(ok, "value encode failed: {err}");
+    let (bound, err, ok) = run(
+        path,
+        None,
+        &["document", "bind", encoded.trim(), "--schema", &schema_tree],
+    );
+    assert!(ok, "document bind failed: {err}");
+    let (resolved, err, ok) = run(
+        path,
+        None,
+        &[
+            "--format",
+            "json",
+            "entity",
+            "resolve",
+            "recipe",
+            "carbonara",
+        ],
+    );
+    assert!(ok, "entity resolve failed: {err}");
+
+    // The first record is entirely valid; the second names an expectation
+    // that was never true.
+    let batch = format!(
+        "{{\"kind\":\"recipe\",\"document_tree\":\"{tree}\",\"expected\":\"{expected}\",\"alias\":\"carbonara\"}}\n\
+         {{\"kind\":\"recipe\",\"document_tree\":\"{tree}\",\"expected\":\"{stale}\",\"alias\":\"cacio\"}}\n",
+        tree = bound.trim(),
+        expected = json_string_field(&resolved, "commit"),
+        stale = "0".repeat(39) + "1",
+    );
+
+    let before = refs_snapshot(path);
+    let (_, err, code) = run_with_status(path, Some(&batch), &["document", "publish", "--batch"]);
+    assert_eq!(code, 4, "a lost compare-and-swap exits 4: {err}");
+    assert_eq!(
+        before,
+        refs_snapshot(path),
+        "the valid record in the batch must not have landed either"
+    );
+}
+
+/// `entity resolve` turns a caller-chosen name into the content-derived id
+/// and the compare-and-swap token, so no caller has to construct
+/// `refs/store/<kind>/<name>` — a layout that is application policy and that
+/// `--data-prefix` moves.
+#[test]
+fn entity_resolve_yields_the_id_and_cas_token_without_a_ref_path() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "schema put failed: {err}");
+    let (put, err, ok) = run(
+        path,
+        None,
+        &[
+            "--format",
+            "json",
+            "put",
+            "recipe",
+            "carbonara",
+            r#"{"title":"x","serves":4,"steps":["boil"]}"#,
+        ],
+    );
+    assert!(ok, "put failed: {err}");
+
+    let (resolved, err, ok) = run(
+        path,
+        None,
+        &[
+            "--format",
+            "json",
+            "entity",
+            "resolve",
+            "recipe",
+            "carbonara",
+        ],
+    );
+    assert!(ok, "entity resolve failed: {err}");
+    assert_eq!(
+        json_string_field(&resolved, "id"),
+        json_string_field(&put, "id"),
+        "resolve must report the same content-derived id put printed"
+    );
+    assert_eq!(
+        json_string_field(&resolved, "commit"),
+        json_string_field(&put, "commit"),
+        "resolve must report the publication commit as the CAS token"
+    );
+
+    // `get` carries the same token, so reading a value and holding its
+    // expectation is one invocation.
+    let (got, err, ok) = run(
+        path,
+        None,
+        &["--format", "json", "get", "recipe", "carbonara"],
+    );
+    assert!(ok, "get failed: {err}");
+    assert_eq!(
+        json_string_field(&got, "commit"),
+        json_string_field(&put, "commit")
+    );
+
+    let (_, err, code) = run_with_status(path, None, &["entity", "resolve", "recipe", "absent"]);
+    assert_eq!(code, 3, "an absent entity is not found: {err}");
+}
+
+/// clap cannot check the hand-written subcommand listing in `HELP_TEMPLATE`,
+/// so nothing but this test stops the help from advertising a command that
+/// does not exist — as it did for `entity resolve`.
+#[test]
+fn every_command_the_help_advertises_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    let (help, err, ok) = run(path, None, &["--help"]);
+    assert!(ok, "--help failed: {err}");
+
+    for line in help.lines() {
+        // The grouped listing's rows: two-space indent, a command, then
+        // either its subcommands as `a | b` or a prose description.
+        let Some(row) = line.strip_prefix("  ") else {
+            continue;
+        };
+        let mut parts = row.split_whitespace();
+        let (Some(group), Some(rest)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if !rest.chars().all(|c| c.is_ascii_lowercase()) {
+            continue;
+        }
+        let subs: Vec<&str> = row
+            .split_whitespace()
+            .skip(1)
+            .filter(|part| *part != "|")
+            .collect();
+        if !row.contains('|') {
+            continue;
+        }
+        for sub in subs {
+            let (_, err, ok) = run(path, None, &[group, sub, "--help"]);
+            assert!(
+                ok,
+                "help advertises `{group} {sub}`, which does not exist: {err}"
+            );
+        }
+    }
+}
