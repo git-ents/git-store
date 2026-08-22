@@ -1701,6 +1701,7 @@ fn every_command_the_docs_show_exists() {
         "crates/gix-store/README.md",
         "docs/specification.adoc",
         "docs/design-alignment-plan.md",
+        "docs/migrate-existing-entities.sh",
     ];
 
     let dir = tempfile::tempdir().unwrap();
@@ -1710,6 +1711,15 @@ fn every_command_the_docs_show_exists() {
     let mut checked = 0usize;
     for doc in docs {
         let text = std::fs::read_to_string(root.join(doc)).unwrap();
+        // The shell transcript reaches the CLI through a `store` helper and
+        // wraps invocations across continuation lines, so neither the command
+        // name nor the whole invocation is visible to the scan below. This is
+        // how it drifted onto `schema get`/`schema inspect` unnoticed.
+        let text = if doc.ends_with(".sh") {
+            shell_transcript(&text)
+        } else {
+            text
+        };
         for (offset, _) in text.match_indices("git store ") {
             let mut tokens = text[offset..]
                 .lines()
@@ -1755,5 +1765,31 @@ fn every_command_the_docs_show_exists() {
             checked += 1;
         }
     }
-    assert!(checked > 30, "expected to check many commands, got {checked}");
+    assert!(
+        checked > 30,
+        "expected to check many commands, got {checked}"
+    );
+}
+
+/// Splice continuation lines and rewrite the `store` helper to the `git store`
+/// the scan in [`every_command_the_docs_show_exists`] looks for.
+fn shell_transcript(text: &str) -> String {
+    /// What precedes the helper when it is being invoked rather than named:
+    /// the start of a command, a condition, a substitution, or a pipe.
+    const OPENERS: [&str; 3] = ["if ", "$(", "| "];
+
+    text.replace("\\\n", " ")
+        .lines()
+        .map(|line| {
+            let mut line = line.trim_start().to_owned();
+            for opener in OPENERS {
+                line = line.replace(&format!("{opener}store "), &format!("{opener}git store "));
+            }
+            match line.strip_prefix("store ") {
+                Some(rest) => format!("git store {rest}"),
+                None => line,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

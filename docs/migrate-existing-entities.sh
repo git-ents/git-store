@@ -3,6 +3,10 @@
 # This is the exact plumbing transcript for the live repositories. It never
 # deletes refs, publication commits, or schema history.
 #
+# Command names track the current CLI: the legacy read is `cat <tree-ish>`
+# under `--compat legacy-leaves`, and historical schema addressing is
+# `schema show --at`. The recorded OIDs and the workflow are unchanged.
+#
 # Each legacy value is explicitly decoded, encoded against the current schema,
 # bound into a self-contained document, and published with the old publication
 # commit as its first parent. The CLI intentionally has no migrate workflow;
@@ -23,15 +27,18 @@ normalize_schema() {
   local data_prefix=$1
   local kind=$2
 
-  # A strict inspection is the feature probe. Legacy schema documents are
+  # A strict read is the feature probe. Legacy schema documents are
   # explicitly opted into, then immediately republished in the current format.
   if store --data-prefix "$data_prefix" --schema-prefix refs/schema \
-    schema inspect "$kind" --at "refs/schema/$kind" >/dev/null 2>&1; then
+    schema show "$kind" --at "refs/schema/$kind" >/dev/null 2>&1; then
     return
   fi
 
-  store --data-prefix "$data_prefix" --schema-prefix refs/schema \
-    schema get "$kind" --legacy-leaves \
+  # `schema show` wraps the record in a status envelope; `schema put` takes the
+  # bare schema, which is the envelope's `schema` field.
+  store --format json --data-prefix "$data_prefix" --schema-prefix refs/schema \
+    schema show "$kind" --compat legacy-leaves \
+    | jq -c .schema \
     | store --data-prefix "$data_prefix" --schema-prefix refs/schema \
       schema put "$kind"
 }
@@ -45,7 +52,7 @@ migrate_document() {
 
   local value_json value_tree document_tree
   value_json=$(store --data-prefix "$data_prefix" --schema-prefix refs/schema \
-    get "$legacy_document" --legacy-leaves)
+    cat "$legacy_document" --compat legacy-leaves)
   value_tree=$(printf '%s\n' "$value_json" \
     | store --data-prefix "$data_prefix" --schema-prefix refs/schema \
       value encode --schema "refs/schema/$kind")
