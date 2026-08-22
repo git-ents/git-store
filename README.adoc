@@ -52,9 +52,9 @@ ref still points to a tombstone. The tombstone uses the same bound
 `{schema, value}` frame and remains readable without a schema publication ref
 or materialized index.
 
-The primary CLI form, `git store get <tree-ish>`, decodes a bound document from
-the tree it names. The hidden compatibility form, `git store get <kind> <name>`,
-reads a named ref and reports deleted entities differently from missing ones;
+`git store cat <tree-ish>` decodes a bound document from the tree it names,
+content-addressed and needing no name. `git store get <kind> <name>` resolves a
+name first, and reports deleted entities differently from missing ones;
 revision suffixes such as `name~1` and `name@<revision>` address history.
 `git store rm <kind> <name>` publishes a tombstone over that name. It does not
 hard-delete refs, so the name's earlier publications stay reachable; repeating
@@ -79,16 +79,21 @@ schema-schema pin. Old schema objects that predate the embedded kind name are
 not made self-describing by guessing from a publication ref and are not
 automatically upgraded; they need an explicit compatibility conversion or
 republishing under the current format. Base reads do not guess migration
-history. The `get_migrated` family is an explicit opt-in library convenience
-whose current target is the selected `Kind`'s current published schema and
-history; when the source is absent from that history or a migration edge is
-missing, the operation fails rather than silently guessing or rewriting stored
-objects.
+history. `Kind::read_as` is an explicit opt-in taking a `TargetSchema` the
+caller selects, which `KindSchema::current_target` builds from the selected
+`Kind`'s current published schema and history; when the source is absent from
+that history or a migration edge is missing, the operation fails rather than
+silently guessing or rewriting stored objects.
 
 == Composable CLI Plumbing
 
 The `git store` binary exposes small Git-shaped operations for manually scripted
-migrations. It deliberately has no hard-coded `migrate` workflow.
+migrations. It deliberately has no hard-coded `migrate` workflow. What it does
+supply is the plumbing such a script needs: `git store ls <kind> --stale` is the
+worklist of entities not bound to the kind's current schema tree, `git store get`
+and `git store entity resolve` return the compare-and-swap token alongside the
+value, and `git store document publish --batch` lands a rewritten set as one
+all-or-nothing compare-and-swap.
 
 === Explicit Schema Selection
 
@@ -111,10 +116,10 @@ bound document <document-tree>
   schema: <schema-tree>
 ----
 
-`schema get <kind> --at <commit>` returns the schema snapshot at that historical
-publication commit. `schema inspect <kind> --at <commit>` reports the kind,
-publication commit OID, schema-tree OID, and human-readable field layout.
-Without `--at`, `schema get` reads the current snapshot.
+`git store schema show <kind> --at <commit>` returns the schema snapshot at
+that historical publication commit, reporting the kind, publication commit OID,
+schema-tree OID, and human-readable field layout. Without `--at` it reads the
+current snapshot; without `<kind>` it shows every published kind.
 
 === Refs and Objects
 

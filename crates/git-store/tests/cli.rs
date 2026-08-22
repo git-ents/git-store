@@ -1702,6 +1702,7 @@ fn every_command_the_docs_show_exists() {
         "docs/specification.adoc",
         "docs/design-alignment-plan.md",
         "docs/migrate-existing-entities.sh",
+        "README.adoc",
     ];
 
     let dir = tempfile::tempdir().unwrap();
