@@ -3,175 +3,168 @@
 :email: joseph.carpinelli@icloud.com
 :description: Self-contained typed documents stored as Git trees, thanks to `facet.rs` reflection in Rust.
 
-== Settled Storage Model
+Store self-contained structured documents in Git with versioned schemas and
+ordinary Git history. Every document carries the exact `{schema, value}` pair
+used to encode it, so older values remain readable after a schema evolves and
+ordinary reads do not depend on a current schema ref. The CLI is composable
+plumbing for manually scripted migrations; it does not contain a hard-coded
+migration workflow.
 
-A data document is a self-contained Git tree whose root contains exactly
-`schema/` and `value/`. The `schema/` subtree is the exact schema used to
-validate the `value/` subtree. Ordinary decoding reads this `{schema, value}`
-pair from the document itself, so it does not require a current schema ref or
-any other second ref to be present.
-
-Schema refs such as `refs/schema/<publication>` are an index and a publication
-or history mechanism. They help discover and author schemas, but they do not
-define the type of an existing document. The schema document carries the kind
-name and its own schema identity; moving, renaming, or omitting a publication
-ref does not change how a self-contained document is decoded.
-
-New commits contain no `Schema:`, `Schema-Version:`, or `Ents-Ref:` trailers.
-Those names describe metadata found on historical Git objects only. Readers
-ignore legacy trailers, including malformed or conflicting values, and never
-use them to choose a schema.
-
-Names remain how entities are addressed. A name is not the document's type
-definition and not its content identity, both of which live in the document
-itself.
-
-== Entity Identity and Refs
-
-`EntityId` is the OID of the complete bound document tree: the root containing
-exactly `schema/` and `value/`. It is not the OID of the publication commit and
-it is not a caller-selected name. Both the embedded schema and encoded value
-therefore contribute to the identity.
-
-Identity is a derived value, not a ref layout. Data refs are
-`refs/store/<kind>/<name>`, and the name is whatever the caller chooses: the
-store attaches no meaning to it and advances it like a branch. Applications
-decide what names mean. An application that wants content-addressed storage
-selects `<entity-id>` as the name, which the store treats like any other;
-`put_entity`, `read_entity`, and `entity_reference` are the shorthand for that
-policy, and `compile_entity` derives the id for any document without publishing
-it.
-
-== Deletion and CLI Compatibility
-
-Deletion is a typed document, not an empty tree and not ref pruning. Its value
-contains the explicit `Deleted` state, the kind, and the original `EntityId`.
-`EntityState` distinguishes `Present`, `Absent`, and `Deleted`: `Absent` means
-there is no ref (including an old hard-deleted ref), while `Deleted` means the
-ref still points to a tombstone. The tombstone uses the same bound
-`{schema, value}` frame and remains readable without a schema publication ref
-or materialized index.
-
-`git store cat <tree-ish>` decodes a bound document from the tree it names,
-content-addressed and needing no name. `git store get <kind> <name>` resolves a
-name first, and reports deleted entities differently from missing ones;
-revision suffixes such as `name~1` and `name@<revision>` address history.
-`git store rm <kind> <name>` publishes a tombstone over that name. It does not
-hard-delete refs, so the name's earlier publications stay reachable; repeating
-it reports `already deleted`, while an absent ref is an error. `get` reports a
-tombstone as deleted and an absent ref as absent. Names are independent:
-deleting one name does not affect another that addresses the same content.
-
-Writing to a deleted name restores it by appending a normal value commit after
-the tombstone. The CLI has no separate restore command; recreation and
-restoration are ordinary write operations.
-
-== Trailer and Schema Compatibility
-
-New commits reject message lines beginning with the reserved legacy trailers
-`Schema:`, `Schema-Version:`, and `Ents-Ref:`, and emit none of those trailers.
-Historical objects carrying those trailers remain readable: readers ignore
-them, including malformed or conflicting values, and select the schema only
-from the embedded bound document.
-
-A current schema document must contain an embedded kind name and a recognized
-schema-schema pin. Old schema objects that predate the embedded kind name are
-not made self-describing by guessing from a publication ref and are not
-automatically upgraded; they need an explicit compatibility conversion or
-republishing under the current format. Base reads do not guess migration
-history. `Kind::read_as` is an explicit opt-in taking a `TargetSchema` the
-caller selects, which `KindSchema::current_target` builds from the selected
-`Kind`'s current published schema and history; when the source is absent from
-that history or a migration edge is missing, the operation fails rather than
-silently guessing or rewriting stored objects.
-
-== Composable CLI Plumbing
-
-The `git store` binary exposes small Git-shaped operations for manually scripted
-migrations. It deliberately has no hard-coded `migrate` workflow. What it does
-supply is the plumbing such a script needs: `git store ls <kind> --stale` is the
-worklist of entities not bound to the kind's current schema tree, `git store get`
-and `git store entity resolve` return the compare-and-swap token alongside the
-value, and `git store document publish --batch` lands a rewritten set as one
-all-or-nothing compare-and-swap.
-
-=== Explicit Schema Selection
-
-The schema argument to the value and document plumbing commands is explicit and
-may be a schema tree, a schema publication commit, or another revision that
-peels to that tree. No kind lookup, schema-history guess, commit trailer, or
-caller-selected name supplies it.
+== Install
 
 [source,console]
 ----
-$ git store value encode --schema <schema-tree-or-commit> -F <value.json>
-<value-tree>
-$ git store value decode <value-tree> --schema <schema-tree-or-commit>
-{ ... value JSON ... }
-$ git store document bind <value-tree> --schema <schema-tree-or-commit>
-<document-tree>
-$ git store document inspect <document-tree>
-bound document <document-tree>
-  value: <value-tree>
-  schema: <schema-tree>
+cargo install --path crates/git-store
 ----
 
-`git store schema show <kind> --at <commit>` returns the schema snapshot at
-that historical publication commit, reporting the kind, publication commit OID,
-schema-tree OID, and human-readable field layout. Without `--at` it reads the
-current snapshot; without `<kind>` it shows every published kind.
+== Usage
 
-=== Refs and Objects
+[source,console]
+----
+git store schema put recipe -F <schema.json>
+git store put recipe carbonara -F <value.json>
+git store get recipe carbonara
+git store compile recipe <value.json>
+git store value encode --schema refs/schema/recipe -F <value.json>
+git store value decode <value-tree> --schema <schema-tree-or-commit>
+git store document bind <value-tree> --schema <schema-tree-or-commit>
+git store document inspect <document-tree>
+git store document publish recipe <document-tree> --expected absent --alias <name>
+git store cat <document-tree>
+----
 
-`ref list [--prefix <full-prefix>] [--kind <kind>]` lists full ref names and
-OIDs. `ref resolve <full-ref>` resolves one full ref. `object inspect
-<object-ish>` reports the resolved full OID, object kind, and size. `object tree
-<tree-ish>` lists each direct tree entry with its mode, full OID, kind, and name.
-These commands expose the storage boundary without embedding Git traversal in a
-migration command.
+`git store put <kind> <name> [<value>]` is the everyday write: it encodes,
+binds, and publishes in one step, advancing that name's ref.
+`git store compile <kind> [<value>]` is the pure form of the same composition:
+it creates a bound document whose root contains exactly `schema/` and `value/`,
+then prints the document-tree OID without advancing a ref. The explicit `value`
+and `document` commands expose the individual steps for scripts. `value encode` and
+`value decode` always take an explicit schema tree or schema publication commit;
+`document bind` does too. They do not infer a schema from a kind ref, commit
+trailer, or caller-selected name.
 
-=== Machine Output and Diagnostics
+The `schema/` tree is the exact schema used to validate `value/`, so
+`git store cat` can decode the document from its own tree even when no
+`refs/schema/*` ref is available. A published schema ref is a discovery,
+history, or authoring index; it does not define the type of an existing
+document.
 
-Additive plumbing commands accept `--format text|json|ndjson`; `--json` selects
-compact JSON. JSON records use stable full OIDs and full ref names. NDJSON emits
-one record per item for list-like results and one record for a single result.
-Successful output is on stdout. Diagnostics are on stderr, and failures do not
-emit a success record. The current exit categories are:
+The printed hash is the OID of that complete bound `{schema, value}` root tree.
+It is the document's `EntityId`: it is not the publication commit OID and is
+not a caller-provided name. Schema and value both contribute to the ID.
+Canonical entity refs use that ID as the final segment:
+`refs/store/<kind>/<entity-id>`. A caller-selected name is only a compatibility
+alias, and aliases are not the source of truth for identity or the canonical
+entity index.
 
-* `1` — other operational errors.
-* `2` — invalid arguments or object shape.
-* `3` — missing refs, objects, schemas, or entities.
-* `4` — compare-and-swap conflicts.
-* `5` — schema, value, or document failures.
+`schema show <kind>` prints a kind's field layout as text and its full schema
+record as JSON, reporting the publication commit OID and schema-tree OID
+alongside it; omit `<kind>` to show every kind. `--at <commit>` addresses a
+historical publication instead of the current one, and never substitutes the
+current schema for it. `schema log <kind>` traces a kind's schema evolution,
+newest first.
 
-=== Publication, CAS, and Identity
+The plumbing inspection surface is deliberately Git-shaped:
+`ref list [--prefix <full-prefix>] [--kind <kind>]`, `ref resolve <full-ref>`,
+`object inspect <object-ish>`, and `object tree <tree-ish>`. These expose full
+refs and stable object IDs rather than abbreviated, display-only names.
 
-`document publish <kind> <document-tree> --expected <absent|OID>` publishes a
-prepared bound document under `--alias <name>`, defaulting to the entity's
-content-derived name when none is given. The expectation applies to that ref,
-and the ref and the materialized per-kind index advance in one compare-and-swap
-batch. A stale expectation is a one-shot failure: the CLI
-returns exit category `4` and does not retry. Objects written before a lost CAS
-may remain unreachable. A script owns retry, resume, and conflict policy.
+For additive plumbing commands, `--format text|json|ndjson` selects output;
+`--json` is compact JSON. JSON records contain stable OIDs and full refs, and
+NDJSON emits one record per item for list-like results. Success is on stdout;
+diagnostics are on stderr. Current exit categories are `1` for other
+operational errors, `2` for invalid arguments/object shape, `3` for missing
+refs/objects/schemas/entities, `4` for CAS conflicts, and `5` for
+schema/value/document failures.
 
-The complete bound document-tree OID is the content-derived `EntityId`, and both
-its schema and value contribute to it. It is a derived value, available for any
-document that compiles, and is independent of where the document is published.
-The persisted per-kind index under `refs/cache/` is a materialized cache of the
-entity refs; those refs remain authoritative and reads can fall back when the
-index is missing, malformed, or stale.
+`document publish` requires `--expected absent` or `--expected <full-oid>`. The
+expectation applies to the canonical ref unless `--alias` is supplied, in which
+case it applies to that alias. The canonical ref, alias, and materialized index
+advance in one CAS batch. A stale expectation fails without retry; objects
+written before a lost CAS may remain unreachable. Scripts own retry, resume,
+and conflict policy.
 
-`entity delete <kind> <name>` publishes a typed tombstone over that ref,
-advancing it and the index atomically. It does not remove the ref. A repeated
-deletion reports `already_deleted`; an absent entity is distinct.
+`cat <tree-ish>` resolves a tree-ish and decodes the bound document directly:
+content-addressed, like `git cat-file`, needing neither a name nor a schema
+ref. `get <kind> <name>` resolves a name first, and accepts Git revision
+suffixes on it (`carbonara~1`, `carbonara@{yesterday}`, `carbonara@<oid>`); it
+also reports the publication commit, so a caller holds the compare-and-swap
+token for the value it just read. The `rm <kind> <name>` command publishes a
+typed tombstone over the canonical ref and any alias that points at that
+publication; it does not hard-delete the refs. `get` reports a tombstoned entity as deleted and a missing ref as absent,
+while repeated `rm` reports `already deleted` and `rm` of an absent ref fails.
 
-=== Script Boundary
+New commits do not write `Schema:`, `Schema-Version:`, or `Ents-Ref:` trailers,
+and new messages containing lines beginning with those reserved legacy trailer
+names are rejected. Readers ignore those trailers when they occur on older Git
+objects, including malformed or conflicting values, and never use them to
+select a schema. A named write returns a publication commit OID while
+maintaining the canonical ID/ref underneath.
 
-Bash, Git, or the calling program owns traversal, transforms, source and target
-schema selection, batching, retry/resume, and policy. The CLI supplies object
-construction, inspection, explicit-schema decoding, binding, and explicit CAS
-publication; neither these plumbing commands nor base reads silently migrate or
-rewrite a stored object.
+== Entity state and compatibility
+
+The library's `EntityState` distinguishes `Present`, `Absent`, and `Deleted`.
+`Absent` means no canonical/alias ref exists, including an old hard-deleted
+ref. `Deleted` means a ref still exists and points to a typed tombstone whose
+value carries an explicit `Deleted` state, kind, and original `EntityId`.
+Tombstones use the same bound `{schema, value}` frame as ordinary documents, so
+they remain readable after the entity ref is fetched without the schema ref or
+materialized index. `read` returns that state; project it with `value()` when
+`Absent` and `Deleted` may both collapse to `None`, and match on
+`EntityState` when the distinction matters.
+
+Writing the same bound content after deletion restores the original canonical
+entity: a normal value commit is appended after the tombstone, and aliases that
+were pointing at that tombstone are restored atomically. Writing different
+content creates a new `EntityId`; the old ID remains deleted. There is no CLI
+restore command—recreation/restoration is performed through the library write
+APIs.
+
+`Kind::read` takes an `At` address — a name, an `EntityId`, a commit, or a
+bound tree — so the content-derived identity and the caller-chosen name reach
+the same reads. Prefer `put_entity`, `put_with_alias`, `compile_entity`, and
+`entity_reference` when the content-derived identity is part of the
+contract. `refs/schema/<publication>` remains a
+schema publication/history ref, not the type definition of an existing
+document. `entity delete <kind> <entity-id>` publishes a typed tombstone and
+keeps the canonical ref; it does not hard-delete or prune the entity.
+
+Bash, Git, or another caller owns migration traversal, source/target selection,
+transforms, batching, retry/resume, and policy. The CLI provides no `migrate`
+subcommand and does not silently rewrite stored objects. It does supply the
+plumbing such a caller needs: `ls <kind> --stale` is the worklist of entities
+not bound to the kind's current schema tree, `get` and `entity resolve` return
+the compare-and-swap token alongside the value so no caller constructs a ref
+path, and `document publish --batch` lands a rewritten set as one
+all-or-nothing compare-and-swap. See the migration recipe in
+link:crates/git-store/README.adoc#script-boundary[`crates/git-store/README.adoc`].
+
+== Compatibility limitations
+
+A schema document must carry an embedded kind name and a schema-schema pin that
+this build recognizes. Historical schema objects from before the embedded kind
+field cannot be made self-describing by inferring a name from a ref; they are
+not automatically upgraded. They require an explicit compatibility conversion
+or republishing under the current schema format before new self-contained data
+can be written against them. Likewise, base reads do not guess a migration
+source or target: `read_as` is an explicit opt-in operation taking a
+`TargetSchema` the caller selects, which `KindSchema::current_target` builds
+from the selected `Kind`'s current published schema and history. If the source schema is not in that history, or a migration
+edge is missing, the operation fails rather than silently guessing or rewriting
+the stored object.
+
+== Crates
+
+* link:crates/facet-git-tree[`facet-git-tree`] — Git tree encoding for Facet types.
+* link:crates/gix-refstore[`gix-refstore`] — compare-and-swap storage for Git refs.
+* link:crates/gix-store[`gix-store`] — schema-aware storage for Rust programs.
+* link:crates/git-store[`git-store`] — the command-line interface.
+
+== Documentation
+
+* link:docs/specification.adoc[`docs/specification.adoc`] — tree serialization and deserialization.
+* link:CONTRIBUTING.adoc[`CONTRIBUTING.adoc`] — contribution guide.
+* link:CONDUCT.adoc[`CONDUCT.adoc`] — code of conduct.
 
 == Motivation
 

@@ -1696,13 +1696,12 @@ fn every_command_the_docs_show_exists() {
         .unwrap()
         .to_owned();
     let docs = [
-        "README.md",
-        "crates/git-store/README.md",
-        "crates/gix-store/README.md",
-        "docs/specification.adoc",
-        "docs/design-alignment-plan.md",
-        "docs/migrate-existing-entities.sh",
         "README.adoc",
+        "crates/git-store/README.adoc",
+        "crates/gix-store/README.adoc",
+        "docs/specification.adoc",
+        "docs/design-alignment-plan.adoc",
+        "docs/migrate-existing-entities.sh",
     ];
 
     let dir = tempfile::tempdir().unwrap();

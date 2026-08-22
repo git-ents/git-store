@@ -1,10 +1,11 @@
-# gix-store
+= gix-store
 
-The library behind [`git-store`](../git-store): store anything in a Git
+The library behind link:../git-store[`git-store`]: store anything in a Git
 repository as a real Git tree, keyed by a self-hosted schema. Oid-in,
 oid-out — JSON belongs at a CLI boundary, never here.
 
-```rust
+[source,rust]
+----
 use gix_store::{EntityState, RefPath, RefSegment, Store, schema_of};
 use facet_value::value;
 
@@ -34,27 +35,27 @@ match recipes.read(id)? {
 let dynamic = store.dynamic(RefSegment::new("recipe")?);
 dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serves": 2 }))?;
 # Ok::<(), Box<dyn std::error::Error>>(())
-```
+----
 
-## How it works
+== How it works
 
-- **Typed and dynamic are one code path.** A `Kind` handle selects the
+* *Typed and dynamic are one code path.* A `Kind` handle selects the
   encoding and schema used by the API; it is not the authority for decoding a
   stored document. `Typed<T>` encodes a `Facet`-derived Rust type natively;
   `Dynamic` encodes a [`facet_value::Value`] against a selected published
   schema. Everything above the encoding — refs, commits, schema binding — is
   shared, and the two encodings are byte-identical, so the two handles
   interoperate over the same addressing/index layer.
-- **Schemas are self-hosted and refs are separate.** A [`Schema`] is an
+* *Schemas are self-hosted and refs are separate.* A [`Schema`] is an
   ordinary `Facet` value stored through the same tree encoding as everything
   else. A schema publication such as `refs/schema/<publication>` is an index
   and history/authoring mechanism; it is not the type definition. The schema
   document carries its own kind name and pins the generation of the
   schema-schema it was written against, so a document this binary does not
   speak is refused rather than misread.
-- **Encoding is validation.** A value that does not conform to its selected
+* *Encoding is validation.* A value that does not conform to its selected
   schema fails with the offending path instead of writing a lossy tree.
-- **Documents are self-contained.** Every data commit's tree is exactly a
+* *Documents are self-contained.* Every data commit's tree is exactly a
   two-entry root, `{schema/, value/}`: `value/` contains the data and `schema/`
   contains the exact schema tree used to validate it. `read` takes both
   directly from the one commit, so old versions stay readable after a schema
@@ -63,12 +64,12 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   `Ents-Ref:` trailers. Those trailers are historical compatibility metadata:
   readers ignore them, including malformed or conflicting values, and never
   use them to resolve a schema.
-- **Entity identity is the complete bound tree OID.** `EntityId` is the OID of
+* *Entity identity is the complete bound tree OID.* `EntityId` is the OID of
   the root tree containing exactly `schema/` and `value/`. It is not the
   publication commit OID and not a caller-selected name; changing either the
   bound schema or encoded value changes the ID. It is a derived value that
   `compile_entity` produces for any document, published or not.
-- **Ref names are application policy.** Data refs are
+* *Ref names are application policy.* Data refs are
   `refs/store/<kind>/<name>` for whatever name the caller picks, nesting
   included. The store attaches no meaning to a name: it advances that ref like
   a branch, so every earlier publication stays reachable, and distinct names
@@ -79,21 +80,21 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   publication never replaces the document's embedded schema or content
   identity. `EntityState::value` collapses both absent and deleted entities to
   `None`; match on `EntityState` when that distinction matters.
-- **Prepared documents expose the plumbing boundary.** `Store::encode_value`
+* *Prepared documents expose the plumbing boundary.* `Store::encode_value`
   and `Store::decode_value` take an explicit schema tree and operate on an
   unbound value tree. `Store::bind_document` creates the complete
   `{schema/, value/}` root without a commit or ref; `Store::inspect_document`
   classifies that root as bound, legacy value-root, or malformed. A
   `Kind::publish_prepared` call then publishes the prepared tree, returning
   both its content-derived `EntityId` and publication commit.
-- **Writes compare and swap.** Each entity write reads the entity and index
+* *Writes compare and swap.* Each entity write reads the entity and index
   refs, writes its commit and the next index tree, then applies both edits with
-  one [`RefStore::apply_batch`](gix_refstore::RefStore::apply_batch)
+  one `RefStore::apply_batch`
   transaction. A lost race retries the whole read/build/publication sequence;
   object writes may remain unreachable, but the old pair
   of refs remains valid. `PublishOptions::with_expectation` changes this to a
   one-shot CAS: a stale expectation returns an error and is never retried.
-- **Kinds have a materialized index.** The private cache ref
+* *Kinds have a materialized index.* The private cache ref
   `refs/cache/<kind-encoding>/index-v1` points directly to a canonical Git
   tree. Kind names are encoded as `k` followed by lowercase hexadecimal UTF-8
   bytes, an injective encoding. Ephemeral caches use the `refs/cache/<kind>/<name>`
@@ -103,7 +104,7 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   preserving every segment.
   The existing fingerprint domain and kind-name component are unchanged, so
   schema refs remain excluded and different kinds cannot share a cache key.
-- **Indexes are advisory.** Entity refs remain authoritative. Reads validate a
+* *Indexes are advisory.* Entity refs remain authoritative. Reads validate a
   present index against the complete entity-ref mapping and fall back
   safely to that mapping when the index is absent, malformed, or stale. This
   preserves correctness after low-level or external ref writes, at the cost of
@@ -111,7 +112,7 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   API and getters never publish refs implicitly. Writes through `Kind` maintain
   the pair atomically. Schema interpretation is still separate from this
   entity-only fingerprint.
-- **Deletion is typed state.** `Tombstone` uses the same bound
+* *Deletion is typed state.* `Tombstone` uses the same bound
   `{schema/, value/}` frame as a live document. Its value carries an explicit
   `TombstoneState::Deleted`, kind, and original `EntityId`, so a fetched
   tombstone cannot be confused with a pruned ref. `EntityState::Absent` means
@@ -122,14 +123,14 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   `DeleteResult::Absent`. Writing the exact same bound content restores the ID
   after the tombstone; different content creates a new ID. There is no
   separate CLI restore operation.
-- **New writes reject legacy trailers.** Store-written commits contain none of
+* *New writes reject legacy trailers.* Store-written commits contain none of
   `Schema:`, `Schema-Version:`, or `Ents-Ref:`. A message line beginning with
   one of those reserved names fails with `Error::ReservedTrailer`. Existing
   Git objects carrying those trailers remain readable because readers ignore
   them, including malformed or conflicting values, and use the embedded schema
   tree instead.
 
-## Backends
+== Backends
 
 `Store` is generic over a [`gix_refstore::RefStore`] for refs and a
 `gix_object::Find`/`Write` object database for objects.
@@ -137,16 +138,17 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
 that repeatedly read objects, configure gix's object cache before opening the
 store:
 
-```rust
+[source,rust]
+----
 let mut repo = gix::discover(".")?;
 repo.object_cache_size_if_unset(4 * 1024 * 1024);
 let store = Store::open(&repo);
-```
+----
 
 `Store::new(MemoryRefStore::new(), ObjectStore::default())` is the same store
 with no filesystem behind it, which is what most of this crate's own tests use.
 
-## CLI and migration boundaries
+== CLI and migration boundaries
 
 The CLI is a composable Git-plumbing boundary, not a migration engine. Its pure
 forms are `git store compile <kind> <value>` (compile and print a bound
@@ -197,7 +199,7 @@ automatically upgraded; republish or explicitly convert them before relying
 on the current self-contained contract. SHA-256 repositories are also outside
 this build's supported object format.
 
-## Scope
+== Scope
 
 `gix-store` keeps entity refs as the source of truth and maintains the
 per-kind index only as a persisted read cache. Low-level ref access remains an

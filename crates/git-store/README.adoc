@@ -1,4 +1,4 @@
-# git-store
+= git-store
 
 Store _anything_ in Git — not as a blob of JSON smuggled into a file, but as a
 real tree the stock plumbing can read. Define a kind by publishing its schema,
@@ -9,9 +9,10 @@ are ordinary Git trees.
 The binary is named `git-store`, so git's external-subcommand dispatch makes
 `git store …` work with nothing more than `PATH`.
 
-## Demo
+== Demo
 
-```console
+[source,console]
+----
 $ git store schema put recipe -F crates/git-store/schemas/recipe.json
 $ printf '%s\n' '{"title":"Carbonara","serves":4,"ingredients":["egg","pancetta"],"steps":["boil pasta","fry pancetta","combine"]}' > value.json
 $ git store value encode --schema refs/schema/recipe -F value.json
@@ -26,7 +27,7 @@ $ git store document publish recipe <document-tree> --expected absent --alias ca
 <entity-id>
 $ git store cat <document-tree> | jq .serves
 4
-```
+----
 
 `compile <kind> [<value>]` is a convenient pure compile: it prints the bound
 document-tree OID and advances no ref. `put <kind> <name> [<value>]` does the
@@ -41,7 +42,8 @@ two entries, `value/` and `schema/`; the schema used to validate the value
 travels inside the document, so it stays readable wherever its tree goes, with
 no dependence on also having `refs/schema/*`:
 
-```console
+[source,console]
+----
 $ git ls-tree refs/store/recipe/carbonara^{tree}
 040000 tree …    schema
 040000 tree …    value
@@ -61,14 +63,15 @@ $ git log --oneline refs/store/recipe/carbonara     # this name's history
 
 $ git store get recipe 'carbonara~1' | jq .serves   # name-addressed, with revision
 4
-```
+----
 
 The schema is data too — the current publication lives at
 `refs/schema/<kind>` in the same repository, stored through the same tree
 encoding, with the same history. `schema show <kind> --at <commit>` addresses
 an historical publication commit directly:
 
-```console
+[source,console]
+----
 $ git ls-tree refs/schema/recipe^{tree}
 040000 tree …    defs
 040000 tree …    root
@@ -87,23 +90,23 @@ kind: recipe
 commit: <schema-commit>
 schema tree: <schema-tree>
 ...
-```
+----
 
-## Why trees, not a JSON blob
+== Why trees, not a JSON blob
 
 A blob of JSON in a file is opaque to Git: `git log` shows "the file changed,"
 diffs are line noise, and nothing but your application can read a field. Here,
 every field is its own object, addressed by content:
 
-- **`git` is the query language.** `git ls-tree`, `git cat-file`, `git log`,
+* *`git` is the query language.* `git ls-tree`, `git cat-file`, `git log`,
   `git diff` all work — no application required to inspect stored data.
-- **History and blame are per field.** Changing `serves` writes a new `serves`
+* *History and blame are per field.* Changing `serves` writes a new `serves`
   blob; the unchanged `title` blob keeps its object id across versions.
-- **No format the reader must know.** The structure _is_ the Git tree. JSON
+* *No format the reader must know.* The structure _is_ the Git tree. JSON
   exists only at this CLI's boundary (`facet-json` in, `facet-json` out); what
-  is stored is the structural tree [`facet-git-tree`](../facet-git-tree)
+  is stored is the structural tree link:../facet-git-tree[`facet-git-tree`]
   produces.
-- **The schema isn't a config file on someone's laptop.** It is versioned data
+* *The schema isn't a config file on someone's laptop.* It is versioned data
   at `refs/schema/<kind>`, and every bound document carries the exact schema it
   was validated against inside its own `schema/` subtree — reachable, gc-safe,
   and fetch-complete by ordinary Git tree reachability — so old values stay
@@ -113,9 +116,9 @@ every field is its own object, addressed by content:
   objects, including malformed or conflicting values, and never use them to
   select a schema.
 
-## Commands
+== Commands
 
-```
+----
 git store                                   # print help
 git store compile <kind> [<value>]          # pure compile; prints document-tree OID
 git store put <kind> <name> [<value>]       # compile, then publish under <name>
@@ -150,7 +153,7 @@ git store --compat strict|legacy-leaves <command>  # how every decode reads stor
     -m, --message <MSG>                     # publication message (put only)
     -e, --edit                              # edit content in $VISUAL/$EDITOR first
     -i, --interactive                       # build a value by prompting for each field
-```
+----
 
 Writing is always an explicit `compile` or `put`, and a bare invocation
 prints help, like any clap app; `list` (alias `ls`) is the explicit way to
@@ -175,24 +178,25 @@ one-answer-per-line reader when stdin is piped, so it stays scriptable). For
 `schema put`, the same `-i` walks the type grammar to build a schema without
 hand-written JSON.
 
-## Authoring a schema
+== Authoring a schema
 
 A schema is itself a `Facet` value, so there is no bespoke schema language: hand-write
 the JSON, or derive it from a Rust struct. The
-[`schemas`](examples/schemas.rs) example does the latter — the struct authors
+link:examples/schemas.rs[`schemas`] example does the latter — the struct authors
 the schema:
 
-```console
+[source,console]
+----
 $ cargo run -p git-store --example schemas -- recipe | git store schema put recipe
-```
+----
 
 (`schema put` reads stdin when given no `-F`.)
 
-The checked-in [`schemas/`](schemas) files were generated exactly this way.
+The checked-in link:schemas[`schemas/`] files were generated exactly this way.
 
-## Plumbing contracts
+== Plumbing contracts
 
-### Explicit schemas and document composition
+=== Explicit schemas and document composition
 
 `value encode --schema <tree-ish>` validates JSON from stdin or `-F <file>`
 against exactly the schema tree selected by the argument and prints the encoded
@@ -222,14 +226,14 @@ schema trees whose leaf blobs predate the newline framing. It applies the
 explicit compatibility decoder for the whole invocation and exports the
 normalized JSON without changing ordinary reads.
 
-### Refs, objects, and machine output
+=== Refs, objects, and machine output
 
 `ref list` emits full ref names and their OIDs; `ref resolve` accepts a full ref
 name and emits its OID. `object inspect` resolves an object or revision and
 reports its kind, full OID, and byte size. `object tree` lists direct entries
 with mode, OID, kind, and name. Text output is intended for people.
 
-**Every command honors every format.** `--format text|json|ndjson` (default
+*Every command honors every format.* `--format text|json|ndjson` (default
 `text`) and `--json` (a hidden alias for `--format json`) are global options,
 resolved once, and every command — porcelain and plumbing alike — renders its
 result through them; none falls back to text silently. JSON output uses
@@ -247,13 +251,13 @@ arguments or object shape; `3` missing refs, objects, schemas, or entities;
 These categories are intended for scripts; callers should still preserve stderr
 for the actionable diagnostic.
 
-### Publication, identity, and deletion
+=== Publication, identity, and deletion
 
 `document publish` requires `--expected absent` or `--expected <full-oid>`. With
 `--alias <name>` it publishes at `<data-prefix>/<kind>/<name>`; with no alias it
 publishes at the entity's content-derived name. The expectation applies to that
 ref. A stale expectation fails with exit category
-`4`, publishes none of the batch, and is **not retried**. Objects written before
+`4`, publishes none of the batch, and is *not retried*. Objects written before
 a lost CAS may remain unreachable; a script decides whether to retry, resume, or
 report the conflict. The CLI does not hide that policy.
 
@@ -269,7 +273,8 @@ addresses an entity by its canonical, content-derived id and publishes a typed
 tombstone over that ref, updating the index atomically without pruning the
 ref; `rm <kind> <name>` is the equivalent name-addressed porcelain.
 
-### Script boundary
+[#script-boundary]
+=== Script boundary
 
 The CLI intentionally has no hard-coded `migrate` workflow. Bash, Git, and the
 calling program own traversal, source/target schema selection, transforms,
@@ -282,7 +287,8 @@ What the plumbing does supply is everything that loop needs to be written from
 outside, without reconstructing a ref path — since ref layout is application
 policy and `--data-prefix` moves it:
 
-```sh
+[source,sh]
+----
 # The worklist: entities not bound to the kind's current schema tree.
 # Documents carry their own schema, so a kind mid-migration is a legitimate
 # mixed state, and re-running this is how a resumed migration finds its place.
@@ -305,7 +311,7 @@ done > batch.ndjson
 # a single stale one leaves the whole kind untouched (exit 4) rather than
 # half-migrated.
 git store document publish --batch -F batch.ndjson -m "recipe: serves -> servings"
-```
+----
 
 `entity resolve <kind> <name>` yields the same commit as a standalone step,
 alongside the content-derived id, for callers that need the compare-and-swap

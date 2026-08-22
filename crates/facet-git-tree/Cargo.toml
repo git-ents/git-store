@@ -2,7 +2,7 @@
 name = "facet-git-tree"
 version = "0.1.0"
 edition = "2024"
-readme = "README.md"
+readme = "README.adoc"
 
 [features]
 # The pin towers' codec fixture (`schema::codec`) needs a `Def::DynamicValue`

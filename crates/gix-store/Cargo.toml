@@ -2,7 +2,7 @@
 name = "gix-store"
 version = "0.1.0"
 edition = "2024"
-readme = "README.md"
+readme = "README.adoc"
 
 [dependencies]
 facet = { version = "0.50.0-rc.0", features = ["reflect"] }

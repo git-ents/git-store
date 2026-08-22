@@ -1,8 +1,9 @@
-# gix-refstore
+= gix-refstore
 
 Compare-and-swap storage for Git refs, factored out from any one backend.
 
-```rust
+[source,rust]
+----
 use gix_refstore::{ApplyError, MemoryRefStore, RefEdit, RefName, RefStore};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,9 +24,9 @@ loop {
 }
 # Ok(())
 # }
-```
+----
 
-## Scope
+== Scope
 
 `RefStore` is the write primitive: every mutation is a compare-and-swap, and
 `apply_batch` publishes several conditional ref edits as one transaction. A

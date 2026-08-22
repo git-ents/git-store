@@ -1,0 +1,8 @@
+= docs
+
+* link:specification.adoc[`specification.adoc`] — the specification for this
+  project: the Git tree serialization and deserialization target implemented
+  by link:../crates/facet-git-tree[`facet-git-tree`].
+* link:acdc-requirement.adoc[`acdc-requirement.adoc`] — an unrelated document: a
+  requirements-authoring extension for AsciiDoc, kept here for reference and
+  not part of git-store.
