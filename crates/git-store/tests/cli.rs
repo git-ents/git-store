@@ -1256,12 +1256,7 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
         path,
         None,
         &[
-            "entity",
-            "delete",
-            "recipe",
-            &entity_id,
-            "--format",
-            "ndjson",
+            "entity", "delete", "recipe", &entity_id, "--format", "ndjson",
         ],
     );
     assert!(ok, "entity delete failed: {err}");

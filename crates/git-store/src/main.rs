@@ -31,9 +31,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use gix_store::{
-    ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId, EntityState,
-    Expectation, GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions, RefName,
-    RefPath, RefPrefix, RefSegment, RefStore, RepoStore, SchemaTree, ValueTree,
+    ApplyError, Compat, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId,
+    EntityState, Expectation, GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions,
+    RefName, RefPath, RefPrefix, RefSegment, RefStore, RepoStore, SchemaTree, ValueTree,
 };
 
 /// A handle on one kind, over the CLI's own repo-backed store.
@@ -69,8 +69,32 @@ struct Cli {
         value_name = "PREFIX"
     )]
     schema_prefix: String,
+    /// How every decode in this invocation reads stored leaves: `strict`
+    /// rejects pre-`kind` documents and pre-newline leaf blobs,
+    /// `legacy-leaves` accepts them.
+    #[arg(long, global = true, value_enum, default_value = "strict")]
+    compat: CompatArg,
+    /// Deprecated alias for `--compat legacy-leaves`.
+    #[arg(long, global = true, hide = true)]
+    legacy_leaves: bool,
     #[command(subcommand)]
     command: Command,
+}
+
+/// CLI spelling of [`Compat`], the store's leaf-decoding strictness.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CompatArg {
+    Strict,
+    LegacyLeaves,
+}
+
+impl From<CompatArg> for Compat {
+    fn from(value: CompatArg) -> Self {
+        match value {
+            CompatArg::Strict => Compat::Strict,
+            CompatArg::LegacyLeaves => Compat::LegacyLeaves,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -183,9 +207,6 @@ enum Command {
     Cat {
         #[arg(value_name = "TREE-ISH")]
         tree_ish: String,
-        /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
-        #[arg(long)]
-        legacy_leaves: bool,
     },
     /// Read a stored value as JSON, by kind and name.
     ///
@@ -312,9 +333,6 @@ enum ValueCommand {
         value_tree: String,
         #[arg(long)]
         schema: String,
-        /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
-        #[arg(long)]
-        legacy_leaves: bool,
     },
     /// Encode JSON from stdin or a file under an explicit schema.
     Encode {
@@ -382,9 +400,6 @@ enum SchemaCommand {
         /// of the current one.
         #[arg(long)]
         at: Option<String>,
-        /// Opt into decoding pre-newline leaves and pre-`kind` schemas.
-        #[arg(long)]
-        legacy_leaves: bool,
     },
     /// Hidden alias for `schema show` with no kind.
     #[command(hide = true)]
@@ -395,8 +410,6 @@ enum SchemaCommand {
         kind: String,
         #[arg(long)]
         at: Option<String>,
-        #[arg(long)]
-        legacy_leaves: bool,
     },
     /// Hidden alias for `schema show <kind> --at <rev>`.
     #[command(hide = true)]
@@ -404,8 +417,6 @@ enum SchemaCommand {
         kind: String,
         #[arg(long)]
         at: String,
-        #[arg(long)]
-        legacy_leaves: bool,
     },
     /// Show a kind's schema evolution history, newest first.
     Log { kind: String },
@@ -450,15 +461,17 @@ fn run() -> Result<()> {
         }
     };
     repo.object_cache_size_if_unset(4 * 1024 * 1024);
-    let store = RepoStore::open_with_layout(&repo, layout);
+    let compat = if cli.legacy_leaves {
+        Compat::LegacyLeaves
+    } else {
+        cli.compat.into()
+    };
+    let store = RepoStore::open_with_layout(&repo, layout).with_compat(compat);
 
     match cli.command {
         Command::Compile(args) => compile(&store, args, output)?,
         Command::Put(args) => put(&store, args, output)?,
-        Command::Cat {
-            tree_ish,
-            legacy_leaves,
-        } => cat(&repo, &store, &tree_ish, legacy_leaves, output)?,
+        Command::Cat { tree_ish } => cat(&repo, &store, &tree_ish, output)?,
         Command::Get { kind, name } => get(&repo, &store, &kind, &name, output)?,
         Command::Check { tree_ish, schema } => check(&repo, &store, &tree_ish, &schema, output)?,
         Command::Doctor => doctor(&repo, &store, output)?,
@@ -483,39 +496,19 @@ fn run() -> Result<()> {
                 fields.insert("commit", oid_value(commit));
                 emit_single(output, fields, || commit.to_string())?;
             }
-            SchemaCommand::Show {
-                kind,
-                at,
-                legacy_leaves,
-            } => schema_show(
-                &repo,
-                &store,
-                kind.as_deref(),
-                at.as_deref(),
-                legacy_leaves,
-                output,
-            )?,
+            SchemaCommand::Show { kind, at } => {
+                schema_show(&repo, &store, kind.as_deref(), at.as_deref(), output)?
+            }
             // Hidden aliases: `get`/`inspect` were `show`'s json-format and
             // `--at` modifiers, respectively, before this move; `list` was
             // `show` with no kind, since both walked `store.kinds()`.
-            SchemaCommand::Get {
-                kind,
-                at,
-                legacy_leaves,
-            } => schema_show(
-                &repo,
-                &store,
-                Some(&kind),
-                at.as_deref(),
-                legacy_leaves,
-                output,
-            )?,
-            SchemaCommand::Inspect {
-                kind,
-                at,
-                legacy_leaves,
-            } => schema_show(&repo, &store, Some(&kind), Some(&at), legacy_leaves, output)?,
-            SchemaCommand::List => schema_show(&repo, &store, None, None, false, output)?,
+            SchemaCommand::Get { kind, at } => {
+                schema_show(&repo, &store, Some(&kind), at.as_deref(), output)?
+            }
+            SchemaCommand::Inspect { kind, at } => {
+                schema_show(&repo, &store, Some(&kind), Some(&at), output)?
+            }
+            SchemaCommand::List => schema_show(&repo, &store, None, None, output)?,
             SchemaCommand::Log { kind } => log_commits(
                 &repo,
                 store.dynamic(segment("kind", &kind)?).schema().history()?,
@@ -533,11 +526,9 @@ fn run() -> Result<()> {
             ObjectCommand::Tree { tree_ish } => object_tree(&repo, &tree_ish, output)?,
         },
         Command::Value { command } => match command {
-            ValueCommand::Decode {
-                value_tree,
-                schema,
-                legacy_leaves,
-            } => value_decode(&repo, &store, &value_tree, &schema, legacy_leaves, output)?,
+            ValueCommand::Decode { value_tree, schema } => {
+                value_decode(&repo, &store, &value_tree, &schema, output)?
+            }
             ValueCommand::Encode { schema, file } => {
                 value_encode(&repo, &store, &schema, file.as_ref(), output)?
             }
@@ -993,16 +984,11 @@ fn value_decode(
     store: &RepoStore<'_>,
     value_spec: &str,
     schema_spec: &str,
-    legacy_leaves: bool,
     format: OutputFormat,
 ) -> Result<()> {
     let value_tree = resolve_tree(repo, value_spec)?;
     let schema_tree = resolve_schema_tree(repo, schema_spec)?;
-    let value = if legacy_leaves {
-        store.decode_value_legacy(value_tree, schema_tree)
-    } else {
-        store.decode_value(ValueTree::from(value_tree), SchemaTree::from(schema_tree))
-    }?;
+    let value = store.decode_value(ValueTree::from(value_tree), SchemaTree::from(schema_tree))?;
     if format.machine() {
         let mut record = json_record();
         record.insert("value_tree", oid_value(value_tree));
@@ -1459,18 +1445,14 @@ fn cat(
     repo: &gix::Repository,
     store: &RepoStore<'_>,
     tree_ish: &str,
-    legacy_leaves: bool,
     format: OutputFormat,
 ) -> Result<()> {
     let tree = resolve_tree(repo, tree_ish)?;
     // `decode` reads entirely out of `tree`'s own embedded schema and does
     // not consult any kind or schema ref.
-    let value = if legacy_leaves {
-        store.decode_legacy(tree)
-    } else {
-        store.decode(tree)
-    }
-    .with_context(|| cli_context(ExitClass::Schema, format!("{tree_ish} is not a document")))?;
+    let value = store
+        .decode(tree)
+        .with_context(|| cli_context(ExitClass::Schema, format!("{tree_ish} is not a document")))?;
     emit_value(format, value)
 }
 
@@ -1609,7 +1591,6 @@ fn schema_show(
     store: &RepoStore<'_>,
     kind: Option<&str>,
     at: Option<&str>,
-    legacy_leaves: bool,
     format: OutputFormat,
 ) -> Result<()> {
     let Some(kind) = kind else {
@@ -1625,19 +1606,9 @@ fn schema_show(
     let snapshot = match at {
         Some(at) => {
             let commit = resolve_commit(repo, at)?;
-            if legacy_leaves {
-                handle.schema().snapshot_at_legacy(commit)?
-            } else {
-                handle.schema().snapshot_at(commit)?
-            }
+            handle.schema().snapshot_at(commit)?
         }
-        None => {
-            if legacy_leaves {
-                handle.schema().current_snapshot_legacy()?
-            } else {
-                handle.schema().current_snapshot()?
-            }
-        }
+        None => handle.schema().current_snapshot()?,
     };
     let fields = schema_fields(&snapshot)?;
     emit_single(format, fields, || {
