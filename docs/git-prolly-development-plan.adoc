@@ -1,0 +1,186 @@
+= Git-backed, Dolt-like database development plan
+
+This plan describes the layers to add above `git-prolly`: a versioned database
+experience with Dolt-like working-state, commit, branch, diff, and merge
+semantics while keeping ordinary Git objects, refs, commits, and transport as
+the storage and history substrate.
+
+== Design boundary
+
+`git-prolly` remains a focused ordered, content-addressed map:
+
+* a Prolly node is a Git tree;
+* a node identity is a Git object id;
+* values are referenced by Git object id;
+* insert, remove, lookup, iteration, structural diff, and verification remain
+  the crate's responsibilities.
+
+The database layer must not make `git-prolly` responsible for tables, schemas,
+workspaces, commits, or merge policy. It should compose `git-prolly` with
+`gix-store` and `gix-refstore`.
+
+== Target crates
+
+Add a reusable library crate, tentatively `gix-database`, to this workspace.
+It should depend on `git-prolly` and `gix-store`. Keep the existing `git-store`
+binary as the user-facing CLI and add database commands there only after the
+library contracts are stable.
+
+The intended dependency direction is:
+
+....
+git-store (CLI) -> gix-database -> git-prolly
+                              \-> gix-store -> facet-git-tree / gix-refstore
+....
+
+`git-prolly` may eventually expose an object-id-in/object-id-out API so the
+database layer can serialize schema-validated values through `gix-store` and
+then place their resulting object ids in Prolly maps without coupling the map
+to value serialization.
+
+== Snapshot model
+
+A database snapshot is a canonical Git tree containing table metadata and table
+roots. A table root is the root object id returned by `git-prolly`. A database
+commit is an ordinary Git commit whose tree is a database snapshot.
+
+The first format should be deliberately small and inspectable with Git
+plumbing. It must define:
+
+* the snapshot tree layout;
+* table-name encoding and collision rules;
+* schema and format metadata;
+* how an empty database is represented;
+* the object-hash and Prolly configuration compatibility rules;
+* how malformed or foreign snapshot trees are rejected.
+
+Do not introduce a second commit or ref implementation. Use ordinary Git
+commits and refs, with CAS updates through the existing ref-store abstractions.
+
+== Development steps
+
+=== 1. Stabilize the moved Prolly crate
+
+* Make `git-prolly` a normal workspace member in `git-store`.
+* Replace its repository dependency on `facet-git-tree` with the local path
+  dependency.
+* Keep its Git-native format, verification tests, determinism tests, and Git
+  interoperability tests passing from the new workspace.
+* Document the format version and compatibility policy before other crates
+  depend on it.
+* Add an object-id-level insertion/build API, or an equivalent adapter, so
+  callers can provide already-written value objects without reserializing
+  `facet_value::Value`.
+
+=== 2. Define the database snapshot format
+
+* Add `gix-database` with `Snapshot`, `Table`, and format/error types.
+* Implement canonical read/write of a snapshot's table-name-to-root map.
+* Validate table names, duplicate names, object kinds, object existence, and
+  supported Prolly configuration.
+* Add round-trip, malformed-tree, SHA-1, SHA-256, and Git-plumbing tests.
+* Ensure unchanged table roots preserve their object ids across snapshots.
+
+=== 3. Add table operations
+
+* Add create/drop/list/lookup table operations.
+* Store table rows as Prolly key/value entries, initially using dynamic
+  `facet_value::Value` and explicit schemas where appropriate.
+* Add get, put, remove, and ordered scan operations.
+* Add table-level and row-level diff by composing snapshot comparison with
+  `ProllyStore::diff`.
+* Keep value decoding out of structural operations unless the caller requests
+  human-readable values.
+
+=== 4. Add repository database state
+
+* Define the database ref namespace and initialization behavior.
+* Represent the current branch with an ordinary Git branch/ref.
+* Add a database `HEAD` snapshot resolver.
+* Add an index/staging snapshot and a working snapshot with atomic CAS updates.
+* Define behavior for missing, detached, unborn, and stale database heads.
+* Make all writes safe under concurrent ref updates and return a stable
+  conflict classification.
+
+=== 5. Implement CLI porcelain
+
+Add commands to `git store`, retaining the existing explicit plumbing style:
+
+....
+git store db init
+git store db status
+git store db table create <name>
+git store db get <table> <key>
+git store db put <table> <key> <value>
+git store db rm <table> <key>
+git store db add <table>
+git store db diff [--staged]
+git store db commit -m <message>
+git store db log
+....
+
+Every command should have stable text output and `--format json` or NDJSON
+output. Exit codes must distinguish invalid input, missing objects, schema or
+value failures, and CAS conflicts consistently with the existing CLI.
+
+The first useful end-to-end milestone is:
+
+....
+init -> put -> status -> diff -> add -> commit -> log
+....
+
+=== 6. Add branches and checkout
+
+* Resolve database branches to ordinary Git refs.
+* Implement branch creation and switching without copying table data.
+* Define whether working/index snapshots are branch-local, repository-local,
+  or stored in a private ref namespace.
+* Add tests for branch divergence, switching, detached heads, and unreachable
+  temporary snapshots.
+
+=== 7. Implement three-way merge
+
+* Find the Git merge base for database commits.
+* Compare base/ours/theirs snapshot table roots.
+* Automatically merge disjoint table and row changes.
+* Detect same-key conflicting changes and represent conflicts explicitly.
+* Provide conflict inspection and resolution commands.
+* Commit a successful merge as an ordinary two-parent Git commit.
+
+Do not begin with SQL-level merge semantics. Establish exact key/value
+three-way behavior first, including delete/modify and add/add cases.
+
+=== 8. Add schema and query features
+
+* Connect table schemas to the existing `gix-store` schema/document model.
+* Pin the schema used by each table snapshot so historical commits remain
+  readable after schema evolution.
+* Add schema migration tooling as an explicit operation, not implicit decoding
+  behavior.
+* Add query support only after snapshot and merge semantics are stable.
+
+SQL is a later interface. The initial database API should remain useful for
+non-SQL callers and scripts.
+
+== Non-goals for the first implementation
+
+* Replacing Git refs, commits, or object storage.
+* Making `git-prolly` understand tables or schemas.
+* Treating JSON blobs as the canonical database representation.
+* Implementing SQL before the snapshot/workspace model is tested.
+* Promising path-local Prolly mutation performance before benchmarks justify it.
+
+== Acceptance criteria
+
+The first complete release of the database layer should demonstrate:
+
+* a database snapshot is inspectable with `git ls-tree`;
+* table roots are ordinary Git tree object ids;
+* two identical logical snapshots converge to identical objects;
+* `status` and `diff` report table and row changes without decoding unchanged
+  values;
+* commits, branches, and merges are ordinary Git history;
+* fetch, pack, repack, and `git fsck` preserve and validate the database;
+* SHA-1 and SHA-256 repositories are covered by tests;
+* concurrent publication failures do not silently overwrite another writer;
+* historical snapshots remain readable after current schemas evolve.

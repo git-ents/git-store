@@ -1,0 +1,86 @@
+= git-prolly
+
+Persistent, content-addressed https://en.wikipedia.org/wiki/Prolly_tree[Prolly Trees] whose physical representation is ordinary Git objects, built on https://github.com/GitoxideLabs/gitoxide[gitoxide] for object storage and https://github.com/git-ents/git-store[facet-git-tree] for structured values.
+
+== The defining invariant
+
+****
+Prolly node = Git tree
+node identity = Git ObjectId
+value identity = root ObjectId of the facet-git-tree representation
+****
+
+There is no second object store and no second Merkle-node format. A Prolly node *is* a Git tree, its child edges *are* Git tree entries, and every property Git gives trees — reachability, deduplication, packing, fetching, garbage collection — applies to the Prolly structure for free.
+
+== Representation
+
+A **leaf** is a Git tree with one entry per logical key:
+
+....
+<mode> <hex-encoded-key> <value-object-id>
+....
+
+The value object id is whatever root object facet-git-tree produced for the value (a tree for objects/arrays, a blob for scalars). The entry mode is the kind of that object, so every emitted tree is valid for `git fsck`.
+
+An **internal node** is a Git tree whose first entry is a reserved marker (name `!`, a blob carrying the format identity `git-prolly:1:internal\n`), followed by one entry per child:
+
+....
+040000 <hex-encoded-separator-key> <child-tree-oid>
+....
+
+The separator is the first logical key in the child's subtree; the Git tree supplies the ordering.
+
+Keys are lowercase hexadecimal (see `key.rs`), which is order-preserving under both plain bytewise comparison and Git's directory-aware tree-entry ordering, and can never collide with the reserved `!` marker.
+
+Node identity is content identity:
+
+....
+same canonical node  →  same Git tree  →  same ObjectId
+same value           →  same object graph  →  same ObjectId
+....
+
+== API
+
+[source,rust]
+----
+let store = ProllyStore::open(&repo);
+
+let root = store.insert(None, b"alice", &value)?;       // build
+let root = store.insert(Some(root), b"bob", &value)?;   // mutate → new root
+let v     = store.get(root, b"alice")?;                 // dynamic Value
+let t     = store.get_as::<Person>(root, b"bob")?;      // Facet reflection
+let oid   = store.get_oid(root, b"alice")?;             // value object id, no decode
+for (key, value) in store.iter(root)? { /* … */ }
+
+let changes = store.diff(root_a, root_b)?;              // ObjectId-level, no value decoding
+store.verify(root)?;                                    // Prolly invariants on top of git fsck
+----
+
+Trees are immutable. A mutation produces a new root while the old root stays readable; unchanged subtrees keep their ObjectIds automatically. The root ObjectId is portable: put it in a commit tree, a ref, another Facet value, or any other Git object graph.
+
+The repository's configured object hash is used throughout — nothing assumes SHA-1 or a 20-byte id.
+
+== Determinism
+
+Chunk boundaries are a pure function of the ordered entry fingerprints and the `ProllyConfig` (`H(encoded_key || value_oid)` at the leaf level, `H(child_oid)` above, boundary where `fingerprint & mask == 0`, clamped to `min_entries`/`max_entries`). Sorted insertion, shuffled insertion, and batch construction of the same logical contents converge on the same root. Mutations rebuild from the merged entry list precisely so a mutation result equals a batch construction; path-local rebuilding that preserves this guarantee is future work.
+
+== Layout
+
+[cols="1,2"]
+|===
+|`src/store.rs` |`ProllyStore`, the repository-backed entry point and its Git object operations
+|`src/key.rs` |`KeyCodec` trait and the hexadecimal codec
+|`src/config.rs` |`ProllyConfig` (chunk bits, min/max entries, codec)
+|`src/node.rs` |node vocabulary: leaf entries, internal marker, tree composition
+|`src/chunk.rs` |deterministic chunking
+|`src/build.rs` |bottom-up construction, `insert`/`remove`/`build`
+|`src/lookup.rs` |`get`/`get_oid`/`get_as`/`iter`
+|`src/diff.rs` |structural two-way diff
+|`src/verify.rs` |Prolly invariant verification
+|===
+
+== Testing and measuring
+
+* `cargo test -p git-prolly` — round trips, determinism, persistence, lookup against a `BTreeMap` reference, diff against a reference diff, corruption rejection, and Git interoperability (`git fsck`, `git rev-list --objects`, `git repack -adf`, reopen, lookups).
+* `cargo bench -p git-prolly` — build 1K/10K/100K, lookup, iteration, insert, diff.
+* `cargo run -p git-prolly --example object-stats -- [n]` — object counts, bytes, tree count, lookup depth, objects rewritten per mutation.
