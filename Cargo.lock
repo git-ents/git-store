@@ -798,7 +798,9 @@ dependencies = [
  "facet-git-tree",
  "facet-json",
  "facet-value",
+ "git-prolly",
  "gix",
+ "gix-database",
  "gix-store",
  "tempfile",
  "test-support",
@@ -950,6 +952,19 @@ dependencies = [
  "bstr",
  "gix-path",
  "libc",
+ "thiserror",
+]
+
+[[package]]
+name = "gix-database"
+version = "0.1.0"
+dependencies = [
+ "facet-value",
+ "git-prolly",
+ "gix",
+ "gix-refstore",
+ "tempfile",
+ "test-support",
  "thiserror",
 ]
 

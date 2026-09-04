@@ -20,6 +20,7 @@
 //! entity ref under the selected data prefix is itself a valid `<tree-ish>`
 //! for `cat`/`check`.
 
+mod db;
 mod interactive;
 
 use std::collections::BTreeSet;
@@ -57,6 +58,7 @@ Everyday
   rm        Delete an entity
   check     Validate a value against a schema
   schema    Define, read, or trace a kind's schema
+  db        Versioned key/value database over ordinary Git commits
 
 Plumbing — composable, oid in, oid out
   value     encode | decode
@@ -145,7 +147,7 @@ impl From<CompatArg> for Compat {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum OutputFormat {
+pub(crate) enum OutputFormat {
     Text,
     Json,
     Ndjson,
@@ -167,7 +169,7 @@ impl OutputFormat {
 
 /// The stable machine-facing class of a CLI failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExitClass {
+pub(crate) enum ExitClass {
     Cas,
     NotFound,
     Schema,
@@ -230,7 +232,7 @@ impl fmt::Display for ClassifiedContext {
 
 impl std::error::Error for ClassifiedContext {}
 
-fn cli_error(class: ExitClass, message: impl Into<String>) -> anyhow::Error {
+pub(crate) fn cli_error(class: ExitClass, message: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(ClassifiedContext::new(class, message))
 }
 
@@ -314,6 +316,12 @@ enum Command {
     Entity {
         #[command(subcommand)]
         command: EntityCommand,
+    },
+    /// Versioned key/value database over ordinary Git commits.
+    #[command(name = "db")]
+    Db {
+        #[command(subcommand)]
+        command: db::DbCommand,
     },
 }
 
@@ -621,6 +629,7 @@ fn run() -> Result<()> {
                 output,
             )?,
         },
+        Command::Db { command } => db::run(&repo, command, output)?,
         Command::Entity { command } => match command {
             EntityCommand::Resolve { kind, name } => {
                 entity_resolve(&repo, &store, &kind, &name, output)?
@@ -728,18 +737,18 @@ fn deserialize_exit_class(error: &facet_git_tree::DeserializeError) -> ExitClass
     }
 }
 
-fn json_record() -> VObject {
+pub(crate) fn json_record() -> VObject {
     let mut record = VObject::new();
     record.insert("status", "ok");
     record.insert("code", "ok");
     record
 }
 
-fn oid_value(oid: impl Into<ObjectId>) -> Value {
+pub(crate) fn oid_value(oid: impl Into<ObjectId>) -> Value {
     oid.into().to_string().into()
 }
 
-fn string_array<I>(items: I) -> Value
+pub(crate) fn string_array<I>(items: I) -> Value
 where
     I: IntoIterator,
     I::Item: Into<String>,
@@ -751,7 +760,7 @@ where
     array.into()
 }
 
-fn emit_record(format: OutputFormat, record: VObject) -> Result<()> {
+pub(crate) fn emit_record(format: OutputFormat, record: VObject) -> Result<()> {
     debug_assert!(format.machine(), "emit_record is for json/ndjson only");
     let value: Value = record.into();
     println!(
@@ -767,7 +776,11 @@ fn emit_record(format: OutputFormat, record: VObject) -> Result<()> {
 /// differ only for a list ([`emit_list`]). Every command routes its output
 /// through this or [`emit_list`], so no command can silently ignore the
 /// selected format.
-fn emit_single(format: OutputFormat, fields: VObject, text: impl FnOnce() -> String) -> Result<()> {
+pub(crate) fn emit_single(
+    format: OutputFormat,
+    fields: VObject,
+    text: impl FnOnce() -> String,
+) -> Result<()> {
     if format.machine() {
         emit_fields(format, fields)
     } else {
@@ -787,9 +800,9 @@ fn emit_fields(format: OutputFormat, fields: VObject) -> Result<()> {
 
 /// One row of a [`emit_list`] result: `fields` are the bare, unwrapped
 /// machine data for that row and `text` its one-line human rendering.
-struct ListItem {
-    fields: VObject,
-    text: String,
+pub(crate) struct ListItem {
+    pub(crate) fields: VObject,
+    pub(crate) text: String,
 }
 
 /// Print a list-shaped command's result. Text prints one line per item.
@@ -797,7 +810,11 @@ struct ListItem {
 /// whose `list_field` holds the array of bare item objects — the same shape
 /// [`ref_list`] and [`object_tree`] already used, generalized to every
 /// list-producing command.
-fn emit_list(format: OutputFormat, list_field: &str, items: Vec<ListItem>) -> Result<()> {
+pub(crate) fn emit_list(
+    format: OutputFormat,
+    list_field: &str,
+    items: Vec<ListItem>,
+) -> Result<()> {
     match format {
         OutputFormat::Text => {
             for item in items {

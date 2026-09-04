@@ -1,0 +1,22 @@
+= gix-database
+
+A versioned database experience on top of ordinary Git objects, refs, and
+commits, composed from `git-prolly` and `gix-store`-style ref plumbing.
+
+A database *snapshot* is a canonical Git tree: one reserved metadata blob
+(`!database`, naming the format and the Prolly configuration) plus one tree
+entry per table, each pointing at a Prolly root. A database *commit* is an
+ordinary Git commit whose tree is a snapshot, so history, branches, merges,
+fetch, pack, and `git fsck` all remain plain Git.
+
+Working state lives in refs under `refs/db/`: `refs/db/HEAD` (symbolic, naming
+the current branch), `refs/db/heads/<branch>` (branch tips), and the
+repository-local `refs/db/index` and `refs/db/working` snapshots. Every write
+is a compare-and-swap on the ref it advances, classified as a stable
+`CasConflict` on a lost race — concurrent writers are detected, never
+silently overwritten.
+
+Merging is exact key/value three-way: rows changed on one side only are
+taken, rows changed on both sides must agree, tables dropped on one side and
+changed on the other conflict explicitly, and a refused merge writes nothing.
+Values are never decoded by structural operations.

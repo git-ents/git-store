@@ -41,9 +41,31 @@ impl ProllyStore<'_> {
         key: &[u8],
         value: &Value,
     ) -> Result<ObjectId, Error> {
-        self.config().key_codec.codec().encode(key)?;
         let value_oid =
             facet_git_tree::serialize_into(value, self.repo()).map_err(Error::Serialize)?;
+        self.insert_value_object(root, key, value_oid)
+    }
+
+    /// Insert an already-written value object under `key`, returning the new
+    /// root.
+    ///
+    /// This is the oid-in/oid-out path callers with their own value
+    /// serialization use: the object must already exist in the repository and
+    /// be a tree or a blob; it is referenced as-is, never re-encoded. Passing
+    /// `None` builds a fresh tree. When `key` already exists, its value is
+    /// replaced; if it is already this object, the root is returned unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] for an invalid key, a missing or unusable value
+    /// object, or an invalid configuration.
+    pub fn insert_value_object(
+        &self,
+        root: Option<ObjectId>,
+        key: &[u8],
+        value_oid: ObjectId,
+    ) -> Result<ObjectId, Error> {
+        self.config().key_codec.codec().encode(key)?;
         let mode = self.entry_mode_of(value_oid)?;
         let mut entries = match root {
             None => Vec::new(),

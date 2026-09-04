@@ -1,0 +1,22 @@
+[package]
+name = "gix-database"
+version = "0.1.0"
+edition = "2024"
+readme = "README.adoc"
+
+[dependencies]
+facet-value = "0.50.0-rc.5"
+git-prolly = { path = "../git-prolly" }
+gix = { version = "0.85.0", default-features = false, features = [
+    "sha1",
+    "sha256",
+    "zlib-rs",
+    "revision",
+] }
+gix-refstore = { path = "../gix-refstore" }
+thiserror = "2"
+
+[dev-dependencies]
+facet-value = "0.50.0-rc.5"
+tempfile = "3"
+test-support = { path = "../test-support" }

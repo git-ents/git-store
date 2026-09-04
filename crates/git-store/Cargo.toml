@@ -9,6 +9,8 @@ name = "git-store"
 path = "src/main.rs"
 
 [dependencies]
+gix-database = { path = "../gix-database" }
+git-prolly = { path = "../git-prolly" }
 gix-store = { path = "../gix-store" }
 facet = { version = "0.50.0-rc.0", features = ["reflect"] }
 facet-git-tree = { path = "../facet-git-tree", features = ["value"] }

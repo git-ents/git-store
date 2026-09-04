@@ -40,6 +40,16 @@
 //! reserved marker name `!` (which sorts below every hexadecimal digit) can
 //! never collide with a key.
 //!
+//! # Compatibility
+//!
+//! The on-disk format is versioned: the internal-node marker carries the
+//! format version, and the current version is [`FORMAT_VERSION`]. Within a
+//! version, node representations are frozen — trees written by any release of
+//! this crate remain readable by later releases. A format change requires a
+//! new version and a reader that still accepts every earlier version. The
+//! [`ProllyConfig`] parameters are likewise frozen per version: trees built
+//! under different configurations are distinct, never silently comparable.
+//!
 //! # Identity and deduplication
 //!
 //! ```text
