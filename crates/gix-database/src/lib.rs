@@ -81,6 +81,6 @@ pub use format::{DEFAULT_BRANCH, METADATA_NAME, REF_PREFIX, SNAPSHOT_FORMAT_LINE
 pub use merge::{Merged, merge_snapshots};
 pub use snapshot::{Snapshot, metadata_bytes};
 pub use workspace::{
-    ChangeKind, HEAD_REF, HEADS_PREFIX, Head, INDEX_REF, RowChange, Status, TableStatus,
-    WORKING_REF, WorkspaceState,
+    ChangeKind, HEAD_REF, HEADS_PREFIX, Head, INDEX_REF, RowChange, Status, TAGS_PREFIX,
+    TableStatus, WORKING_REF, WorkspaceState,
 };

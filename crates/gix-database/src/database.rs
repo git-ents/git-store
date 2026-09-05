@@ -6,7 +6,7 @@ use git_prolly::{ProllyConfig, ProllyStore};
 use gix::ObjectId;
 use gix::bstr::ByteSlice;
 use gix::objs::{CommitRef, Find as _, Kind};
-use gix_refstore::{GixRefStore, RefName, RefStore};
+use gix_refstore::{GixRefStore, RefEdit, RefName, RefStore};
 
 use crate::error::{
     CasConflict, CheckoutError, CommitError, Error, MergeError, ReadStateError, WriteStateError,
@@ -368,6 +368,109 @@ impl<'repo> Database<'repo> {
         }
     }
 
+    /// Restore a table's working root from the staged (index) snapshot —
+    /// [`Database::stage`]'s mirror, discarding unstaged changes to one
+    /// table. A table added after staging is removed from the working
+    /// snapshot again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TableNotFound`] when the table exists in neither the
+    /// index nor the working snapshot, and write errors when the working
+    /// snapshot cannot be published.
+    pub fn restore_table(&self, table: &str) -> Result<ObjectId, Error> {
+        let name = TableName::new(table)?;
+        let index = self.index_state()?;
+        let mut snapshot = self.working_state()?.snapshot;
+        let root = match index.snapshot.table(name.as_str()) {
+            Some(root) => {
+                snapshot.set_table(name.clone(), root);
+                root
+            }
+            None => snapshot
+                .remove_table(name.as_str())
+                .ok_or_else(|| Error::TableNotFound(name.clone()))?,
+        };
+        self.write_working(snapshot)?;
+        Ok(root)
+    }
+
+    /// Unstage a table: restore its index root from the branch tip —
+    /// [`Database::stage`]'s inverse. A table absent from the tip is removed
+    /// from the index again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TableNotFound`] when the table exists in neither the
+    /// branch tip nor the index, and write errors when the index cannot be
+    /// published.
+    pub fn unstage(&self, table: &str) -> Result<ObjectId, Error> {
+        let name = TableName::new(table)?;
+        let tip = self.head_snapshot()?;
+        let mut snapshot = self.index_state()?.snapshot;
+        let root = match tip.table(name.as_str()) {
+            Some(root) => {
+                snapshot.set_table(name.clone(), root);
+                root
+            }
+            None => snapshot
+                .remove_table(name.as_str())
+                .ok_or_else(|| Error::TableNotFound(name.clone()))?,
+        };
+        self.write_index(snapshot)?;
+        Ok(root)
+    }
+
+    /// Discard everything: move the working and index snapshots back to the
+    /// branch tip in one compare-and-swap batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::State::NoDatabase`] when there is no branch tip, and
+    /// write errors on a lost race.
+    pub fn reset_hard(&self) -> Result<ObjectId, Error> {
+        let commit = self
+            .head()?
+            .commit()
+            .ok_or(Error::State(ReadStateError::NoDatabase))?;
+        let working = RefName::new(workspace::WORKING_REF).expect("built-in ref name is valid");
+        let index = RefName::new(workspace::INDEX_REF).expect("built-in ref name is valid");
+        let edits = vec![
+            cas_edit(&working, read_ref(&self.refs, &working)?, commit),
+            cas_edit(&index, read_ref(&self.refs, &index)?, commit),
+        ];
+        self.refs.apply_batch(edits).map_err(|error| match error {
+            gix_refstore::ApplyError::LostRace { name, .. } => {
+                Error::Write(WriteStateError::Conflict(classify(&name)))
+            }
+            gix_refstore::ApplyError::Backend(error) => {
+                Error::Write(WriteStateError::ref_backend(error))
+            }
+        })?;
+        Ok(commit)
+    }
+
+    /// Rename a table in the working snapshot, keeping its rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TableNotFound`] when `from` does not exist and
+    /// [`Error::TableExists`] when `to` does.
+    pub fn move_table(&self, from: &str, to: &str) -> Result<ObjectId, Error> {
+        let from_name = TableName::new(from)?;
+        let to_name = TableName::new(to)?;
+        let mut snapshot = self.working_state()?.snapshot;
+        let root = snapshot
+            .remove_table(from_name.as_str())
+            .ok_or_else(|| Error::TableNotFound(from_name.clone()))?;
+        if snapshot.table(to_name.as_str()).is_some() {
+            return Err(Error::TableExists(to_name.clone()));
+        }
+        snapshot.set_table(to_name, root);
+        self.write_working(snapshot)?;
+        Ok(root)
+    }
+
     /// Compare two snapshots table by table, row by row.
     ///
     /// # Errors
@@ -546,6 +649,161 @@ impl<'repo> Database<'repo> {
             CasConflict::Branch(branch.to_owned()),
         )?;
         Ok(commit)
+    }
+
+    /// Delete a branch that is not the current one, returning its tip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BranchNotFound`] when the branch does not exist and
+    /// [`Error::CurrentBranch`] when it is the branch `HEAD` names.
+    pub fn delete_branch(&self, branch: &str) -> Result<ObjectId, Error> {
+        let name = branch_ref(branch)?;
+        let tip =
+            read_ref(&self.refs, &name)?.ok_or_else(|| Error::BranchNotFound(branch.to_owned()))?;
+        let current = self
+            .head()?
+            .branch()
+            .is_some_and(|head| head.as_str() == name.as_str());
+        if current {
+            return Err(Error::CurrentBranch(branch.to_owned()));
+        }
+        self.apply_delete(&name, tip, CasConflict::Branch(branch.to_owned()))?;
+        Ok(tip)
+    }
+
+    /// Rename a branch, keeping its tip, and retarget `HEAD` when it named
+    /// the old branch.
+    ///
+    /// The new ref is created first and the old one deleted last, so an
+    /// interrupted rename leaves an extra branch — never a missing one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BranchNotFound`] when `from` does not exist and
+    /// [`Error::BranchExists`] when `to` does.
+    pub fn rename_branch(&self, from: &str, to: &str) -> Result<ObjectId, Error> {
+        let from_ref = branch_ref(from)?;
+        let to_ref = branch_ref(to)?;
+        let tip = read_ref(&self.refs, &from_ref)?
+            .ok_or_else(|| Error::BranchNotFound(from.to_owned()))?;
+        if read_ref(&self.refs, &to_ref)?.is_some() {
+            return Err(Error::BranchExists(to.to_owned()));
+        }
+        apply_cas(
+            &self.refs,
+            cas_edit(&to_ref, None, tip),
+            CasConflict::Branch(to.to_owned()),
+        )?;
+        if self
+            .head()?
+            .branch()
+            .is_some_and(|head| head.as_str() == from_ref.as_str())
+        {
+            self.set_head_symbolic(&to_ref)?;
+        }
+        self.apply_delete(&from_ref, tip, CasConflict::Branch(from.to_owned()))?;
+        Ok(tip)
+    }
+
+    /// List the branch tips under `refs/db/heads`, sorted by branch name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] when the ref store cannot be listed.
+    pub fn list_branches(&self) -> Result<Vec<(String, ObjectId)>, Error> {
+        self.list_under(crate::workspace::HEADS_PREFIX)
+    }
+
+    /// Create a lightweight tag at `commit`, or at the current tip when
+    /// `commit` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TagExists`] when the tag is taken, and read errors
+    /// when there is no commit to tag.
+    pub fn create_tag(&self, tag: &str, commit: Option<ObjectId>) -> Result<ObjectId, Error> {
+        let name = crate::workspace::tag_ref(tag)?;
+        if read_ref(&self.refs, &name)?.is_some() {
+            return Err(Error::TagExists(tag.to_owned()));
+        }
+        let commit = match commit {
+            Some(commit) => commit,
+            None => self
+                .head()?
+                .commit()
+                .ok_or(Error::State(ReadStateError::NoDatabase))?,
+        };
+        apply_cas(
+            &self.refs,
+            cas_edit(&name, None, commit),
+            CasConflict::Tag(tag.to_owned()),
+        )?;
+        Ok(commit)
+    }
+
+    /// Delete a lightweight tag, returning the commit it held.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TagNotFound`] when the tag does not exist.
+    pub fn delete_tag(&self, tag: &str) -> Result<ObjectId, Error> {
+        let name = crate::workspace::tag_ref(tag)?;
+        let commit =
+            read_ref(&self.refs, &name)?.ok_or_else(|| Error::TagNotFound(tag.to_owned()))?;
+        self.apply_delete(&name, commit, CasConflict::Tag(tag.to_owned()))?;
+        Ok(commit)
+    }
+
+    /// List the tags under `refs/db/tags`, sorted by tag name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] when the ref store cannot be listed.
+    pub fn list_tags(&self) -> Result<Vec<(String, ObjectId)>, Error> {
+        self.list_under(crate::workspace::TAGS_PREFIX)
+    }
+
+    /// Delete a ref that currently holds `expected`, mapping a lost race to
+    /// `conflict`.
+    fn apply_delete(
+        &self,
+        name: &RefName,
+        expected: ObjectId,
+        conflict: CasConflict,
+    ) -> Result<(), Error> {
+        self.refs
+            .apply(RefEdit::Delete {
+                name: name.clone(),
+                expected,
+            })
+            .map_err(|error| match error {
+                gix_refstore::ApplyError::LostRace { .. } => {
+                    Error::Write(WriteStateError::Conflict(conflict))
+                }
+                gix_refstore::ApplyError::Backend(error) => {
+                    Error::Write(WriteStateError::ref_backend(error))
+                }
+            })
+    }
+
+    /// List every ref under a built-in prefix as `(name, oid)`, sorted by
+    /// name.
+    fn list_under(&self, prefix: &str) -> Result<Vec<(String, ObjectId)>, Error> {
+        let prefix =
+            gix_refstore::RefPrefix::try_from(prefix).expect("built-in ref prefixes are valid");
+        let mut out: Vec<(String, ObjectId)> = self
+            .refs
+            .prefixed(&prefix)
+            .map_err(|error| Error::state_from_git(error.to_string()))?
+            .into_iter()
+            .filter_map(|(name, oid)| {
+                name.relative_to(&prefix)
+                    .map(|path| (path.to_string(), oid))
+            })
+            .collect();
+        out.sort();
+        Ok(out)
     }
 
     /// Switch the database to `branch`.

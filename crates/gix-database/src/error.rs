@@ -131,6 +131,9 @@ pub enum CasConflict {
     /// The branch ref moved under the caller: another process committed.
     #[error("branch {0} moved concurrently; nothing was written")]
     Branch(String),
+    /// A tag ref moved under the caller.
+    #[error("tag {0} moved concurrently; nothing was written")]
+    Tag(String),
 }
 
 /// Everything wrong a state read can be.
@@ -230,6 +233,15 @@ pub enum Error {
     /// A create targeted a branch name already present.
     #[error("branch `{0}` already exists")]
     BranchExists(String),
+    /// A deletion targeted the branch that is currently checked out.
+    #[error("cannot delete branch `{0}`: it is the current branch")]
+    CurrentBranch(String),
+    /// The named tag does not exist.
+    #[error("tag `{0}` does not exist")]
+    TagNotFound(String),
+    /// A create targeted a tag name already present.
+    #[error("tag `{0}` already exists")]
+    TagExists(String),
 }
 /// A merge was refused because it cannot be completed without a decision.
 #[derive(Debug, thiserror::Error)]

@@ -19,6 +19,9 @@ pub const INDEX_REF: &str = "refs/db/index";
 /// The ref holding the working snapshot: `refs/db/working`.
 pub const WORKING_REF: &str = "refs/db/working";
 
+/// The prefix holding lightweight tags: `refs/db/tags`.
+pub const TAGS_PREFIX: &str = "refs/db/tags";
+
 /// The resolved database `HEAD`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Head {
@@ -222,6 +225,15 @@ pub(crate) fn write_commit(
 /// Returns the ref-store's name validation error for an unusable branch name.
 pub fn branch_ref(branch: &str) -> Result<RefName, gix_refstore::InvalidRefName> {
     RefName::new(format!("{HEADS_PREFIX}/{branch}"))
+}
+
+/// A tag's full ref name, validated.
+///
+/// # Errors
+///
+/// Returns the ref-store's name validation error for an unusable tag name.
+pub fn tag_ref(tag: &str) -> Result<RefName, gix_refstore::InvalidRefName> {
+    RefName::new(format!("{TAGS_PREFIX}/{tag}"))
 }
 
 #[cfg(test)]
