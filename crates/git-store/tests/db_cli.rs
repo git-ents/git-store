@@ -71,9 +71,9 @@ fn the_first_milestone_end_to_end() {
     assert!(out.contains("+ alice"), "diff: {out}");
     assert!(out.contains("+ bob"), "diff: {out}");
 
-    // Invalid JSON is a schema-class failure (exit 5).
+    // Invalid JSON is an invalid-args failure (exit 2), like `table import`.
     let (_, stderr, code) = run(dir.path(), &["db", "put", "users", "x", "{nope"]);
-    assert_eq!(code, 5, "invalid value JSON: {stderr}");
+    assert_eq!(code, 2, "invalid value JSON: {stderr}");
 
     // add stages; diff --staged sees the staged rows; working diff empties.
     ok(dir.path(), &["db", "add", "users"]);

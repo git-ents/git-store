@@ -163,6 +163,71 @@ fn table_import_and_export_round_trip() {
 }
 
 #[test]
+fn a_failed_import_writes_nothing() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    init_repo(dir.path());
+    ok(dir.path(), &["db", "init"]);
+
+    // -c with a bad key mid-document: the table must not exist at all.
+    let bad = dir.path().join("bad.json");
+    std::fs::write(&bad, "{\"good\": \"1\", \"\": \"2\"}").expect("write bad doc");
+    let (_, stderr, code) = run(
+        dir.path(),
+        &[
+            "db",
+            "table",
+            "import",
+            "t",
+            "-c",
+            "-F",
+            bad.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(code, 2, "empty key is invalid: {stderr}");
+    let (_, stderr, code) = run(dir.path(), &["db", "table", "export", "t"]);
+    assert_eq!(code, 3, "the failed import created nothing: {stderr}");
+
+    // Same for an existing table: its rows survive a failed replace.
+    ok(dir.path(), &["db", "table", "create", "t"]);
+    ok(dir.path(), &["db", "put", "t", "keep", "\"yes\""]);
+    let (_, stderr, code) = run(
+        dir.path(),
+        &[
+            "db",
+            "table",
+            "import",
+            "t",
+            "-r",
+            "-F",
+            bad.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(code, 2, "replace with a bad key: {stderr}");
+    let out = ok(dir.path(), &["db", "get", "t", "keep"]);
+    assert!(out.contains("\"yes\""), "old rows survive: {out}");
+
+    // A 10KB key is rejected the same way, before anything is written.
+    let big = format!("{{\"{}\": \"1\"}}", "k".repeat(10 * 1024));
+    let big_path = dir.path().join("big.json");
+    std::fs::write(&big_path, big).expect("write big doc");
+    let (_, stderr, code) = run(
+        dir.path(),
+        &[
+            "db",
+            "table",
+            "import",
+            "t",
+            "-r",
+            "-F",
+            big_path.to_str().expect("utf8"),
+        ],
+    );
+    assert_eq!(code, 2, "oversized key: {stderr}");
+    let out = ok(dir.path(), &["db", "get", "t", "keep"]);
+    assert!(out.contains("\"yes\""), "old rows still survive: {out}");
+}
+
+#[test]
 fn show_prints_a_commit_message_and_rows() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     init_repo(dir.path());

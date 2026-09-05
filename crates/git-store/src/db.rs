@@ -368,7 +368,7 @@ pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputForm
         }
         DbCommand::Put { table, key, value } => {
             let value: Value = from_str(&value).map_err(|error| {
-                cli_error(ExitClass::Schema, format!("invalid JSON value: {error}"))
+                cli_error(ExitClass::Invalid, format!("invalid JSON value: {error}"))
             })?;
             let root = db.put(&table, key.as_bytes(), &value).map_err(db_error)?;
             let mut fields = VObject::new();
@@ -600,28 +600,13 @@ fn import(
 ) -> Result<usize> {
     let json = read_source(file)?;
     let rows = rows_from_json(&json)?;
-    let exists = db
-        .working_state()
-        .map_err(db_error)?
-        .snapshot
-        .table(table)
-        .is_some();
-    if create {
-        if exists {
-            return Err(db_error(gix_database::Error::TableExists(
-                gix_database::TableName::new(table).map_err(db_error)?,
-            )));
-        }
-        db.create_table(table).map_err(db_error)?;
-    } else if replace {
-        if exists {
-            db.drop_table(table).map_err(db_error)?;
-        }
-        db.create_table(table).map_err(db_error)?;
-    }
-    for (key, value) in &rows {
-        db.put(table, key.as_bytes(), value).map_err(db_error)?;
-    }
+    db.put_rows(
+        table,
+        rows.iter().map(|(k, v)| (k.as_str(), v.clone())),
+        create,
+        replace,
+    )
+    .map_err(db_error)?;
     Ok(rows.len())
 }
 

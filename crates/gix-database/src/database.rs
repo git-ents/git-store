@@ -317,6 +317,54 @@ impl<'repo> Database<'repo> {
         Ok(new_root)
     }
 
+    /// Set many rows of `table` in one working-snapshot write.
+    ///
+    /// `create` requires the table to be absent, `replace` truncates an
+    /// existing table (or acts as a create when absent) before the rows
+    /// land, and with neither flag the table must exist. Every key is
+    /// validated and merged into the table's prolly tree before any ref
+    /// moves, so a malformed row leaves the working set untouched and a
+    /// rival write is one detected conflict — never a partially imported
+    /// table.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Error::TableNotFound`]/[`Error::TableExists`] pair the
+    /// flags imply, per-row key or serialization errors before anything is
+    /// published, and write errors when the working snapshot cannot be
+    /// published.
+    pub fn put_rows<I, K>(
+        &self,
+        table: &str,
+        rows: I,
+        create: bool,
+        replace: bool,
+    ) -> Result<ObjectId, Error>
+    where
+        I: IntoIterator<Item = (K, Value)>,
+        K: AsRef<[u8]>,
+    {
+        let name = TableName::new(table)?;
+        let working = self.working_state()?;
+        let mut snapshot = working.snapshot.clone();
+        let root = match (create, replace, snapshot.table(name.as_str())) {
+            (true, _, Some(_)) => return Err(Error::TableExists(name)),
+            (true, _, None) | (_, true, _) => self.store.empty_root(),
+            (false, false, Some(root)) => root,
+            (false, false, None) => return Err(Error::TableNotFound(name)),
+        };
+        let mut new_root = root;
+        for (key, value) in rows {
+            new_root = self.store.insert(Some(new_root), key.as_ref(), &value)?;
+        }
+        if new_root == root {
+            return Ok(root);
+        }
+        snapshot.set_table(name, new_root);
+        self.write_working(working.commit, snapshot)?;
+        Ok(new_root)
+    }
+
     /// Look up a key's value in `table`'s working root.
     ///
     /// # Errors
