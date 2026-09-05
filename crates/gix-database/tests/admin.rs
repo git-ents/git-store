@@ -2,7 +2,7 @@
 //! restore, unstage, hard reset, and table moves.
 
 use gix::ObjectId;
-use gix_database::{Database, Error, TAGS_PREFIX};
+use gix_database::{Database, Error, TAGS_PREFIX, WriteStateError};
 use gix_refstore::{RefName, RefStore as _};
 
 fn repo() -> (tempfile::TempDir, gix::Repository) {
@@ -236,4 +236,96 @@ fn move_table_renames_and_refuses_collisions() {
         Err(Error::TableNotFound(name)) => assert_eq!(name.as_str(), "ghost"),
         other => panic!("expected TableNotFound, got {other:?}"),
     }
+}
+
+#[test]
+fn a_racing_put_never_reports_success_while_losing_its_write() {
+    // Reproduce the stale-CAS window: two writers build their snapshots
+    // from the same base ref value, then publish. The loser must surface a
+    // conflict — never a success whose write silently vanished.
+    for _ in 0..25 {
+        let (dir, repo) = repo();
+        let database = db(&repo);
+        database.init().expect("init");
+        database.create_table("t").expect("create");
+        database.put("t", b"base", &"0".into()).expect("put");
+        database.stage("t").expect("stage");
+        database.commit("base").expect("commit");
+
+        let path = dir.path().to_owned();
+        let results: [Result<ObjectId, Error>; 2] = std::thread::scope(|scope| {
+            let put = |key: &'static [u8]| {
+                let path = path.clone();
+                scope.spawn(move || {
+                    let repo = gix::open(&path).expect("open repo");
+                    Database::open(&repo).put("t", key, &"v".into())
+                })
+            };
+            let a = put(b"k1");
+            let b = put(b"k2");
+            [a.join().expect("thread a"), b.join().expect("thread b")]
+        });
+
+        // Whatever the schedule, the surviving ref must contain every key
+        // whose write reported success.
+        let ok_keys: Vec<&[u8]> = results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| match r {
+                Ok(_) => Some(if i == 0 { &b"k1"[..] } else { &b"k2"[..] }),
+                Err(Error::Write(WriteStateError::Conflict(_))) => None,
+                Err(error) => panic!("unexpected racing error: {error}"),
+            })
+            .collect();
+        let read = |key: &[u8]| {
+            let repo = gix::open(&path).expect("open repo");
+            Database::open(&repo).get("t", key).expect("get")
+        };
+        for key in ok_keys {
+            assert_eq!(
+                read(key),
+                Some("v".into()),
+                "a put that reported success lost its write"
+            );
+        }
+        assert!(
+            !results.iter().all(|r| r.is_err()),
+            "two CAS races cannot both lose: one writer always publishes"
+        );
+    }
+}
+
+#[test]
+fn a_racing_stage_never_reports_success_while_losing_its_write() {
+    let (dir, repo) = repo();
+    let database = db(&repo);
+    database.init().expect("init");
+    database.create_table("a").expect("create a");
+    database.create_table("b").expect("create b");
+    database.put("a", b"k", &"1".into()).expect("put a");
+    database.put("b", b"k", &"1".into()).expect("put b");
+
+    let path = dir.path().to_owned();
+    let results: [Result<ObjectId, Error>; 2] = std::thread::scope(|scope| {
+        let stage = |table: &'static str| {
+            let path = path.clone();
+            scope.spawn(move || {
+                let repo = gix::open(&path).expect("open repo");
+                Database::open(&repo).stage(table)
+            })
+        };
+        let a = stage("a");
+        let b = stage("b");
+        [a.join().expect("thread a"), b.join().expect("thread b")]
+    });
+    let successes = results.iter().filter(|r| r.is_ok()).count();
+    let conflicts = results
+        .iter()
+        .filter(|r| matches!(r, Err(Error::Write(WriteStateError::Conflict(_)))))
+        .count();
+    assert_eq!(
+        successes + conflicts,
+        2,
+        "every stage either publishes or reports a conflict, got {results:?}"
+    );
 }

@@ -227,13 +227,14 @@ impl<'repo> Database<'repo> {
     /// write errors when the working snapshot cannot be published.
     pub fn create_table(&self, table: &str) -> Result<ObjectId, Error> {
         let name = TableName::new(table)?;
-        let mut snapshot = self.working_state()?.snapshot;
+        let working = self.working_state()?;
+        let mut snapshot = working.snapshot.clone();
         if snapshot.table(name.as_str()).is_some() {
             return Err(Error::TableExists(name));
         }
         let root = self.store.empty_root();
         snapshot.set_table(name.clone(), root);
-        self.write_working(snapshot)?;
+        self.write_working(working.commit, snapshot)?;
         Ok(root)
     }
 
@@ -244,11 +245,12 @@ impl<'repo> Database<'repo> {
     /// Returns [`Error::TableNotFound`] when the table does not exist.
     pub fn drop_table(&self, table: &str) -> Result<ObjectId, Error> {
         let name = TableName::new(table)?;
-        let mut snapshot = self.working_state()?.snapshot;
+        let working = self.working_state()?;
+        let mut snapshot = working.snapshot.clone();
         let root = snapshot
             .remove_table(name.as_str())
             .ok_or_else(|| Error::TableNotFound(name))?;
-        self.write_working(snapshot)?;
+        self.write_working(working.commit, snapshot)?;
         Ok(root)
     }
 
@@ -263,13 +265,14 @@ impl<'repo> Database<'repo> {
     /// write errors when the working snapshot cannot be published.
     pub fn put(&self, table: &str, key: &[u8], value: &Value) -> Result<ObjectId, Error> {
         let name = TableName::new(table)?;
-        let mut snapshot = self.working_state()?.snapshot;
+        let working = self.working_state()?;
+        let mut snapshot = working.snapshot.clone();
         let root = snapshot
             .table(name.as_str())
             .ok_or_else(|| Error::TableNotFound(name.clone()))?;
         let new_root = self.store.insert(Some(root), key, value)?;
         snapshot.set_table(name, new_root);
-        self.write_working(snapshot)?;
+        self.write_working(working.commit, snapshot)?;
         Ok(new_root)
     }
 
@@ -285,13 +288,14 @@ impl<'repo> Database<'repo> {
         value_oid: ObjectId,
     ) -> Result<ObjectId, Error> {
         let name = TableName::new(table)?;
-        let mut snapshot = self.working_state()?.snapshot;
+        let working = self.working_state()?;
+        let mut snapshot = working.snapshot.clone();
         let root = snapshot
             .table(name.as_str())
             .ok_or_else(|| Error::TableNotFound(name.clone()))?;
         let new_root = self.store.insert_value_object(Some(root), key, value_oid)?;
         snapshot.set_table(name, new_root);
-        self.write_working(snapshot)?;
+        self.write_working(working.commit, snapshot)?;
         Ok(new_root)
     }
 
@@ -302,13 +306,14 @@ impl<'repo> Database<'repo> {
     /// Returns [`Error::TableNotFound`] or [`Error::KeyNotFound`].
     pub fn remove(&self, table: &str, key: &[u8]) -> Result<ObjectId, Error> {
         let name = TableName::new(table)?;
-        let mut snapshot = self.working_state()?.snapshot;
+        let working = self.working_state()?;
+        let mut snapshot = working.snapshot.clone();
         let root = snapshot
             .table(name.as_str())
             .ok_or_else(|| Error::TableNotFound(name.clone()))?;
         let new_root = self.store.remove(root, key)?;
         snapshot.set_table(name, new_root);
-        self.write_working(snapshot)?;
+        self.write_working(working.commit, snapshot)?;
         Ok(new_root)
     }
 
@@ -351,18 +356,19 @@ impl<'repo> Database<'repo> {
     pub fn stage(&self, table: &str) -> Result<ObjectId, Error> {
         let name = TableName::new(table)?;
         let working = self.working_state()?;
-        let mut snapshot = self.index_state()?.snapshot;
+        let index = self.index_state()?;
+        let mut snapshot = index.snapshot.clone();
         match working.snapshot.table(name.as_str()) {
             Some(root) => {
                 snapshot.set_table(name, root);
-                self.write_index(snapshot)?;
+                self.write_index(index.commit, snapshot)?;
                 Ok(root)
             }
             None => {
                 let root = snapshot
                     .remove_table(name.as_str())
                     .ok_or_else(|| Error::TableNotFound(name.clone()))?;
-                self.write_index(snapshot)?;
+                self.write_index(index.commit, snapshot)?;
                 Ok(root)
             }
         }
@@ -381,7 +387,8 @@ impl<'repo> Database<'repo> {
     pub fn restore_table(&self, table: &str) -> Result<ObjectId, Error> {
         let name = TableName::new(table)?;
         let index = self.index_state()?;
-        let mut snapshot = self.working_state()?.snapshot;
+        let working = self.working_state()?;
+        let mut snapshot = working.snapshot.clone();
         let root = match index.snapshot.table(name.as_str()) {
             Some(root) => {
                 snapshot.set_table(name.clone(), root);
@@ -391,7 +398,7 @@ impl<'repo> Database<'repo> {
                 .remove_table(name.as_str())
                 .ok_or_else(|| Error::TableNotFound(name.clone()))?,
         };
-        self.write_working(snapshot)?;
+        self.write_working(working.commit, snapshot)?;
         Ok(root)
     }
 
@@ -407,7 +414,8 @@ impl<'repo> Database<'repo> {
     pub fn unstage(&self, table: &str) -> Result<ObjectId, Error> {
         let name = TableName::new(table)?;
         let tip = self.head_snapshot()?;
-        let mut snapshot = self.index_state()?.snapshot;
+        let index = self.index_state()?;
+        let mut snapshot = index.snapshot.clone();
         let root = match tip.table(name.as_str()) {
             Some(root) => {
                 snapshot.set_table(name.clone(), root);
@@ -417,7 +425,7 @@ impl<'repo> Database<'repo> {
                 .remove_table(name.as_str())
                 .ok_or_else(|| Error::TableNotFound(name.clone()))?,
         };
-        self.write_index(snapshot)?;
+        self.write_index(index.commit, snapshot)?;
         Ok(root)
     }
 
@@ -459,7 +467,8 @@ impl<'repo> Database<'repo> {
     pub fn move_table(&self, from: &str, to: &str) -> Result<ObjectId, Error> {
         let from_name = TableName::new(from)?;
         let to_name = TableName::new(to)?;
-        let mut snapshot = self.working_state()?.snapshot;
+        let working = self.working_state()?;
+        let mut snapshot = working.snapshot.clone();
         let root = snapshot
             .remove_table(from_name.as_str())
             .ok_or_else(|| Error::TableNotFound(from_name.clone()))?;
@@ -467,7 +476,7 @@ impl<'repo> Database<'repo> {
             return Err(Error::TableExists(to_name.clone()));
         }
         snapshot.set_table(to_name, root);
-        self.write_working(snapshot)?;
+        self.write_working(working.commit, snapshot)?;
         Ok(root)
     }
 
@@ -930,17 +939,32 @@ impl<'repo> Database<'repo> {
         Ok(commit)
     }
 
-    fn write_working(&self, snapshot: Snapshot) -> Result<ObjectId, WriteStateError> {
-        self.write_state(workspace::WORKING_REF, snapshot, CasConflict::Working)
+    fn write_working(
+        &self,
+        base: Option<ObjectId>,
+        snapshot: Snapshot,
+    ) -> Result<ObjectId, WriteStateError> {
+        self.write_state(workspace::WORKING_REF, base, snapshot, CasConflict::Working)
     }
 
-    fn write_index(&self, snapshot: Snapshot) -> Result<ObjectId, WriteStateError> {
-        self.write_state(workspace::INDEX_REF, snapshot, CasConflict::Index)
+    fn write_index(
+        &self,
+        base: Option<ObjectId>,
+        snapshot: Snapshot,
+    ) -> Result<ObjectId, WriteStateError> {
+        self.write_state(workspace::INDEX_REF, base, snapshot, CasConflict::Index)
     }
 
+    /// Publish `snapshot` over the ref `name`, compare-and-swapped against
+    /// `base` — the ref value the snapshot was *built from*, not a value
+    /// re-read here. Re-reading at write time would treat a rival's
+    /// intervening write as the expected base and silently clobber it while
+    /// reporting success; CAS-ing against the build-time base turns that
+    /// into a detected conflict instead.
     fn write_state(
         &self,
         name: &str,
+        base: Option<ObjectId>,
         snapshot: Snapshot,
         conflict: CasConflict,
     ) -> Result<ObjectId, WriteStateError> {
@@ -957,8 +981,7 @@ impl<'repo> Database<'repo> {
             &parent.into_iter().collect::<Vec<_>>(),
         )?;
         let name = RefName::new(name).map_err(|error| WriteStateError::git(error.to_string()))?;
-        let current = read_ref(&self.refs, &name)?;
-        apply_cas(&self.refs, cas_edit(&name, current, commit), conflict)?;
+        apply_cas(&self.refs, cas_edit(&name, base, commit), conflict)?;
         Ok(commit)
     }
 
