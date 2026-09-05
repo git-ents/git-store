@@ -876,11 +876,8 @@ impl<'repo> Database<'repo> {
             .ok_or(MergeError::State(ReadStateError::NoDatabase))?;
         let target = branch_ref(branch)
             .map_err(|error| MergeError::State(ReadStateError::git(error.to_string())))?;
-        let theirs = read_ref(&self.refs, &target)?.ok_or_else(|| {
-            MergeError::State(ReadStateError::git(format!(
-                "branch `{branch}` does not exist"
-            )))
-        })?;
+        let theirs =
+            read_ref(&self.refs, &target)?.ok_or(MergeError::BranchNotFound(branch.to_owned()))?;
         let base = self
             .repo
             .merge_base(ours, theirs)

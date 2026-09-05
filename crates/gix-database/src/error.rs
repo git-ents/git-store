@@ -221,8 +221,8 @@ pub enum Error {
     /// A checkout was requested and refused; nothing was written.
     #[error(transparent)]
     Checkout(#[from] CheckoutError),
-    /// A branch name failed validation.
-    #[error("invalid branch name: {0}")]
+    /// A branch or tag name failed validation.
+    #[error("invalid branch or tag name: {0}")]
     BranchName(#[from] gix_refstore::InvalidRefName),
     /// A table name is not representable in the snapshot format.
     #[error(transparent)]
@@ -236,6 +236,13 @@ pub enum Error {
     /// A deletion targeted the branch that is currently checked out.
     #[error("cannot delete branch `{0}`: it is the current branch")]
     CurrentBranch(String),
+    /// A deletion targeted a branch whose commits no other ref reaches.
+    #[error("branch `{0}` has unmerged commits; delete with force to discard them")]
+    BranchNotMerged(String),
+    /// The database is initialized but holds no commits, so the operation
+    /// has nothing to act on.
+    #[error("the database has no commits yet")]
+    EmptyDatabase,
     /// The named tag does not exist.
     #[error("tag `{0}` does not exist")]
     TagNotFound(String),
@@ -260,6 +267,9 @@ pub enum MergeError {
         /// Every conflicting table entry, in table then key order.
         conflicts: Vec<ConflictEntry>,
     },
+    /// The branch named in the merge does not exist.
+    #[error("branch `{0}` does not exist")]
+    BranchNotFound(String),
     /// Reading a side's snapshot failed.
     #[error(transparent)]
     State(#[from] ReadStateError),

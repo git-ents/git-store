@@ -33,10 +33,10 @@ pub enum Error {
     #[error("facet tree deserialization failed: {0}")]
     Deserialize(#[source] facet_git_tree::DeserializeError),
     /// A batch build supplied the same logical key twice.
-    #[error("duplicate key {0:?}")]
+    #[error("duplicate key {}", String::from_utf8_lossy(.0))]
     DuplicateKey(Vec<u8>),
     /// A removal targeted a key the tree does not contain.
-    #[error("key {0:?} not found")]
+    #[error("key {} not found", String::from_utf8_lossy(.0))]
     KeyNotFound(Vec<u8>),
     /// A structure descended through more levels than the format allows.
     ///

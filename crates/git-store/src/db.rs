@@ -49,15 +49,38 @@ pub(crate) fn db_exit_class(error: &gix_database::Error) -> ExitClass {
         E::TableNotFound(_) | E::BranchNotFound(_) | E::TagNotFound(_) | E::KeyNotFound(_) => {
             ExitClass::NotFound
         }
-        E::Merge(gix_database::MergeError::Conflicts { .. }) => ExitClass::Cas,
+        // A lost compare-and-swap race is always retryable, whatever wrote.
+        E::Write(gix_database::WriteStateError::Conflict(_))
+        | E::Merge(gix_database::MergeError::Write(gix_database::WriteStateError::Conflict(_)))
+        | E::Merge(gix_database::MergeError::Conflicts { .. }) => ExitClass::Cas,
+        E::Merge(gix_database::MergeError::BranchNotFound(_)) => ExitClass::NotFound,
         E::Prolly(git_prolly::Error::KeyNotFound(_)) => ExitClass::NotFound,
+        // Malformed keys are caller mistakes, not storage failures.
+        E::Prolly(git_prolly::Error::Key(_)) | E::Prolly(git_prolly::Error::DuplicateKey(_)) => {
+            ExitClass::Invalid
+        }
         E::TableExists(_)
         | E::BranchExists(_)
+        | E::BranchNotMerged(_)
         | E::TagExists(_)
         | E::CurrentBranch(_)
         | E::InvalidTable(_)
         | E::Checkout(_)
-        | E::BranchName(_) => ExitClass::Invalid,
+        | E::BranchName(_)
+        | E::EmptyDatabase
+        | E::Commit(gix_database::CommitError::Detached) => ExitClass::Invalid,
+        E::Snapshot(gix_database::SnapshotError::ConfigMismatch { .. })
+        | E::State(gix_database::ReadStateError::Snapshot(
+            gix_database::SnapshotError::ConfigMismatch { .. },
+        )) => ExitClass::Schema,
+        E::Snapshot(
+            gix_database::SnapshotError::MetadataMissing { .. }
+            | gix_database::SnapshotError::UnknownFormat(_),
+        )
+        | E::State(gix_database::ReadStateError::Snapshot(
+            gix_database::SnapshotError::MetadataMissing { .. }
+            | gix_database::SnapshotError::UnknownFormat(_),
+        )) => ExitClass::Invalid,
         _ => ExitClass::Other,
     }
 }
