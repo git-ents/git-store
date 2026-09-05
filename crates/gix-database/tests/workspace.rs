@@ -160,7 +160,7 @@ fn commit_advances_the_branch_and_resets_workspace_state() {
     assert_eq!(head.commit(), Some(commit));
     let status = database.status().expect("status");
     assert!(status.is_clean(), "commit resets working and index");
-    let log = database.log().expect("log");
+    let log = database.log(None).expect("log");
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].commit, commit);
     assert_eq!(log[0].message, "seed users");
@@ -170,7 +170,7 @@ fn commit_advances_the_branch_and_resets_workspace_state() {
     database.put("users", b"bob", &"two".into()).expect("put");
     database.stage("users").expect("stage");
     let second = database.commit("add bob").expect("commit");
-    let log = database.log().expect("log");
+    let log = database.log(None).expect("log");
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].parents, vec![commit]);
     assert_eq!(second, log[0].commit);
@@ -334,7 +334,7 @@ fn unborn_head_holds_the_empty_database() {
     database.init().expect("init");
     let snapshot = database.head_snapshot().expect("head snapshot");
     assert!(snapshot.is_empty());
-    assert!(database.log().expect("log").is_empty());
+    assert!(database.log(None).expect("log").is_empty());
     let status = database.status().expect("status");
     assert!(status.is_clean());
 }

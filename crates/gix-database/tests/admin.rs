@@ -32,14 +32,16 @@ fn delete_branch_refuses_the_current_branch() {
     database.commit("seed").expect("commit");
     database.create_branch("feature").expect("create feature");
 
-    let tip = database.delete_branch("feature").expect("delete feature");
+    let tip = database
+        .delete_branch("feature", true)
+        .expect("delete feature");
     let branches = database.list_branches().expect("list");
     assert_eq!(branches, vec![("main".to_owned(), tip)]);
-    match database.delete_branch("main") {
+    match database.delete_branch("main", false) {
         Err(Error::CurrentBranch(branch)) => assert_eq!(branch, "main"),
         other => panic!("expected CurrentBranch, got {other:?}"),
     }
-    match database.delete_branch("ghost") {
+    match database.delete_branch("ghost", false) {
         Err(Error::BranchNotFound(branch)) => assert_eq!(branch, "ghost"),
         other => panic!("expected BranchNotFound, got {other:?}"),
     }
@@ -328,4 +330,181 @@ fn a_racing_stage_never_reports_success_while_losing_its_write() {
         2,
         "every stage either publishes or reports a conflict, got {results:?}"
     );
+}
+
+#[test]
+fn delete_branch_refuses_unmerged_tips_without_force() {
+    let (_dir, repo) = repo();
+    let database = db(&repo);
+    database.init().expect("init");
+    database.create_table("users").expect("create");
+    database.put("users", b"alice", &"one".into()).expect("put");
+    database.stage("users").expect("stage");
+    database.commit("base").expect("commit");
+    database.create_branch("feature").expect("create feature");
+    database.checkout("feature", false).expect("checkout");
+    database.put("users", b"bob", &"two".into()).expect("put");
+    database.stage("users").expect("stage");
+    database.commit("feature work").expect("commit");
+    database.checkout("main", false).expect("checkout main");
+
+    // The feature tip is not reachable from main: -d refuses, -D deletes.
+    match database.delete_branch("feature", false) {
+        Err(Error::BranchNotMerged(branch)) => assert_eq!(branch, "feature"),
+        other => panic!("expected BranchNotMerged, got {other:?}"),
+    }
+    database
+        .delete_branch("feature", true)
+        .expect("forced delete");
+}
+
+#[test]
+fn deleting_a_branch_head_names_restores_the_ref() {
+    // The delete-then-recheck design: when `HEAD` names the branch at the
+    // post-delete re-check — the state a rival checkout between a pre-check
+    // and the delete would leave — the ref is re-created at its old tip and
+    // the deletion is refused, never leaving `refs/db/HEAD` dangling.
+    let (_dir, repo) = repo();
+    let database = db(&repo);
+    database.init().expect("init");
+    database.commit("base").expect("commit");
+    database.create_branch("raced").expect("create raced");
+    let tip = {
+        let raced = gix_refstore::RefName::new("refs/db/heads/raced").expect("valid");
+        gix_refstore::GixRefStore::new(&repo)
+            .read(&raced)
+            .expect("read raced")
+            .expect("raced exists")
+    };
+    // Point `HEAD` at the branch behind `checkout`'s back: this is exactly
+    // the state a rival checkout racing the delete produces.
+    let edit = gix::refs::transaction::RefEdit {
+        change: gix::refs::transaction::Change::Update {
+            log: gix::refs::transaction::LogChange {
+                mode: gix::refs::transaction::RefLog::AndReference,
+                force_create_reflog: false,
+                message: "test: race the delete".into(),
+            },
+            expected: gix::refs::transaction::PreviousValue::Any,
+            new: gix::refs::Target::Symbolic(
+                gix::refs::FullName::try_from("refs/db/heads/raced").expect("valid"),
+            ),
+        },
+        name: gix::refs::FullName::try_from(gix_database::HEAD_REF).expect("valid"),
+        deref: false,
+    };
+    repo.edit_reference(edit).expect("retarget head");
+
+    match database.delete_branch("raced", true) {
+        Err(Error::CurrentBranch(branch)) => assert_eq!(branch, "raced"),
+        other => panic!("expected CurrentBranch, got {other:?}"),
+    }
+    // The ref is back at its old tip; HEAD resolves cleanly.
+    let raced = gix_refstore::RefName::new("refs/db/heads/raced").expect("valid");
+    assert_eq!(
+        gix_refstore::GixRefStore::new(&repo)
+            .read(&raced)
+            .expect("read raced"),
+        Some(tip),
+        "the deleted branch's ref was restored for the dangling HEAD"
+    );
+    assert_eq!(
+        database.head().expect("head").commit(),
+        Some(tip),
+        "HEAD resolves through the restored ref"
+    );
+}
+
+#[test]
+fn reset_hard_discards_pre_first_commit_state() {
+    let (_dir, repo) = repo();
+    let database = db(&repo);
+    database.init().expect("init");
+    database.create_table("drafts").expect("create");
+    database.put("drafts", b"k", &"v".into()).expect("put");
+    database.stage("drafts").expect("stage");
+    database.reset_hard().expect("reset on unborn head");
+    let status = database.status().expect("status");
+    assert!(status.is_clean(), "unborn reset_hard cleans: {status:?}");
+    assert!(
+        database.get("drafts", b"k").is_err(),
+        "the table is gone from working"
+    );
+}
+
+#[test]
+fn move_table_follows_the_staged_rename() {
+    let (_dir, repo) = repo();
+    let database = db(&repo);
+    database.init().expect("init");
+    database.create_table("users").expect("create");
+    database.put("users", b"alice", &"one".into()).expect("put");
+    database.stage("users").expect("stage");
+    database.commit("seed").expect("commit");
+    // Staged add of a table under the target name whose working copy is
+    // then dropped — the exact tangle the review flagged.
+    database.create_table("people").expect("create people");
+    database.stage("people").expect("stage people");
+    database.drop_table("people").expect("drop working people");
+
+    database.move_table("users", "people").expect("mv");
+    // The index followed the rename (the way `git mv` updates the index),
+    // so the staged view is exactly "users deleted, people added" — the
+    // stale staged add under `people` was overwritten — and nothing is
+    // left unstaged.
+    let status = database.status().expect("status");
+    assert!(status.unstaged.is_empty(), "nothing unstaged: {status:?}");
+    let staged: Vec<(&str, &str)> = status
+        .staged
+        .iter()
+        .map(|t| (t.table.as_str(), change_kind(t.kind)))
+        .collect();
+    assert_eq!(
+        staged,
+        vec![("people", "new table"), ("users", "deleted table")],
+        "the staged rename is coherent: {status:?}"
+    );
+}
+
+#[test]
+fn tags_refuse_commits_no_branch_reaches() {
+    let (_dir, repo) = repo();
+    let database = db(&repo);
+    database.init().expect("init");
+    database.create_table("users").expect("create");
+    database.put("users", b"alice", &"one".into()).expect("put");
+    // The pre-commit working state commit is parented on nothing and no
+    // branch will ever reach it once the real commit lands.
+    let state = database
+        .working_state()
+        .expect("working")
+        .commit
+        .expect("state commit");
+    database.stage("users").expect("stage");
+    database.commit("seed").expect("commit");
+    match database.create_tag("orphan", Some(state)) {
+        Err(Error::CommitUnreachable(oid)) => assert_eq!(oid, state),
+        other => panic!("expected CommitUnreachable, got {other:?}"),
+    }
+    database.create_tag("tip", None).expect("tag the tip");
+}
+
+#[test]
+fn a_branch_needs_a_commit_to_exist() {
+    let (_dir, repo) = repo();
+    let database = db(&repo);
+    database.init().expect("init");
+    match database.create_branch("main") {
+        Err(Error::EmptyDatabase) => {}
+        other => panic!("expected EmptyDatabase, got {other:?}"),
+    }
+}
+
+/// The Dolt-style verb for a table-level change kind.
+fn change_kind(kind: gix_database::ChangeKind) -> &'static str {
+    match kind {
+        gix_database::ChangeKind::Added => "new table",
+        gix_database::ChangeKind::Removed => "deleted table",
+        gix_database::ChangeKind::Modified => "modified",
+    }
 }

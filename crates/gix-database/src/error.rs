@@ -243,6 +243,21 @@ pub enum Error {
     /// has nothing to act on.
     #[error("the database has no commits yet")]
     EmptyDatabase,
+    /// The commit to operate on is not reachable from any branch, so no
+    /// history claims it.
+    #[error("commit {0} is not reachable from any branch")]
+    CommitUnreachable(ObjectId),
+    /// A rename was interrupted by a rival writer mid-way and rollback
+    /// could not restore the previous state; both branch refs now exist.
+    #[error(
+        "renaming `{from}` to `{to}` raced a concurrent writer and could not roll back: both branch refs exist; inspect `refs/db/heads`"
+    )]
+    RenameIncomplete {
+        /// The old branch name.
+        from: String,
+        /// The new branch name, which now exists alongside the old one.
+        to: String,
+    },
     /// The named tag does not exist.
     #[error("tag `{0}` does not exist")]
     TagNotFound(String),

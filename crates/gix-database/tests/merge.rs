@@ -42,7 +42,7 @@ fn disjoint_row_changes_merge_automatically() {
     database.commit("remove bob on main").expect("commit");
 
     let merge_commit = database.merge("feature").expect("merge");
-    let log = database.log().expect("log");
+    let log = database.log(None).expect("log");
     assert_eq!(log[0].commit, merge_commit);
     assert_eq!(
         log[0].parents.len(),
@@ -99,7 +99,7 @@ fn same_key_different_values_refuse_with_conflicts() {
 
     // Nothing was written: the branch still points at our tip.
     assert_eq!(database.head().expect("head").commit(), Some(ours_tip));
-    assert_eq!(database.log().expect("log").len(), 2);
+    assert_eq!(database.log(None).expect("log").len(), 2);
 }
 
 #[test]

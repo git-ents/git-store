@@ -314,7 +314,7 @@ pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputForm
             delete,
             delete_force,
             rename,
-        } => branch(&db, name, delete || delete_force, rename, output),
+        } => branch(&db, name, delete, delete_force, rename, output),
         DbCommand::Checkout {
             target,
             new_branch,
@@ -666,7 +666,7 @@ fn schema(db: &Database, command: DbSchemaCommand, output: OutputFormat) -> Resu
 
 /// `log [-n N]`: the branch's commits, newest first.
 fn log(db: &Database, number: Option<usize>, output: OutputFormat) -> Result<()> {
-    let mut entries = db.log().map_err(db_error)?;
+    let mut entries = db.log(number).map_err(db_error)?;
     if let Some(number) = number {
         entries.truncate(number);
     }
@@ -772,17 +772,18 @@ fn branch(
     db: &Database,
     name: Option<String>,
     delete: bool,
+    delete_force: bool,
     rename: Vec<String>,
     output: OutputFormat,
 ) -> Result<()> {
-    if delete {
+    if delete || delete_force {
         let Some(name) = name else {
             return Err(cli_error(
                 ExitClass::Invalid,
                 "branch deletion needs a name",
             ));
         };
-        let tip = db.delete_branch(&name).map_err(db_error)?;
+        let tip = db.delete_branch(&name, delete_force).map_err(db_error)?;
         let mut fields = VObject::new();
         fields.insert("branch", name.clone());
         fields.insert("commit", oid_value(tip));

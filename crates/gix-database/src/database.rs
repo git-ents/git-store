@@ -485,10 +485,18 @@ impl<'repo> Database<'repo> {
     /// Returns [`Error::State::NoDatabase`] when there is no branch tip, and
     /// write errors on a lost race.
     pub fn reset_hard(&self) -> Result<ObjectId, Error> {
-        let commit = self
-            .head()?
-            .commit()
-            .ok_or(Error::State(ReadStateError::NoDatabase))?;
+        let head = self.head()?;
+        let Some(commit) = head.commit() else {
+            // Unborn: the tip is the empty snapshot, so discarding the
+            // working and index refs moves them to an empty state commit.
+            let empty = Snapshot::empty(*self.store.config());
+            let working = RefName::new(workspace::WORKING_REF).expect("built-in ref name is valid");
+            let index = RefName::new(workspace::INDEX_REF).expect("built-in ref name is valid");
+            let working_commit =
+                self.write_working(read_ref(&self.refs, &working)?, empty.clone())?;
+            self.write_index(read_ref(&self.refs, &index)?, empty)?;
+            return Ok(working_commit);
+        };
         let working = RefName::new(workspace::WORKING_REF).expect("built-in ref name is valid");
         let index = RefName::new(workspace::INDEX_REF).expect("built-in ref name is valid");
         let edits = vec![
@@ -523,8 +531,21 @@ impl<'repo> Database<'repo> {
         if snapshot.table(to_name.as_str()).is_some() {
             return Err(Error::TableExists(to_name.clone()));
         }
-        snapshot.set_table(to_name, root);
+        snapshot.set_table(to_name.clone(), root);
         self.write_working(working.commit, snapshot)?;
+        // Mirror the rename into the index the way `git mv` updates the
+        // index: a staged rename follows, and a stale staged entry under
+        // the target name is overwritten.
+        let index = self.index_state()?;
+        let mut staged = index.snapshot.clone();
+        let staged_from = staged.remove_table(from_name.as_str());
+        let touched = staged_from.is_some() || staged.remove_table(to_name.as_str()).is_some();
+        if let Some(staged_root) = staged_from {
+            staged.set_table(to_name, staged_root);
+        }
+        if touched {
+            self.write_index(index.commit, staged)?;
+        }
         Ok(root)
     }
 
@@ -656,13 +677,16 @@ impl<'repo> Database<'repo> {
     /// # Errors
     ///
     /// Returns [`Error`] when a commit cannot be read.
-    pub fn log(&self) -> Result<Vec<LogEntry>, Error> {
+    pub fn log(&self, limit: Option<usize>) -> Result<Vec<LogEntry>, Error> {
         let head = self.head()?;
         let Some(mut cursor) = head.commit() else {
             return Ok(Vec::new());
         };
         let mut entries = Vec::new();
         loop {
+            if entries.len() == limit.unwrap_or(usize::MAX) {
+                break;
+            }
             let mut buf = Vec::new();
             let data = self
                 .repo
@@ -696,10 +720,7 @@ impl<'repo> Database<'repo> {
         if read_ref(&self.refs, &name)?.is_some() {
             return Err(Error::BranchExists(branch.to_owned()));
         }
-        let commit = self
-            .head()?
-            .commit()
-            .ok_or_else(|| Error::BranchNotFound("no commit to branch from".to_owned()))?;
+        let commit = self.head()?.commit().ok_or(Error::EmptyDatabase)?;
         apply_cas(
             &self.refs,
             cas_edit(&name, None, commit),
@@ -710,23 +731,74 @@ impl<'repo> Database<'repo> {
 
     /// Delete a branch that is not the current one, returning its tip.
     ///
+    /// Unless `force`, the deletion is refused while no other ref reaches
+    /// the branch's tip — the same guard `git branch -d` applies.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::BranchNotFound`] when the branch does not exist and
-    /// [`Error::CurrentBranch`] when it is the branch `HEAD` names.
-    pub fn delete_branch(&self, branch: &str) -> Result<ObjectId, Error> {
+    /// Returns [`Error::BranchNotFound`] when the branch does not exist,
+    /// [`Error::CurrentBranch`] when it is the branch `HEAD` names, and
+    /// [`Error::BranchNotMerged`] when its commits would be orphaned.
+    pub fn delete_branch(&self, branch: &str, force: bool) -> Result<ObjectId, Error> {
         let name = branch_ref(branch)?;
         let tip =
             read_ref(&self.refs, &name)?.ok_or_else(|| Error::BranchNotFound(branch.to_owned()))?;
-        let current = self
-            .head()?
-            .branch()
-            .is_some_and(|head| head.as_str() == name.as_str());
-        if current {
-            return Err(Error::CurrentBranch(branch.to_owned()));
+        if !force && !self.reachable_from_other_refs(tip, &name)? {
+            return Err(Error::BranchNotMerged(branch.to_owned()));
         }
         self.apply_delete(&name, tip, CasConflict::Branch(branch.to_owned()))?;
+        // `HEAD` is re-checked *after* the delete, not before: a rival
+        // checkout of this branch may land between any pre-check and the
+        // delete, which would leave `refs/db/HEAD` dangling and the next
+        // commit silently re-birthing the branch. When `HEAD` names the
+        // branch we just removed, re-create the ref at its old tip so the
+        // checkout keeps working, and refuse the deletion.
+        if self
+            .head()?
+            .branch()
+            .is_some_and(|head| head.as_str() == name.as_str())
+        {
+            apply_cas(
+                &self.refs,
+                cas_edit(&name, None, tip),
+                CasConflict::Branch(branch.to_owned()),
+            )?;
+            return Err(Error::CurrentBranch(branch.to_owned()));
+        }
         Ok(tip)
+    }
+
+    /// Whether `tip` is reachable from some branch tip, tag, or `HEAD`
+    /// other than the ref `except`.
+    fn reachable_from_other_refs(&self, tip: ObjectId, except: &RefName) -> Result<bool, Error> {
+        let tips = self
+            .list_branches()?
+            .into_iter()
+            .chain(self.list_tags()?)
+            .filter(|(name, _)| {
+                let prefix = if except.as_str().starts_with(crate::workspace::TAGS_PREFIX) {
+                    crate::workspace::TAGS_PREFIX
+                } else {
+                    crate::workspace::HEADS_PREFIX
+                };
+                RefName::new(format!("{prefix}/{name}"))
+                    .is_ok_and(|full| full.as_str() != except.as_str())
+            })
+            .map(|(_, commit)| commit)
+            .chain(self.head()?.commit());
+        for other in tips {
+            if other == tip {
+                return Ok(true);
+            }
+            if self
+                .repo
+                .merge_base(tip, other)
+                .is_ok_and(|base| base.detach() == tip)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Rename a branch, keeping its tip, and retarget `HEAD` when it named
@@ -734,11 +806,16 @@ impl<'repo> Database<'repo> {
     ///
     /// The new ref is created first and the old one deleted last, so an
     /// interrupted rename leaves an extra branch — never a missing one.
+    /// The `HEAD` retarget is itself a compare-and-swap against the old
+    /// branch name, and every failure past the first step rolls back as far
+    /// as the ref store allows.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::BranchNotFound`] when `from` does not exist and
-    /// [`Error::BranchExists`] when `to` does.
+    /// Returns [`Error::BranchNotFound`] when `from` does not exist,
+    /// [`Error::BranchExists`] when `to` does, and
+    /// [`Error::RenameIncomplete`] when a rival raced the rename badly
+    /// enough that rollback could not restore the previous state.
     pub fn rename_branch(&self, from: &str, to: &str) -> Result<ObjectId, Error> {
         let from_ref = branch_ref(from)?;
         let to_ref = branch_ref(to)?;
@@ -752,14 +829,35 @@ impl<'repo> Database<'repo> {
             cas_edit(&to_ref, None, tip),
             CasConflict::Branch(to.to_owned()),
         )?;
-        if self
+        let head_names_from = self
             .head()?
             .branch()
-            .is_some_and(|head| head.as_str() == from_ref.as_str())
-        {
-            self.set_head_symbolic(&to_ref)?;
+            .is_some_and(|head| head.as_str() == from_ref.as_str());
+        if head_names_from && let Err(error) = self.set_head_symbolic(&to_ref, Some(&from_ref)) {
+            // A rival checkout moved `HEAD` mid-rename. Undo the new ref and
+            // leave `HEAD` — now the rival's — alone.
+            self.apply_delete(&to_ref, tip, CasConflict::Branch(to.to_owned()))?;
+            return Err(error);
         }
-        self.apply_delete(&from_ref, tip, CasConflict::Branch(from.to_owned()))?;
+        if let Err(error) = self.apply_delete(&from_ref, tip, CasConflict::Branch(from.to_owned()))
+        {
+            // A rival advanced the old branch after `HEAD` moved. Roll both
+            // published steps back; when even that fails, say so honestly
+            // instead of claiming nothing was written.
+            let deleted = self
+                .apply_delete(&to_ref, tip, CasConflict::Branch(to.to_owned()))
+                .is_ok();
+            let restored = deleted
+                && head_names_from
+                && self.set_head_symbolic(&from_ref, Some(&to_ref)).is_ok();
+            if !(deleted && restored) {
+                return Err(Error::RenameIncomplete {
+                    from: from.to_owned(),
+                    to: to.to_owned(),
+                });
+            }
+            return Err(error);
+        }
         Ok(tip)
     }
 
@@ -785,11 +883,13 @@ impl<'repo> Database<'repo> {
             return Err(Error::TagExists(tag.to_owned()));
         }
         let commit = match commit {
-            Some(commit) => commit,
-            None => self
-                .head()?
-                .commit()
-                .ok_or(Error::State(ReadStateError::NoDatabase))?,
+            Some(commit) => {
+                if !self.reachable_from_other_refs(commit, &name)? {
+                    return Err(Error::CommitUnreachable(commit));
+                }
+                commit
+            }
+            None => self.head()?.commit().ok_or(Error::EmptyDatabase)?,
         };
         apply_cas(
             &self.refs,
@@ -912,10 +1012,19 @@ impl<'repo> Database<'repo> {
                 Error::Write(WriteStateError::ref_backend(error))
             }
         })?;
-        self.set_head_symbolic(&target)?;
+        let from = head.branch().cloned();
+        self.set_head_symbolic(&target, from.as_ref())
+            .map_err(|_| {
+                // `HEAD` moved under us (a rival checkout); the working and
+                // index moves above published, so a retry settles the state.
+                let branch = from
+                    .as_ref()
+                    .map(|name| strip_heads(name.as_str()).to_owned())
+                    .unwrap_or_else(|| "HEAD".to_owned());
+                Error::Write(WriteStateError::Conflict(CasConflict::Branch(branch)))
+            })?;
         Ok(commit)
     }
-
     /// Merge `branch` into the current branch.
     ///
     /// Finds the merge base, merges row by row, and either publishes an
@@ -1033,7 +1142,7 @@ impl<'repo> Database<'repo> {
         Ok(commit)
     }
 
-    fn set_head_symbolic(&self, target: &RefName) -> Result<(), Error> {
+    fn set_head_symbolic(&self, target: &RefName, expected: Option<&RefName>) -> Result<(), Error> {
         let edit = gix::refs::transaction::RefEdit {
             change: gix::refs::transaction::Change::Update {
                 log: gix::refs::transaction::LogChange {
@@ -1041,7 +1150,15 @@ impl<'repo> Database<'repo> {
                     force_create_reflog: false,
                     message: format!("checkout {}", target.as_str()).into(),
                 },
-                expected: gix::refs::transaction::PreviousValue::Any,
+                expected: match expected {
+                    Some(expected) => gix::refs::transaction::PreviousValue::MustExistAndMatch(
+                        gix::refs::Target::Symbolic(
+                            gix::refs::FullName::try_from(expected.as_str().to_string())
+                                .expect("a valid RefName is a valid FullName"),
+                        ),
+                    ),
+                    None => gix::refs::transaction::PreviousValue::MustExist,
+                },
                 new: gix::refs::Target::Symbolic(
                     gix::refs::FullName::try_from(target.as_str().to_string())
                         .expect("a valid RefName is a valid FullName"),
@@ -1055,6 +1172,13 @@ impl<'repo> Database<'repo> {
             .map_err(Error::state_from_git)?;
         Ok(())
     }
+}
+
+/// The branch's short name, with the `refs/db/heads/` prefix stripped.
+fn strip_heads(name: &str) -> &str {
+    name.strip_prefix(crate::workspace::HEADS_PREFIX)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(name)
 }
 
 /// Which CAS conflict a ref name belongs to.
