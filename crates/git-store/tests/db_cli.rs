@@ -63,13 +63,13 @@ fn the_first_milestone_end_to_end() {
     let out = ok(dir.path(), &["db", "get", "users", "alice"]);
     assert!(out.contains("\"one\""), "get returns JSON: {out}");
 
-    // status shows unstaged work before add.
+    // status shows unstaged work before add, in Dolt's wording.
     let out = ok(dir.path(), &["db", "status"]);
-    assert!(out.contains("added users"), "status: {out}");
+    assert!(out.contains("new table: users"), "status: {out}");
 
     let out = ok(dir.path(), &["db", "diff"]);
-    assert!(out.contains("added alice"), "diff: {out}");
-    assert!(out.contains("added bob"), "diff: {out}");
+    assert!(out.contains("+ alice"), "diff: {out}");
+    assert!(out.contains("+ bob"), "diff: {out}");
 
     // Invalid JSON is a schema-class failure (exit 5).
     let (_, stderr, code) = run(dir.path(), &["db", "put", "users", "x", "{nope"]);
@@ -78,7 +78,7 @@ fn the_first_milestone_end_to_end() {
     // add stages; diff --staged sees the staged rows; working diff empties.
     ok(dir.path(), &["db", "add", "users"]);
     let out = ok(dir.path(), &["db", "diff", "--staged"]);
-    assert!(out.contains("added alice"), "staged diff: {out}");
+    assert!(out.contains("+ alice"), "staged diff: {out}");
     let out = ok(dir.path(), &["db", "diff"]);
     assert_eq!(out.trim(), "", "nothing unstaged after add");
 

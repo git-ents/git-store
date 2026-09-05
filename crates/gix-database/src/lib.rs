@@ -75,7 +75,7 @@ mod workspace;
 pub use database::{Database, LogEntry};
 pub use error::{
     CasConflict, CheckoutError, CommitError, ConflictEntry, ConflictKind, Error, MergeError,
-    ReadStateError, SnapshotError, TableNameError, WriteStateError,
+    ReadStateError, SnapshotError, TableNameError, WriteStateError, config_summary,
 };
 pub use format::{DEFAULT_BRANCH, METADATA_NAME, REF_PREFIX, SNAPSHOT_FORMAT_LINE, TableName};
 pub use merge::{Merged, merge_snapshots};

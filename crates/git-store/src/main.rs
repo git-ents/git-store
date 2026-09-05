@@ -58,7 +58,7 @@ Everyday
   rm        Delete an entity
   check     Validate a value against a schema
   schema    Define, read, or trace a kind's schema
-  db        Versioned key/value database over ordinary Git commits
+  db        Versioned key/value database (Dolt-shaped porcelain)
 
 Plumbing — composable, oid in, oid out
   value     encode | decode
@@ -317,7 +317,7 @@ enum Command {
         #[command(subcommand)]
         command: EntityCommand,
     },
-    /// Versioned key/value database over ordinary Git commits.
+    /// Versioned key/value database (Dolt-shaped porcelain).
     #[command(name = "db")]
     Db {
         #[command(subcommand)]
