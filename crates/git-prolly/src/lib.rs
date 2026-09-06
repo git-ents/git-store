@@ -15,12 +15,20 @@
 //! <mode> <hex-encoded-key> <value-object-id>
 //! ```
 //!
-//! The value object id is whatever root object [`facet-git-tree`] produced for
-//! the value — usually a tree, but a blob for scalar values. The entry mode is
-//! the kind of that object (`040000` for trees, `100644` for blobs), so every
-//! emitted tree is valid for ordinary Git tooling including `git fsck`. Values
-//! are opaque object ids at this layer; their internal object graph belongs to
-//! `facet-git-tree`.
+//! The value object id points at a single blob holding one canonical
+//! [`facet_json`] text rendering of the value, produced by
+//! `facet_json::to_string` and written with `write_value_text`. Because the
+//! stored bytes are JSON, the encoding is self-describing: numbers, booleans,
+//! and null round-trip without a schema, and any value can be inspected
+//! directly with `git cat-file`. `get`, `get_as`, and `iter` decode only these
+//! JSON-text blobs; trees surface [`Error::UnexpectedObjectKind`]. Callers
+//! that need a different encoding may still write an arbitrary blob or tree
+//! through `insert_value_object`, which stores it as-is for their own readers.
+//!
+//! The value codec is part of the frozen format: within a format version the
+//! JSON-text encoding does not change. Snapshots referencing v1 value
+//! encodings are rejected by `gix-database` with `SnapshotError::LegacyFormat`
+//! rather than misread.
 //!
 //! An **internal node** is also a Git tree. Its first entry is a reserved
 //! marker (name `!`, a blob whose content identifies the format and marks the

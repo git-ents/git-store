@@ -77,30 +77,33 @@ impl ProllyStore<'_> {
     pub fn get(&self, root: ObjectId, key: &[u8]) -> Result<Option<Value>, Error> {
         match self.get_oid(root, key)? {
             None => Ok(None),
-            Some(value_oid) => facet_git_tree::deserialize::<Value>(&value_oid, self.repo())
-                .map(Some)
-                .map_err(Error::Deserialize),
+            Some(value_oid) => self.read_value_text(value_oid).map(Some),
         }
     }
 
-    /// Look up the value stored under `key`, deserialized into a `Facet` type.
+    /// Look up the value stored under `key`, decoded into a `Facet` type.
     ///
-    /// Facet is the type system: no second serialization framework is
-    /// introduced, the value's Git object graph is decoded directly into `T`.
+    /// The value's JSON text leaf is decoded directly into `T` through
+    /// Facet reflection.
     ///
     /// # Errors
     ///
-    /// Returns [`Error`] on tree-walk or deserialization failures, including
-    /// when the stored value does not match `T`.
+    /// Returns [`Error`] on tree-walk or decoding failures, including when
+    /// the stored value does not match `T`.
     pub fn get_as<T>(&self, root: ObjectId, key: &[u8]) -> Result<Option<T>, Error>
     where
         T: for<'a> facet::Facet<'a>,
     {
         match self.get_oid(root, key)? {
             None => Ok(None),
-            Some(value_oid) => facet_git_tree::deserialize::<T>(&value_oid, self.repo())
-                .map(Some)
-                .map_err(Error::Deserialize),
+            Some(value_oid) => {
+                let value = self.read_value_text(value_oid)?;
+                let text = facet_json::to_string(&value)
+                    .map_err(|error| Error::ValueJson(error.to_string()))?;
+                facet_json::from_str(&text)
+                    .map(Some)
+                    .map_err(|error| Error::ValueJson(error.to_string()))
+            }
         }
     }
 
@@ -233,12 +236,12 @@ impl Iterator for ProllyIter<'_, '_> {
                     return Some(Err(Error::Key(error)));
                 }
             };
-            let value = facet_git_tree::deserialize::<Value>(&oid, self.store.repo());
+            let value = self.store.read_value_text(oid);
             return match value {
                 Ok(value) => Some(Ok((key, value))),
                 Err(error) => {
                     self.done = true;
-                    Some(Err(Error::Deserialize(error)))
+                    Some(Err(error))
                 }
             };
         }

@@ -223,6 +223,9 @@ fn parse_metadata(repo: &gix::Repository, blob: ObjectId) -> Result<ProllyConfig
     let format = lines
         .next()
         .ok_or_else(|| SnapshotError::UnknownFormat(data.clone()))?;
+    if format == b"git-store-database v1" {
+        return Err(SnapshotError::LegacyFormat);
+    }
     if format != SNAPSHOT_FORMAT_LINE {
         return Err(SnapshotError::UnknownFormat(format.to_vec()));
     }

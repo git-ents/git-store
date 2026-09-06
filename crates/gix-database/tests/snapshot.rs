@@ -118,7 +118,7 @@ fn snapshot_is_inspectable_with_git_plumbing() {
     let text = std::str::from_utf8(&blob.data).expect("utf-8 metadata");
     assert_eq!(
         text.lines().next(),
-        Some("git-store-database v1"),
+        Some("git-store-database v2"),
         "the format line is plain text, readable with git cat-file"
     );
 }

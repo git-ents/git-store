@@ -6,7 +6,12 @@ use std::fmt;
 use crate::error::{SnapshotError, TableNameError};
 
 /// The first metadata line: format identity and version in one string.
-pub const SNAPSHOT_FORMAT_LINE: &[u8] = b"git-store-database v1";
+/// The snapshot metadata format line.
+///
+/// `v2` stores every table value as one self-describing JSON text blob, so
+/// scalar types round trip; `v1` leaves encoded through the facet tree
+/// codec coerced numbers and booleans to strings and lost `null`.
+pub const SNAPSHOT_FORMAT_LINE: &[u8] = b"git-store-database v2";
 
 /// The tree-entry name reserved for a snapshot's metadata blob.
 ///

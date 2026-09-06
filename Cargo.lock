@@ -781,6 +781,7 @@ dependencies = [
  "criterion",
  "facet",
  "facet-git-tree",
+ "facet-json",
  "facet-value",
  "gix",
  "tempfile",

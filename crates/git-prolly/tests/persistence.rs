@@ -59,7 +59,8 @@ fn mutation_preserves_the_old_tree() {
 }
 
 /// Inserting at the end of the key range leaves every earlier chunk's
-/// ObjectId untouched: unchanged subtrees are never rewritten.
+/// ObjectId untouched: the only rewritten nodes are those on the path from
+/// the root to the appended key's leaf.
 #[test]
 fn appends_reuse_unchanged_subtrees() {
     let TestRepo { _dir, repo } = repo();
@@ -75,14 +76,38 @@ fn appends_reuse_unchanged_subtrees() {
     let mut after = Vec::new();
     node_ids(&repo, root2, &mut after);
 
-    // Every node of the old tree (except the last leaf, which absorbed the
-    // append, and its ancestors) still exists in the new tree.
-    let reused = before.iter().filter(|oid| after.contains(oid)).count();
+    // Walk root1 down the rightmost child at each level: that path is the
+    // set of nodes an append at the end of the key range rewrites.
+    let mut path = std::collections::HashSet::new();
+    let mut cursor = root1;
+    loop {
+        path.insert(cursor);
+        let tree = repo.find_tree(cursor).expect("tree exists");
+        let last_child = tree
+            .decode()
+            .expect("decode")
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.mode.kind() == gix::objs::tree::EntryKind::Tree)
+            .map(|entry| entry.oid.to_owned());
+        match last_child {
+            Some(child) => cursor = child,
+            None => break,
+        }
+    }
+
+    let rewritten: Vec<&ObjectId> = before
+        .iter()
+        .filter(|oid| !after.contains(*oid) && !path.contains(*oid))
+        .collect();
     assert!(
-        reused >= before.len() * 9 / 10,
-        "expected most of {reused}/{before_len} nodes to be reused",
-        reused = reused,
-        before_len = before.len()
+        rewritten.is_empty(),
+        "only the append's path may be rewritten: {rewritten:?}"
+    );
+    assert!(
+        after.iter().filter(|oid| !before.contains(oid)).count() <= path.len(),
+        "no more nodes appear than the path can account for"
     );
 }
 
@@ -126,9 +151,16 @@ fn identical_values_deduplicate() {
         .expect("present");
     assert_eq!(oid_a, oid_b, "identical values are the same object graph");
 
-    // Re-serializing the same facet value is content-addressed too.
-    let again = facet_git_tree::serialize_into(&value, &repo).expect("serialize again");
-    assert_eq!(again, oid_a);
+    // Re-inserting the same value under another key reuses the blob.
+    let root_c = store.insert(None, b"c", &value).expect("insert c");
+    assert_eq!(
+        store
+            .get_oid(root_c, b"c")
+            .expect("get_oid")
+            .expect("present"),
+        oid_a,
+        "identical values are the same object graph"
+    );
 }
 
 /// A key removed and re-added with the same value converges back to the

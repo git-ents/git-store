@@ -8,6 +8,7 @@
 //! abstraction would not simplify testing, since real repositories are cheap
 //! to create in tests.
 
+use facet_value::Value;
 use gix::ObjectId;
 use gix::objs::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 use gix::objs::{Kind, Tree, Write as _};
@@ -86,6 +87,43 @@ pub struct ProllyStore<'repo> {
 }
 
 impl<'repo> ProllyStore<'repo> {
+    /// Write `value` as its canonical JSON text blob and return its id.
+    ///
+    /// Values are stored as one self-describing JSON document per leaf:
+    /// every scalar keeps its type (numbers, booleans, and `null` round
+    /// trip), the blob is directly human-inspectable with `git cat-file`,
+    /// and the encoding needs no schema to read.
+    pub(crate) fn write_value_text(&self, value: &Value) -> Result<ObjectId, Error> {
+        let text =
+            facet_json::to_string(value).map_err(|error| Error::ValueJson(error.to_string()))?;
+        self.repo
+            .write_buf(Kind::Blob, text.as_bytes())
+            .map_err(Error::git)
+    }
+
+    /// Read the value blob `oid` back into a dynamic [`Value`].
+    pub(crate) fn read_value_text(&self, oid: ObjectId) -> Result<Value, Error> {
+        let kind = self
+            .repo
+            .try_object_kind(oid)?
+            .ok_or(Error::ObjectNotFound { oid })?;
+        if kind != Kind::Blob {
+            return Err(Error::UnexpectedObjectKind {
+                oid,
+                kind: match kind {
+                    Kind::Tree => "tree",
+                    Kind::Commit => "commit",
+                    Kind::Blob => unreachable!("checked above"),
+                    Kind::Tag => "tag",
+                },
+            });
+        }
+        let data = self.repo.read_blob(oid)?;
+        let text = std::str::from_utf8(&data)
+            .map_err(|error| Error::ValueJson(format!("{oid} is not UTF-8: {error}")))?;
+        facet_json::from_str(text).map_err(|error| Error::ValueJson(format!("{oid}: {error}")))
+    }
+
     /// Open a store over `repo` with the default [`ProllyConfig`].
     pub fn open(repo: &'repo gix::Repository) -> Self {
         Self::with_config(repo, ProllyConfig::default())
