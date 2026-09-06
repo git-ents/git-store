@@ -496,9 +496,20 @@ enum SchemaCommand {
 fn main() {
     if let Err(error) = run() {
         eprintln!("{error:#}");
+        if RUN_FORMAT.get().is_some_and(|format| format.machine()) {
+            // Machine consumers parse stdout; give failures the same
+            // envelope success paths use, classified like the exit code.
+            println!(
+                "{{\"status\":\"error\",\"code\":\"{}\"}}",
+                class_slug(exit_class_of(&error))
+            );
+        }
         std::process::exit(error_exit_code(&error));
     }
 }
+
+/// The output format of the in-flight invocation, for the error reporter.
+static RUN_FORMAT: std::sync::OnceLock<OutputFormat> = std::sync::OnceLock::new();
 
 fn run() -> Result<()> {
     // Install signal handlers before any lock is taken, so an interrupted
@@ -517,6 +528,22 @@ fn run() -> Result<()> {
 
     let cli = Cli::parse();
     let output = OutputFormat::from_cli(cli.format, cli.json);
+    let _ = RUN_FORMAT.set(output);
+    run_with(cli, output)
+}
+
+/// The stable machine-facing slug for an exit class.
+fn class_slug(class: ExitClass) -> &'static str {
+    match class {
+        ExitClass::Cas => "cas",
+        ExitClass::NotFound => "not_found",
+        ExitClass::Schema => "schema",
+        ExitClass::Invalid => "invalid",
+        ExitClass::Other => "error",
+    }
+}
+
+fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
     let layout = layout_from_cli(&cli.data_prefix, &cli.schema_prefix)?;
     let mut repo = match gix::discover(".") {
         Ok(repo) => repo,
@@ -642,7 +669,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn error_exit_code(error: &anyhow::Error) -> i32 {
+fn exit_class_of(error: &anyhow::Error) -> ExitClass {
     let mut class = ExitClass::Other;
     for cause in error.chain() {
         if let Some(context) = cause.downcast_ref::<ClassifiedContext>() {
@@ -687,7 +714,12 @@ fn error_exit_code(error: &anyhow::Error) -> i32 {
             class = class.prefer(ExitClass::Invalid);
         }
     }
-    class.code()
+    class
+}
+
+/// The exit code an error's classification maps to.
+fn error_exit_code(error: &anyhow::Error) -> i32 {
+    exit_class_of(error).code()
 }
 
 fn store_error_exit_class(error: &gix_store::Error) -> ExitClass {

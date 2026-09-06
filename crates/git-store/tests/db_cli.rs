@@ -120,7 +120,7 @@ fn json_output_is_stable() {
         dir.path(),
         &["--format", "json", "db", "get", "users", "alice"],
     );
-    assert!(out.contains("\"value\":\"\\\"one\\\"\""), "{out}");
+    assert!(out.contains("\"value\":\"one\""), "{out}");
     assert!(out.contains("\"found\":true"), "json: {out}");
 
     let out = ok(dir.path(), &["--format", "ndjson", "db", "table", "list"]);

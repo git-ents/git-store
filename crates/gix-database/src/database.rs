@@ -984,7 +984,10 @@ impl<'repo> Database<'repo> {
                 branch.to_owned(),
             )));
         };
-        if !force {
+        // Refuse a dirty working set only when the switch would actually
+        // move the tip: a branch at the current tip (the `checkout -b`
+        // case) discards nothing, so it must simply work.
+        if !force && head.commit() != Some(commit) {
             let tip = match head.commit() {
                 Some(tip) => self.snapshot_at(tip)?,
                 None => Snapshot::empty(*self.store.config()),
@@ -997,6 +1000,14 @@ impl<'repo> Database<'repo> {
                     branch: branch.to_owned(),
                 }));
             }
+        }
+        // Switching to a branch at the current tip (`checkout -b` on a
+        // dirty tree) moves nothing: the working and index snapshots stay
+        // as they are — carrying unstaged work over — and only `HEAD` is
+        // retargeted.
+        if head.commit() == Some(commit) {
+            let from = head.branch().cloned();
+            return self.switch_head_only(&target, from.as_ref(), commit);
         }
         let working = RefName::new(workspace::WORKING_REF).expect("built-in ref name is valid");
         let index = RefName::new(workspace::INDEX_REF).expect("built-in ref name is valid");
@@ -1012,17 +1023,24 @@ impl<'repo> Database<'repo> {
                 Error::Write(WriteStateError::ref_backend(error))
             }
         })?;
-        let from = head.branch().cloned();
-        self.set_head_symbolic(&target, from.as_ref())
-            .map_err(|_| {
-                // `HEAD` moved under us (a rival checkout); the working and
-                // index moves above published, so a retry settles the state.
-                let branch = from
-                    .as_ref()
-                    .map(|name| strip_heads(name.as_str()).to_owned())
-                    .unwrap_or_else(|| "HEAD".to_owned());
-                Error::Write(WriteStateError::Conflict(CasConflict::Branch(branch)))
-            })?;
+        self.switch_head_only(&target, head.branch(), commit)
+    }
+
+    /// Retarget `HEAD` alone, treating a rival's move of `HEAD` as a
+    /// compare-and-swap conflict: any working and index moves already
+    /// published, so a retry settles the state.
+    fn switch_head_only(
+        &self,
+        target: &RefName,
+        from: Option<&RefName>,
+        commit: ObjectId,
+    ) -> Result<ObjectId, Error> {
+        self.set_head_symbolic(target, from).map_err(|_| {
+            let branch = from
+                .map(|name| strip_heads(name.as_str()).to_owned())
+                .unwrap_or_else(|| "HEAD".to_owned());
+            Error::Write(WriteStateError::Conflict(CasConflict::Branch(branch)))
+        })?;
         Ok(commit)
     }
     /// Merge `branch` into the current branch.

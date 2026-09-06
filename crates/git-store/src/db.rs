@@ -54,6 +54,11 @@ pub(crate) fn db_exit_class(error: &gix_database::Error) -> ExitClass {
         | E::Merge(gix_database::MergeError::Write(gix_database::WriteStateError::Conflict(_)))
         | E::Merge(gix_database::MergeError::Conflicts { .. }) => ExitClass::Cas,
         E::Merge(gix_database::MergeError::BranchNotFound(_)) => ExitClass::NotFound,
+        // Merging onto an unborn head is a caller mistake, not a storage
+        // failure: there is nothing to merge into.
+        E::Merge(gix_database::MergeError::State(gix_database::ReadStateError::NoDatabase)) => {
+            ExitClass::Invalid
+        }
         E::Prolly(git_prolly::Error::KeyNotFound(_)) => ExitClass::NotFound,
         // Malformed keys are caller mistakes, not storage failures.
         E::Prolly(git_prolly::Error::Key(_)) | E::Prolly(git_prolly::Error::DuplicateKey(_)) => {
@@ -121,6 +126,9 @@ pub(crate) enum DbCommand {
         /// Stage every unstaged change first, like `--all` of `add`.
         #[arg(short = 'a', long)]
         all: bool,
+        /// Record the commit even when the index matches the tip.
+        #[arg(long)]
+        allow_empty: bool,
     },
     /// Create, drop, rename, import, or list tables.
     Table {
@@ -290,15 +298,54 @@ pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputForm
         DbCommand::Status => status(&db, output),
         DbCommand::Ls { verbose } => ls(&db, verbose, output),
         DbCommand::Add { tables, all } => {
+            if tables.is_empty() && !all {
+                return Err(cli_error(
+                    ExitClass::Invalid,
+                    "nothing specified: name tables or pass -A",
+                ));
+            }
+            // Pathspecs limit the staging to the named tables — `.` means
+            // everything — while a bare `-A` stages every changed table.
+            for name in &tables {
+                if name == "." {
+                    stage_all(&db)?;
+                } else {
+                    db.stage(name).map_err(db_error)?;
+                }
+            }
+            if tables.is_empty() {
+                stage_all(&db)?;
+            }
+            // Report what the index now holds, so machine consumers see
+            // what changed even when everything was already staged.
+            let staged = db.diff_staged().map_err(db_error)?;
+            let items = staged
+                .iter()
+                .map(|status| ListItem {
+                    fields: {
+                        let mut fields = VObject::new();
+                        fields.insert("table", status.table.as_str().to_owned());
+                        fields.insert("change", change_verb(status.kind));
+                        fields
+                    },
+                    text: format!("staged {}", status.table),
+                })
+                .collect();
+            emit_list(output, "staged", items)
+        }
+        DbCommand::Commit {
+            message,
+            all,
+            allow_empty,
+        } => {
             if all {
                 stage_all(&db)?;
             }
-            stage_named(&db, &tables)?;
-            emit_single(output, VObject::new(), || "staged".to_owned())
-        }
-        DbCommand::Commit { message, all } => {
-            if all {
-                stage_all(&db)?;
+            if !allow_empty && db.diff_staged().map_err(db_error)?.is_empty() {
+                return Err(cli_error(
+                    ExitClass::Invalid,
+                    "nothing to commit: the index matches the tip; use --allow-empty to record it anyway",
+                ));
             }
             let commit = db.commit(&message).map_err(db_error)?;
             let mut fields = VObject::new();
@@ -324,15 +371,29 @@ pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputForm
             let commit = match db.merge(&branch) {
                 Ok(commit) => commit,
                 Err(gix_database::MergeError::Conflicts { conflicts }) => {
-                    let mut message = format!(
-                        "merge refused: {} conflicting row(s); nothing was written",
-                        conflicts.len()
-                    );
-                    for entry in &conflicts {
-                        message.push('\n');
-                        message.push_str(&entry.describe());
-                    }
-                    return Err(cli_error(ExitClass::Cas, message));
+                    // Machine consumers get the conflict list on stdout in
+                    // the requested format, not just prose on stderr.
+                    let items = conflicts
+                        .iter()
+                        .map(|entry| {
+                            let mut fields = VObject::new();
+                            fields.insert("table", entry.table.as_str().to_owned());
+                            fields.insert("key", String::from_utf8_lossy(&entry.key).into_owned());
+                            fields.insert("conflict", entry.describe());
+                            ListItem {
+                                fields,
+                                text: entry.describe(),
+                            }
+                        })
+                        .collect();
+                    emit_list(output, "conflicts", items)?;
+                    return Err(cli_error(
+                        ExitClass::Cas,
+                        format!(
+                            "merge refused: {} conflicting row(s); nothing was written",
+                            conflicts.len()
+                        ),
+                    ));
                 }
                 Err(error) => return Err(db_error(error)),
             };
@@ -353,13 +414,9 @@ pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputForm
             let mut fields = VObject::new();
             fields.insert("table", table.clone());
             fields.insert("key", key.clone());
-            fields.insert(
-                "value",
-                value
-                    .as_ref()
-                    .map(json_string)
-                    .unwrap_or_else(|| "null".to_owned()),
-            );
+            if let Some(value) = &value {
+                fields.insert("value", value.clone());
+            }
             fields.insert("found", value.is_some());
             emit_single(output, fields, || match &value {
                 Some(value) => format!("{key} = {}", json_string(value)),
@@ -463,7 +520,11 @@ fn ls(db: &Database, verbose: bool, output: OutputFormat) -> Result<()> {
         fields.insert("table", name.as_str().to_owned());
         fields.insert("root", oid_value(*root));
         let rows = if verbose {
-            let rows = db.scan(name.as_str()).map_err(db_error)?.count();
+            let mut rows = 0usize;
+            for row in db.scan(name.as_str()).map_err(db_error)? {
+                row.map_err(db_error)?;
+                rows += 1;
+            }
             fields.insert("rows", i64::try_from(rows).unwrap_or(i64::MAX));
             Some(rows)
         } else {
@@ -487,18 +548,6 @@ fn stage_all(db: &Database) -> Result<usize> {
         db.stage(status.table.as_str()).map_err(db_error)?;
     }
     Ok(unstaged.len())
-}
-
-/// Stage the named tables.
-fn stage_named(db: &Database, names: &[String]) -> Result<()> {
-    for name in names {
-        if name == "." {
-            stage_all(db)?;
-            continue;
-        }
-        db.stage(name).map_err(db_error)?;
-    }
-    Ok(())
 }
 
 /// `table {create,rm,mv,import,export,list}`.
@@ -535,7 +584,7 @@ fn table(db: &Database, command: DbTableCommand, output: OutputFormat) -> Result
             let rows = import(db, &table, create, replace, file.as_ref())?;
             let mut fields = VObject::new();
             fields.insert("table", table.clone());
-            fields.insert("rows", i64::try_from(rows).unwrap_or(i64::MAX));
+            fields.insert("imported", i64::try_from(rows).unwrap_or(i64::MAX));
             emit_single(output, fields, || {
                 format!("imported {rows} row(s) into {table}")
             })
@@ -691,25 +740,95 @@ fn log(db: &Database, number: Option<usize>, output: OutputFormat) -> Result<()>
 }
 
 /// Resolve a commit-ish argument to a commit object id.
-fn resolve_commit(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
-    let id = repo
-        .rev_parse_single(spec)
-        .map_err(|_| cli_error(ExitClass::NotFound, format!("cannot resolve {spec:?}")))?;
-    let object = id
-        .object()
-        .map_err(|_| cli_error(ExitClass::NotFound, format!("cannot resolve {spec:?}")))?;
-    if object.kind != gix::objs::Kind::Commit {
-        return Err(cli_error(
-            ExitClass::Invalid,
-            format!("{spec:?} is not a commit"),
-        ));
+/// Resolve a commit-ish argument to a commit object id.
+///
+/// Bare names resolve against the database's own namespace first —
+/// `refs/db/heads/<name>`, then `refs/db/tags/<name>` — so `db show main`
+/// means the *database* branch, never the worktree's `refs/heads/main`.
+/// `HEAD` is the database's symbolic head. Ancestry suffixes `~`, `~<N>`,
+/// and `^` walk first parents; anything else falls back to
+/// `git rev-parse` (full and abbreviated object ids, full ref names).
+fn resolve_commit(repo: &gix::Repository, db: &Database, spec: &str) -> Result<ObjectId> {
+    let (base, steps) = split_ancestry(spec);
+    let mut commit = resolve_base(repo, db, base)?;
+    for _ in 0..steps {
+        let parent = repo
+            .find_commit(commit)
+            .map_err(|_| {
+                cli_error(
+                    ExitClass::NotFound,
+                    format!("cannot resolve {spec:?}: no such commit"),
+                )
+            })?
+            .parent_ids()
+            .next()
+            .ok_or_else(|| {
+                cli_error(
+                    ExitClass::Invalid,
+                    format!("cannot resolve {spec:?}: the commit has no parent"),
+                )
+            })?
+            .detach();
+        commit = parent;
     }
-    Ok(id.detach())
+    Ok(commit)
+}
+
+/// Split a trailing `~`/`~<N>`/`^` ancestry suffix off a revision spec.
+fn split_ancestry(spec: &str) -> (&str, usize) {
+    let mut steps = 0usize;
+    let mut rest = spec;
+    loop {
+        if let Some(stripped) = rest.strip_suffix('~') {
+            steps += 1;
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_suffix('^') {
+            steps += 1;
+            rest = stripped;
+        } else if let Some(idx) = rest.rfind('~')
+            && !rest[idx + 1..].is_empty()
+            && rest[idx + 1..].bytes().all(|b| b.is_ascii_digit())
+        {
+            steps += rest[idx + 1..].parse::<usize>().unwrap_or(0);
+            rest = &rest[..idx];
+        } else {
+            return (rest, steps);
+        }
+    }
+}
+
+/// Resolve a bare revision to a commit, database namespace first.
+fn resolve_base(repo: &gix::Repository, db: &Database, spec: &str) -> Result<ObjectId> {
+    let not_found = || cli_error(ExitClass::NotFound, format!("cannot resolve {spec:?}"));
+    if spec == "HEAD" {
+        return db
+            .head()
+            .map_err(db_error)?
+            .commit()
+            .ok_or_else(|| db_error(gix_database::Error::EmptyDatabase));
+    }
+    for candidate in [
+        format!("{}/{spec}", gix_database::HEADS_PREFIX),
+        format!("{}/{spec}", gix_database::TAGS_PREFIX),
+        spec.to_owned(),
+    ] {
+        if let Ok(id) = repo.rev_parse_single(candidate.as_str()) {
+            let kind = id.object().map_err(|_| not_found())?.kind;
+            if kind != gix::objs::Kind::Commit {
+                return Err(cli_error(
+                    ExitClass::Invalid,
+                    format!("{spec:?} is not a commit"),
+                ));
+            }
+            return Ok(id.detach());
+        }
+    }
+    Err(not_found())
 }
 
 /// `show <commit>`: the commit's message and the table data it holds.
 fn show(repo: &gix::Repository, db: &Database, commit: &str, output: OutputFormat) -> Result<()> {
-    let id = resolve_commit(repo, commit)?;
+    let id = resolve_commit(repo, db, commit)?;
     let mut buf = Vec::new();
     let data = repo
         .try_find(&id, &mut buf)
@@ -731,14 +850,14 @@ fn show(repo: &gix::Repository, db: &Database, commit: &str, output: OutputForma
         for (name, rows) in &tables {
             let mut item = VObject::new();
             item.insert("table", name.clone());
-            let mut rows_field = VArray::new();
+            let mut entries = VArray::new();
             for (key, value) in rows {
                 let mut row = VObject::new();
                 row.insert("key", key.clone());
                 row.insert("value", value.clone());
-                rows_field.push(Value::from(row));
+                entries.push(Value::from(row));
             }
-            item.insert("rows", rows_field);
+            item.insert("entries", entries);
             list.push(Value::from(item));
         }
         fields.insert("tables", list);
@@ -857,7 +976,15 @@ fn checkout(
 ) -> Result<()> {
     let commit = if new_branch {
         db.create_branch(target).map_err(db_error)?;
-        db.checkout(target, force).map_err(db_error)?
+        match db.checkout(target, force) {
+            Ok(commit) => commit,
+            Err(error) => {
+                // Undo the just-created ref so a refused checkout does not
+                // leave a stray branch behind.
+                let _ = db.delete_branch(target, true);
+                return Err(db_error(error));
+            }
+        }
     } else {
         let is_branch = db
             .list_branches()
@@ -941,7 +1068,7 @@ fn diff(
             (None, _) => (db.diff_working().map_err(db_error)?, "unstaged"),
             (Some(from), None) => {
                 let base = db
-                    .snapshot_at(resolve_commit(repo, &from)?)
+                    .snapshot_at(resolve_commit(repo, db, &from)?)
                     .map_err(db_error)?;
                 let working = db.working_state().map_err(db_error)?.snapshot;
                 (
@@ -951,10 +1078,10 @@ fn diff(
             }
             (Some(from), Some(to)) => {
                 let older = db
-                    .snapshot_at(resolve_commit(repo, &from)?)
+                    .snapshot_at(resolve_commit(repo, db, &from)?)
                     .map_err(db_error)?;
                 let newer = db
-                    .snapshot_at(resolve_commit(repo, &to)?)
+                    .snapshot_at(resolve_commit(repo, db, &to)?)
                     .map_err(db_error)?;
                 (db.diff_snapshots(&older, &newer).map_err(db_error)?, "diff")
             }
@@ -1001,7 +1128,7 @@ fn tag(
     }
     if let Some(name) = name {
         let at = match commit {
-            Some(spec) => Some(resolve_commit(repo, &spec)?),
+            Some(spec) => Some(resolve_commit(repo, db, &spec)?),
             None => None,
         };
         let commit = db.create_tag(&name, at).map_err(db_error)?;
