@@ -30,10 +30,6 @@ pub enum SnapshotError {
     /// The metadata blob's format line names an unknown format or version.
     #[error("unknown snapshot format line {0:?}")]
     UnknownFormat(Vec<u8>),
-    /// A snapshot written by `git-store-database v1`, whose value encoding
-    /// this version does not read.
-    #[error("snapshot was written by git-store-database v1; this build reads v2 only")]
-    LegacyFormat,
     /// The metadata blob's Prolly configuration line is malformed.
     #[error("malformed snapshot metadata line: {0:?}")]
     MalformedMetadata(String),

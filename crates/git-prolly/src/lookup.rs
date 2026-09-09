@@ -77,14 +77,13 @@ impl ProllyStore<'_> {
     pub fn get(&self, root: ObjectId, key: &[u8]) -> Result<Option<Value>, Error> {
         match self.get_oid(root, key)? {
             None => Ok(None),
-            Some(value_oid) => self.read_value_text(value_oid).map(Some),
+            Some(value_oid) => self.read_value(value_oid).map(Some),
         }
     }
 
     /// Look up the value stored under `key`, decoded into a `Facet` type.
     ///
-    /// The value's JSON text leaf is decoded directly into `T` through
-    /// Facet reflection.
+    /// The structural value graph is decoded into `T` through Facet reflection.
     ///
     /// # Errors
     ///
@@ -97,12 +96,12 @@ impl ProllyStore<'_> {
         match self.get_oid(root, key)? {
             None => Ok(None),
             Some(value_oid) => {
-                let value = self.read_value_text(value_oid)?;
-                let text = facet_json::to_string(&value)
-                    .map_err(|error| Error::ValueJson(error.to_string()))?;
-                facet_json::from_str(&text)
+                let wire: crate::value::WireValue =
+                    facet_git_tree::deserialize(&value_oid, self.repo())
+                        .map_err(Error::Deserialize)?;
+                facet_value::from_value(crate::value::decode(wire))
                     .map(Some)
-                    .map_err(|error| Error::ValueJson(error.to_string()))
+                    .map_err(|error| Error::Value(error.to_string()))
             }
         }
     }
@@ -236,7 +235,7 @@ impl Iterator for ProllyIter<'_, '_> {
                     return Some(Err(Error::Key(error)));
                 }
             };
-            let value = self.store.read_value_text(oid);
+            let value = self.store.read_value(oid);
             return match value {
                 Ok(value) => Some(Ok((key, value))),
                 Err(error) => {

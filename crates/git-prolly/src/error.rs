@@ -38,9 +38,9 @@ pub enum Error {
     /// A removal targeted a key the tree does not contain.
     #[error("key {} not found", String::from_utf8_lossy(.0))]
     KeyNotFound(Vec<u8>),
-    /// A value could not be encoded to, or decoded from, its JSON text leaf.
-    #[error("value JSON codec failed: {0}")]
-    ValueJson(String),
+    /// A dynamic value cannot be represented by the database wire type.
+    #[error("unsupported database value: {0}")]
+    Value(String),
     /// A structure descended through more levels than the format allows.
     ///
     /// Valid trees are bounded by construction; this bound keeps a hostile or

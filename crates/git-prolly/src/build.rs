@@ -40,7 +40,7 @@ impl ProllyStore<'_> {
         key: &[u8],
         value: &Value,
     ) -> Result<ObjectId, Error> {
-        let value_oid = self.write_value_text(value)?;
+        let value_oid = self.write_value(value)?;
         self.insert_value_object(root, key, value_oid)
     }
 
@@ -236,7 +236,7 @@ impl ProllyStore<'_> {
         for (key, value) in entries {
             let key: Vec<u8> = key.into();
             self.config().key_codec.codec().encode(&key)?;
-            let value_oid = self.write_value_text(&value)?;
+            let value_oid = self.write_value(&value)?;
             let mode = self.entry_mode_of(value_oid)?;
             built.push(Entry {
                 key,

@@ -5,13 +5,11 @@ use std::fmt;
 
 use crate::error::{SnapshotError, TableNameError};
 
-/// The first metadata line: format identity and version in one string.
 /// The snapshot metadata format line.
 ///
-/// `v2` stores every table value as one self-describing JSON text blob, so
-/// scalar types round trip; `v1` leaves encoded through the facet tree
-/// codec coerced numbers and booleans to strings and lost `null`.
-pub const SNAPSHOT_FORMAT_LINE: &[u8] = b"git-store-database v2";
+/// `v3` stores every table value as a tagged, structural `facet-git-tree`
+/// graph. This is the only database snapshot format supported by this build.
+pub const SNAPSHOT_FORMAT_LINE: &[u8] = b"git-store-database v3";
 
 /// The tree-entry name reserved for a snapshot's metadata blob.
 ///

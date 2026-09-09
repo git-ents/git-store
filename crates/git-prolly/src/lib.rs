@@ -2,10 +2,12 @@
 //! ordinary Git objects.
 //!
 //! A Prolly node is a Git tree, and its Git [`ObjectId`] is its node identity.
-//! A value is recursively represented as Git trees and blobs by
-//! [`facet-git-tree`], so Git's existing object graph provides reachability,
-//! deduplication, packing, fetching, and garbage collection. There is no second
-//! object store and no second Merkle-node format.
+//! A value is recursively represented as Git trees and scalar leaf blobs by
+//! [`facet-git-tree`]. The database wire type tags null, booleans, each numeric
+//! representation, strings, arrays, and objects, so dynamic values are
+//! unambiguous without using JSON as storage. Git's existing object graph
+//! provides reachability, deduplication, packing, fetching, and garbage
+//! collection. There is no second object store and no second Merkle-node format.
 //!
 //! # Node representation
 //!
@@ -15,20 +17,10 @@
 //! <mode> <hex-encoded-key> <value-object-id>
 //! ```
 //!
-//! The value object id points at a single blob holding one canonical
-//! [`facet_json`] text rendering of the value, produced by
-//! `facet_json::to_string` and written with `write_value_text`. Because the
-//! stored bytes are JSON, the encoding is self-describing: numbers, booleans,
-//! and null round-trip without a schema, and any value can be inspected
-//! directly with `git cat-file`. `get`, `get_as`, and `iter` decode only these
-//! JSON-text blobs; trees surface [`Error::UnexpectedObjectKind`]. Callers
-//! that need a different encoding may still write an arbitrary blob or tree
-//! through `insert_value_object`, which stores it as-is for their own readers.
-//!
-//! The value codec is part of the frozen format: within a format version the
-//! JSON-text encoding does not change. Snapshots referencing v1 value
-//! encodings are rejected by `gix-database` with `SnapshotError::LegacyFormat`
-//! rather than misread.
+//! A value root is a tree for every container, with a narrow tagged Facet wire
+//! type at the root and recursively at each child. `insert_value_object` is the
+//! escape hatch for callers that already have a Git tree or blob; it never
+//! re-encodes that object.
 //!
 //! An **internal node** is also a Git tree. Its first entry is a reserved
 //! marker (name `!`, a blob whose content identifies the format and marks the
@@ -51,13 +43,11 @@
 //!
 //! # Compatibility
 //!
-//! The on-disk format is versioned: the internal-node marker carries the
-//! format version, and the current version is [`FORMAT_VERSION`]. Within a
-//! version, node representations are frozen — trees written by any release of
-//! this crate remain readable by later releases. A format change requires a
-//! new version and a reader that still accepts every earlier version. The
-//! [`ProllyConfig`] parameters are likewise frozen per version: trees built
-//! under different configurations are distinct, never silently comparable.
+//! The on-disk node format is versioned independently from the database value
+//! graph: the internal-node marker still carries [`FORMAT_VERSION`] 2 because
+//! key-derived Prolly nodes did not change. Database snapshots use v3 to pin
+//! the structural value codec. The [`ProllyConfig`] parameters are likewise
+//! frozen per version.
 //!
 //! # Identity and deduplication
 //!
@@ -109,6 +99,7 @@ mod key;
 mod lookup;
 mod node;
 mod store;
+mod value;
 mod verify;
 
 pub use config::ProllyConfig;

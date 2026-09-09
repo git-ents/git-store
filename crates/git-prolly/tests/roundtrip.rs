@@ -25,10 +25,10 @@ fn facet_value_round_trip() {
     assert_eq!(decoded, original);
 }
 
-/// A scalar value's facet-git-tree root is a blob; the Prolly leaf entry still
-/// carries it with the correct mode.
+/// The tagged value root is structural even when its scalar payload is a leaf
+/// blob; the Prolly leaf entry carries the root with the correct mode.
 #[test]
-fn scalar_values_are_blob_rooted() {
+fn scalar_values_are_structurally_tagged() {
     let TestRepo { _dir, repo } = repo();
     let store = ProllyStore::open(&repo);
     let root = store
@@ -40,7 +40,7 @@ fn scalar_values_are_blob_rooted() {
         .expect("present");
     assert_eq!(
         repo.find_header(value_oid).expect("value exists").kind(),
-        gix::objs::Kind::Blob
+        gix::objs::Kind::Tree
     );
     assert_eq!(
         store.get(root, b"scalar").expect("get"),
