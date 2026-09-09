@@ -6,7 +6,7 @@ readme = "README.adoc"
 
 [dependencies]
 facet = { version = "0.50.0-rc.0", features = ["reflect"] }
-facet-git-tree = { path = "../facet-git-tree", features = ["value"] }
+facet-git-tree = { features = ["value"], git = "https://github.com/git-ents/facet-git-tree.git", version = "0.1.0" }
 facet-value = "0.50.0-rc.5"
 gix = { version = "0.85.0", default-features = false, features = ["sha1", "zlib-rs"] }
 gix-refstore = { path = "../gix-refstore" }
