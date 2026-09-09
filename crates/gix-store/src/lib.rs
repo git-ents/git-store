@@ -9,6 +9,10 @@
 //! provides typed access, while [`Store::dynamic`] provides access through
 //! [`facet_value::Value`].
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::result_large_err,
+    reason = "the public store API preserves typed error variants"
+)]
 
 mod address;
 mod canonical;

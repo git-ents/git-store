@@ -1881,6 +1881,10 @@ fn update_rebuilds_from_the_entry_the_retry_actually_commits_over() {
 /// all, rather than recreating an entity from nothing, and gets its own error
 /// type back.
 #[test]
+#[expect(
+    clippy::result_large_err,
+    reason = "the test error intentionally wraps the public store error"
+)]
 fn try_update_lets_rebuild_refuse_an_absent_entry() {
     #[derive(Debug)]
     enum Refusal {

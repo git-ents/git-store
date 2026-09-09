@@ -1,3 +1,8 @@
+#![expect(
+    clippy::result_large_err,
+    reason = "the CLI passes through the typed store error"
+)]
+
 //! `git-store`: a git external subcommand (`git store …`) that stores anything
 //! in Git as a real tree. JSON lives only here, at the CLI boundary; the
 //! [`Store`] underneath is oid-in/oid-out.
@@ -757,6 +762,7 @@ fn store_error_exit_class(error: &gix_store::Error) -> ExitClass {
         | gix_store::Error::Serialize(_)
         | gix_store::Error::Deserialize(_)
         | gix_store::Error::UnsupportedObjectFormat { .. } => ExitClass::Other,
+        gix_store::Error::DuplicateParent { .. } => ExitClass::Invalid,
     }
 }
 
