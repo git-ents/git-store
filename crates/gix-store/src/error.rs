@@ -239,6 +239,13 @@ pub enum Error {
         /// The object hash algorithm actually observed, e.g. `"sha256"`.
         observed: String,
     },
+    /// A canonical commit named the same parent more than once; `git fsck`
+    /// rejects the result as a duplicateParent.
+    #[error("commit names parent {parent} more than once")]
+    DuplicateParent {
+        /// The repeated parent.
+        parent: ObjectId,
+    },
     /// A backend failure from the ref store or object store.
     #[error(transparent)]
     Backend(Box<dyn std::error::Error + Send + Sync + 'static>),

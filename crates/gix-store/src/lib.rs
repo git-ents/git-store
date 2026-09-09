@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod address;
+mod canonical;
 mod doctor;
 mod document;
 mod encoding;
@@ -40,6 +41,7 @@ pub use kind::{
 };
 pub use migrate::TargetSchema;
 
+pub use canonical::CanonicalCommit;
 pub use store::{Compat, Layout, Publication, PublishOptions, RepoStore, Store, decode};
 pub use tombstone::{
     DeleteResult, EntityState, ReadResult, ReadState, Tombstone, TombstoneEntry, TombstoneState,

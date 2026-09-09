@@ -154,7 +154,7 @@ const RESERVED_TRAILERS: [&str; 3] = ["Schema:", "Schema-Version:", "Ents-Ref:"]
 /// trailers. They are reserved even though readers ignore them: accepting
 /// them would let a caller make a newly written commit look like the old
 /// metadata format.
-fn validate_commit_message(message: &str) -> Result<(), Error> {
+pub(crate) fn validate_commit_message(message: &str) -> Result<(), Error> {
     for line in message.lines() {
         let line = line.trim_start();
         if let Some(&trailer) = RESERVED_TRAILERS
