@@ -37,6 +37,14 @@ if ! [[ "$rows" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
+benchmarks=${BENCHMARKS:-all}
+benchmark_enabled() {
+  case ",$benchmarks," in
+    *,all,*|*,"$1",*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 warmup=${WARMUP:-1}
 if ! [[ "$warmup" =~ ^[0-9]+$ ]]; then
   printf 'WARMUP must be a non-negative integer (got %q)\n' "$warmup" >&2
@@ -200,17 +208,27 @@ bench_fixture() {
     --command-name 'dolt' "$dolt_command"
 }
 
+bench_fixture_if_enabled() {
+  local benchmark=$1
+  shift
+  if benchmark_enabled "$benchmark"; then
+    bench_fixture "$@"
+  fi
+}
+
 # Initialization has no fixture: --prepare only creates an empty directory,
 # and repository/database initialization is part of the measured operation.
 init_prepare="rm -rf $(quote "$run_dir"); mkdir -p $(quote "$git_run") $(quote "$dolt_run")"
 init_git="cd $(quote "$git_run") && git init -q -b main && git config user.name 'Benchmark User' && git config user.email benchmark@example.com && $git_q db init >/dev/null"
 init_dolt="cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q init --name 'Benchmark User' --email benchmark@example.com --initial-branch main >/dev/null"
-printf '\n== initialize (ROWS=%s) ==\n' "$rows"
-hyperfine "${hyperfine_base[@]}" --prepare "$init_prepare" \
-  --command-name 'git-store' "$init_git" \
-  --command-name 'dolt' "$init_dolt"
+if benchmark_enabled initialize; then
+  printf '\n== initialize (ROWS=%s) ==\n' "$rows"
+  hyperfine "${hyperfine_base[@]}" --prepare "$init_prepare" \
+    --command-name 'git-store' "$init_git" \
+    --command-name 'dolt' "$init_dolt"
+fi
 
-bench_fixture 'create table' empty \
+bench_fixture_if_enabled create-table 'create table' empty \
   "cd $(quote "$git_run") && $git_q db table create users >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q sql -q $(quote 'CREATE TABLE users (id VARCHAR(64) PRIMARY KEY, name VARCHAR(255), role VARCHAR(64));') >/dev/null"
 
@@ -221,45 +239,45 @@ update_json=$(quote '{"name":"Alice","role":"owner"}')
 update_sql=$(quote "UPDATE users SET role = 'owner' WHERE id = 'alice';")
 delete_sql=$(quote "DELETE FROM users WHERE id = 'alice';")
 
-bench_fixture 'insert one row' table \
+bench_fixture_if_enabled insert-row 'insert one row' table \
   "cd $(quote "$git_run") && $git_q db put users alice $insert_json >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q sql -q $insert_sql >/dev/null"
 
-bench_fixture 'read one row' rows \
+bench_fixture_if_enabled read-row 'read one row' rows \
   "cd $(quote "$git_run") && $git_q db get users alice >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q sql -q $select_sql >/dev/null"
 
-bench_fixture 'update one row' rows \
+bench_fixture_if_enabled update-row 'update one row' rows \
   "cd $(quote "$git_run") && $git_q db put users alice $update_json >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q sql -q $update_sql >/dev/null"
 
-bench_fixture 'delete one row' rows \
+bench_fixture_if_enabled delete-row 'delete one row' rows \
   "cd $(quote "$git_run") && $git_q db rm users alice >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q sql -q $delete_sql >/dev/null"
 
-bench_fixture 'status with one unstaged update' dirty \
+bench_fixture_if_enabled status 'status with one unstaged update' dirty \
   "cd $(quote "$git_run") && $git_q db status >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q status >/dev/null"
 
-bench_fixture 'diff with one unstaged update' dirty \
+bench_fixture_if_enabled diff 'diff with one unstaged update' dirty \
   "cd $(quote "$git_run") && $git_q db diff >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q diff >/dev/null"
 
-bench_fixture 'stage one table' dirty \
+bench_fixture_if_enabled stage 'stage one table' dirty \
   "cd $(quote "$git_run") && $git_q db add users >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q add users >/dev/null"
 
-bench_fixture 'commit staged changes' staged \
+bench_fixture_if_enabled commit 'commit staged changes' staged \
   "cd $(quote "$git_run") && $git_q db commit -m 'update users' >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q commit -m 'update users' >/dev/null"
 
-bench_fixture 'read history' committed \
+bench_fixture_if_enabled history 'read history' committed \
   "cd $(quote "$git_run") && $git_q db log -n 1 >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q log -n 1 >/dev/null"
 
 export_git_file=$(quote "$git_run/users.json")
 export_dolt_file=$(quote "$dolt_run/users.json")
-bench_fixture 'export table' committed \
+bench_fixture_if_enabled export 'export table' committed \
   "cd $(quote "$git_run") && $git_q db table export users -F $export_git_file >/dev/null" \
   "cd $(quote "$dolt_run") && PAGER=cat DOLT_PAGER=cat $dolt_q table export users $export_dolt_file >/dev/null"
 

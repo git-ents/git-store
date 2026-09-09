@@ -37,6 +37,28 @@ and export expose the cost of the full fixture. Hyperfine options can be
 adjusted in `benchmarks/db.sh` if a longer run or a saved JSON/CSV result is
 wanted.
 
+To run a scaling sweep, use `scale.sh`. It defaults to the export operation at
+2, 100, 1,000, and 5,000 rows, which makes the point where Dolt's table export
+can overtake the Git database visible without repeating every operation at
+every size:
+
+```sh
+ROWS_LIST='2 100 1000 5000' WARMUP=1 RUNS=5 \
+  GIT_STORE_BIN="$PWD/target/release/git-store" ./benchmarks/scale.sh
+```
+
+Set `BENCHMARKS` to a comma-separated operation list to sweep other operations,
+or use `BENCHMARKS=all` to run the complete suite at every size:
+
+```sh
+ROWS_LIST='100 1000 5000' BENCHMARKS='export,stage,commit' \
+  ./benchmarks/scale.sh
+```
+
+`BENCHMARKS` names are `initialize`, `create-table`, `insert-row`, `read-row`,
+`update-row`, `delete-row`, `status`, `diff`, `stage`, `commit`, `history`, and
+`export`. The fixture setup remains outside measured samples.
+
 ## Operations
 
 The benchmark covers equivalent operations from the examples:
@@ -94,6 +116,13 @@ accuracy warning, so those numbers should be treated as approximate. The
 comparison is also dominated by process startup for these single-command
 benchmarks; repeat with larger `ROWS` values and more runs before drawing
 storage-engine conclusions.
+
+A scaling run on the same Apple Silicon environment showed Dolt overtaking the
+Git database for `export table` between 1,000 and 2,000 rows (and remaining
+faster at 5,000 rows). At 5,000 rows, the one-shot run measured approximately
+798 ms for Git store versus 158 ms for Dolt. This is an example crossover, not
+a universal threshold: rerun `scale.sh` on the target machine, with enough
+warmups and repetitions, before relying on the exact boundary.
 
 ## Interpreting results
 
