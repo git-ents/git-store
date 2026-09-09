@@ -22,7 +22,7 @@ A **leaf** is a Git tree with one entry per logical key:
 
 The value object id is whatever root object facet-git-tree produced for the value (a tree for objects/arrays, a blob for scalars). The entry mode is the kind of that object, so every emitted tree is valid for `git fsck`.
 
-An **internal node** is a Git tree whose first entry is a reserved marker (name `!`, a blob carrying the format identity `git-prolly:1:internal\n`), followed by one entry per child:
+An **internal node** is a Git tree whose first entry is a reserved marker (name `!`, a blob carrying the format identity `git-prolly:2:internal\n`), followed by one entry per child:
 
 ....
 040000 <hex-encoded-separator-key> <child-tree-oid>

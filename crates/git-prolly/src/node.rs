@@ -22,10 +22,10 @@ pub(crate) const INTERNAL_MARKER_NAME: &[u8] = b"!";
 ///
 /// The format version participates in canonical identity — a change to the
 /// node format cannot make two incompatible representations appear equivalent.
-pub(crate) const INTERNAL_MARKER_CONTENT: &[u8] = b"git-prolly:1:internal\n";
+pub(crate) const INTERNAL_MARKER_CONTENT: &[u8] = b"git-prolly:2:internal\n";
 
 /// The current Prolly-on-Git format version.
-pub const FORMAT_VERSION: u8 = 1;
+pub const FORMAT_VERSION: u8 = 2;
 
 /// One logical entry of a leaf: a raw key, the value object's id, and the
 /// value object's kind, which is also the entry's Git mode.

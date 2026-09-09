@@ -80,13 +80,20 @@ key_for_row() {
 }
 
 seed_git() {
+  local file=$1
   "$git_store_bin" db table create users >/dev/null
-  local i key value role
+  printf '{' >"$file"
+  local i key role separator=''
   for ((i = 1; i <= rows; i++)); do
     key=$(key_for_row "$i")
-    value=$(printf '{"name":"%s","role":"%s"}' "${key^}" "$([[ "$i" == 1 ]] && printf admin || printf viewer)")
-    "$git_store_bin" db put users "$key" "$value" >/dev/null
+    role=$([[ "$i" == 1 ]] && printf admin || printf viewer)
+    printf '%s"%s":{"name":"%s","role":"%s"}' \
+      "$separator" "$key" "${key^}" "$role" >>"$file"
+    separator=,
   done
+  printf '}\n' >>"$file"
+  "$git_store_bin" db table import users -F "$file" >/dev/null
+  rm -f "$file"
 }
 
 create_dolt_table() {
@@ -132,7 +139,7 @@ make_git_fixture() {
     empty) ;;
     table) (cd "$dir" && "$git_store_bin" db table create users >/dev/null) ;;
     rows|dirty|staged|committed)
-      (cd "$dir" && seed_git)
+      (cd "$dir" && seed_git users-seed.json)
       ;;
     *) printf 'unknown Git fixture state: %s\n' "$state" >&2; exit 2 ;;
   esac

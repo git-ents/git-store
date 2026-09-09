@@ -38,8 +38,9 @@
 //! 040000 <hex-encoded-separator-key> <child-tree-oid>
 //! ```
 //!
-//! The separator is the first logical key in that child's subtree, and the
-//! Git tree itself supplies ordering. Child edges are ordinary Git tree
+//! Chunk boundaries are derived from encoded keys and child separators, so
+//! changing a row value does not move it between nodes. The separator is the
+//! first logical key in that child's subtree, and the Git tree itself supplies ordering. Child edges are ordinary Git tree
 //! entries, never bytes inside a blob, so Git reachability machinery sees the
 //! whole Prolly structure.
 //!

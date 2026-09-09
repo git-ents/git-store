@@ -111,6 +111,30 @@ fn appends_reuse_unchanged_subtrees() {
     );
 }
 
+/// Replacing an existing row keeps the canonical root while avoiding a full
+/// table walk in the mutation path.
+#[test]
+fn replacing_a_row_preserves_canonical_identity() {
+    let TestRepo { _dir, repo } = repo();
+    let store = ProllyStore::open(&repo);
+    let mut entries = sample(1_000);
+    let root = store.build(entries.iter().cloned()).expect("build");
+    let key = entries[517].0.clone();
+    entries[517].1 = Value::from("updated");
+
+    let replaced = store
+        .insert(Some(root), &key, &entries[517].1)
+        .expect("replace");
+    let rebuilt = store.build(entries).expect("rebuild");
+
+    assert_eq!(replaced, rebuilt);
+    assert_eq!(
+        store.get(replaced, &key).expect("get"),
+        Some(Value::from("updated"))
+    );
+    store.verify(replaced).expect("verify replaced tree");
+}
+
 /// Removing every key returns the canonical empty root.
 #[test]
 fn emptying_returns_the_empty_tree() {

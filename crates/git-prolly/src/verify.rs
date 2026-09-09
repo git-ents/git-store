@@ -406,7 +406,7 @@ impl ProllyStore<'_> {
                 .collect();
             let fingerprints: Vec<u64> = all_children
                 .iter()
-                .map(|(_, child)| chunk::child_fingerprint(hash_kind, child))
+                .map(|(separator, _)| chunk::child_fingerprint(hash_kind, separator))
                 .collect();
             let expected = expected_internal_nodes(
                 &codec,

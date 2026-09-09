@@ -117,6 +117,31 @@ comparison is also dominated by process startup for these single-command
 benchmarks; repeat with larger `ROWS` values and more runs before drawing
 storage-engine conclusions.
 
+After changing the Git table layout so existing-row replacements update only
+the Prolly path from the row's leaf to the root, a targeted sweep used:
+
+```sh
+ROWS_LIST='2 100 1000 5000' BENCHMARKS='update-row,export' \
+  WARMUP=1 RUNS=3 GIT_STORE_BIN="$PWD/target/release/git-store" \
+  ./benchmarks/scale.sh
+```
+
+On the same Apple Silicon environment, the update operation stayed nearly
+constant as the table grew, while export remained a full-table operation:
+
+|  Rows | Git update | Dolt update | Git export | Dolt export |
+| ----: | ---------: | ----------: | ---------: | ----------: |
+|     2 |     7.4 ms |     97.1 ms |     4.4 ms |     88.8 ms |
+|   100 |     8.2 ms |     96.2 ms |    13.8 ms |     87.6 ms |
+| 1,000 |     8.2 ms |     96.7 ms |   132.6 ms |    117.6 ms |
+| 5,000 |     8.9 ms |    110.1 ms |   765.3 ms |    118.4 ms |
+
+The updated Git store remained about 11–13× faster than Dolt for one-row
+updates in this run. Dolt was faster for export at 1,000 rows and above,
+reaching about 6.5× the Git store speed at 5,000 rows. These measurements are
+machine- and version-dependent; the update result demonstrates the expected
+scaling shape, not a universal latency guarantee.
+
 A scaling run on the same Apple Silicon environment showed Dolt overtaking the
 Git database for `export table` between 1,000 and 2,000 rows (and remaining
 faster at 5,000 rows). At 5,000 rows, the one-shot run measured approximately

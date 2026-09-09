@@ -7,15 +7,15 @@
 //! entry sequence and configuration therefore always produce the same
 //! boundaries, on every level.
 //!
-//! Fingerprints are Git object hashes (with the repository's own hash kind) of
-//! an explicitly specified canonical tuple, never a hash of an in-memory Rust
-//! value:
+//! Fingerprints are Git object hashes (with the repository's own hash kind)
+//! of canonical keys:
 //!
-//! * leaf level: `H(encoded_key || value_object_id)`
-//! * parent levels: `H(child_node_oid)`
+//! * leaf level: `H(encoded_key)`
+//! * parent levels: `H(child_separator)`
 //!
-//! Both are length-unambiguous because `encoded_key` has even length and both
-//! sides of the tuple are self-delimiting in the concatenation.
+//! Row replacements therefore cannot move chunk boundaries. The physical
+//! grouping is stable while keys are added or removed through canonical
+//! rebuilds.
 //!
 //! This is an entry-granularity rolling-window scheme rather than a
 //! byte-level rolling hash (BuzHash): the unit of chunking is the entry, so a
@@ -82,34 +82,22 @@ impl Chunker {
 
 /// The leaf-level fingerprint of one entry.
 ///
-/// The tuple is `encoded_key || value_object_id`; the value identity used for
-/// chunking is the Git object id facet-git-tree produced, never a direct hash
-/// of a Rust value.
+/// Boundaries depend on the encoded key so replacing a row preserves leaf
+/// grouping.
 pub(crate) fn leaf_fingerprint(
     hash_kind: gix::hash::Kind,
     encoded_key: &[u8],
-    value_oid: &ObjectId,
+    _value_oid: &ObjectId,
 ) -> Result<u64, Error> {
-    let mut data = Vec::with_capacity(encoded_key.len() + hash_kind.len_in_bytes());
-    data.extend_from_slice(encoded_key);
-    data.extend_from_slice(value_oid.as_bytes());
-    fingerprint(hash_kind, &data)
+    fingerprint(hash_kind, encoded_key)
 }
 
-/// The parent-level fingerprint of one child node.
+/// The parent-level fingerprint of one child range.
 ///
-/// The tuple is the child node's own Git object id: `H(child_oid)`.
-pub(crate) fn child_fingerprint(hash_kind: gix::hash::Kind, child_oid: &ObjectId) -> u64 {
-    child_fingerprint_result(hash_kind, child_oid)
-        .unwrap_or_else(|_| unreachable_fingerprint(hash_kind))
-}
-
-/// [`child_fingerprint`] for callers that can propagate errors.
-pub(crate) fn child_fingerprint_result(
-    hash_kind: gix::hash::Kind,
-    child_oid: &ObjectId,
-) -> Result<u64, Error> {
-    fingerprint(hash_kind, child_oid.as_bytes())
+/// The separator is stable while rows are replaced, so internal grouping is
+/// independent of row values.
+pub(crate) fn child_fingerprint(hash_kind: gix::hash::Kind, separator: &[u8]) -> u64 {
+    fingerprint(hash_kind, separator).unwrap_or_else(|_| unreachable_fingerprint(hash_kind))
 }
 
 /// Hash a canonical tuple with the repository's object hash and compress the

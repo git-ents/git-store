@@ -6,14 +6,9 @@
 //! root. Given the same ordered entries and the same [`ProllyConfig`], the
 //! same root is always produced.
 //!
-//! Mutations (`insert`, `remove`) rebuild from the merged sorted entry list,
-//! so a mutation result is always identical to a batch construction of the
-//! same logical contents — the determinism invariant this crate commits to.
-//! Rebuilds never rewrite unchanged trees: identical chunks hash to identical
-//! ObjectIds and gitoxide skips writes of objects that already exist.
-//! Path-local rebuilding that provably matches batch construction is future
-//! work; the current implementation is O(total entries) per mutation by
-//! design, and the benchmarks make that cost visible.
+//! Batch construction and mutations preserve canonical roots. Row
+//! replacements rewrite only the path from the changed leaf to the root;
+//! bulk construction uses canonical bottom-up builds.
 
 use facet_value::Value;
 use gix::ObjectId;
@@ -23,6 +18,10 @@ use crate::error::Error;
 use crate::key::KeyCodec;
 use crate::node::{self, Entry, NodeKind};
 use crate::store::ProllyStore;
+
+fn same_boundaries(chunker: &chunk::Chunker, old: &[u64], new: &[u64]) -> bool {
+    chunker.boundaries(old) == chunker.boundaries(new)
+}
 
 impl ProllyStore<'_> {
     /// Insert `value` under `key`, returning the new root.
@@ -66,6 +65,12 @@ impl ProllyStore<'_> {
     ) -> Result<ObjectId, Error> {
         self.config().key_codec.codec().encode(key)?;
         let mode = self.entry_mode_of(value_oid)?;
+        if let Some(existing) = root
+            && !self.is_empty_root(existing)
+            && let Some(root) = self.replace_existing(existing, key, value_oid, mode)?
+        {
+            return Ok(root);
+        }
         let mut entries = match root {
             None => Vec::new(),
             Some(existing) if self.is_empty_root(existing) => Vec::new(),
@@ -101,6 +106,98 @@ impl ProllyStore<'_> {
             ),
         }
         self.rebuild(entries)
+    }
+
+    fn replace_existing(
+        &self,
+        root: ObjectId,
+        key: &[u8],
+        value_oid: ObjectId,
+        mode: gix::objs::tree::EntryMode,
+    ) -> Result<Option<ObjectId>, Error> {
+        let entries = self.read_tree(root)?;
+        let codec = self.config().key_codec.codec();
+        match node::node_kind(&entries) {
+            NodeKind::Leaf => {
+                let decoded = node::decode_entry_keys(&entries, &codec)?;
+                let Ok(index) =
+                    decoded.binary_search_by(|(entry_key, _, _)| entry_key.as_slice().cmp(key))
+                else {
+                    return Ok(None);
+                };
+                let mut replacement = decoded
+                    .iter()
+                    .map(|(entry_key, oid, entry_mode)| Entry {
+                        key: entry_key.clone(),
+                        value_oid: *oid,
+                        mode: crate::store::mode_of_kind(*entry_mode),
+                    })
+                    .collect::<Vec<_>>();
+                let entry = replacement
+                    .get_mut(index)
+                    .ok_or_else(|| Error::Git("binary search index out of range".into()))?;
+                if entry.value_oid == value_oid && entry.mode == mode {
+                    return Ok(Some(root));
+                }
+                entry.value_oid = value_oid;
+                entry.mode = mode;
+                if !same_boundaries(
+                    &self.config().chunker(),
+                    &decoded
+                        .iter()
+                        .map(|(entry_key, oid, _)| {
+                            chunk::leaf_fingerprint(
+                                self.hash_kind(),
+                                &codec.encode(entry_key)?,
+                                oid,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?,
+                    &replacement
+                        .iter()
+                        .map(|entry| {
+                            let encoded = codec.encode(&entry.key)?;
+                            chunk::leaf_fingerprint(self.hash_kind(), &encoded, &entry.value_oid)
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?,
+                ) {
+                    return Ok(None);
+                }
+                Ok(Some(
+                    self.write_tree(&node::leaf_tree(&codec, &replacement)?)?,
+                ))
+            }
+            NodeKind::Internal => {
+                let children = node::decode_entry_keys(&entries, &codec)?;
+                let index = children
+                    .iter()
+                    .rposition(|(separator, _, _)| separator.as_slice() <= key);
+                let Some(index) = index else { return Ok(None) };
+                let (_, child, _) = children
+                    .get(index)
+                    .ok_or_else(|| Error::Git("child index out of range".into()))?;
+                let Some(replaced) = self.replace_existing(*child, key, value_oid, mode)? else {
+                    return Ok(None);
+                };
+                if replaced == *child {
+                    return Ok(Some(root));
+                }
+                let mut replacement = children
+                    .iter()
+                    .map(|(separator, child, _)| (separator.clone(), *child))
+                    .collect::<Vec<_>>();
+                let child = replacement
+                    .get_mut(index)
+                    .ok_or_else(|| Error::Git("child index out of range".into()))?;
+                child.1 = replaced;
+                let marker = self.internal_marker_oid()?;
+                Ok(Some(self.write_tree(&node::internal_tree(
+                    &codec,
+                    marker,
+                    &replacement,
+                )?)?))
+            }
+        }
     }
 
     /// Remove `key` from the tree rooted at `root`, returning the new root.
@@ -210,10 +307,9 @@ impl ProllyStore<'_> {
                     max: MAX_LEVELS,
                 });
             }
-            let children: Vec<ObjectId> = level.iter().map(|(_, oid)| *oid).collect();
-            let fingerprints: Vec<u64> = children
+            let fingerprints: Vec<u64> = level
                 .iter()
-                .map(|oid| chunk::child_fingerprint(hash_kind, oid))
+                .map(|(separator, _)| chunk::child_fingerprint(hash_kind, separator))
                 .collect();
             let mut next: Vec<(Vec<u8>, ObjectId)> = Vec::new();
             let marker = self.internal_marker_oid()?;

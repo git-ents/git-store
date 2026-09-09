@@ -19,7 +19,7 @@ use gix::objs::tree::{EntryKind, EntryMode};
 
 /// The marker entry's reserved name and content (see `src/node.rs`).
 const MARKER_NAME: &[u8] = b"!";
-const MARKER_CONTENT: &[u8] = b"git-prolly:1:internal\n";
+const MARKER_CONTENT: &[u8] = b"git-prolly:2:internal\n";
 
 /// One raw tree entry: mode, name, and target object id.
 type RawEntry = (EntryMode, Vec<u8>, ObjectId);

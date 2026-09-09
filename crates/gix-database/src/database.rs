@@ -353,10 +353,19 @@ impl<'repo> Database<'repo> {
             (false, false, Some(root)) => root,
             (false, false, None) => return Err(Error::TableNotFound(name)),
         };
-        let mut new_root = root;
-        for (key, value) in rows {
-            new_root = self.store.insert(Some(new_root), key.as_ref(), &value)?;
-        }
+        let entries = rows
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_vec(), value))
+            .collect::<Vec<_>>();
+        let new_root = if self.store.is_empty_root(root) {
+            self.store.build(entries)?
+        } else {
+            let mut root = root;
+            for (key, value) in entries {
+                root = self.store.insert(Some(root), &key, &value)?;
+            }
+            root
+        };
         if new_root == root {
             return Ok(root);
         }
