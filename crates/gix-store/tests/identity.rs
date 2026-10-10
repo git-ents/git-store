@@ -81,8 +81,8 @@ fn identical_canonical_typed_content_deduplicates() {
         identity::canonical_document_id(first_id).object_id(),
         first_id
     );
-    assert!(first_objects.get(&first_id).is_some());
-    assert!(second_objects.get(&second_id).is_some());
+    assert!(first_objects.get(&first_id).unwrap().is_some());
+    assert!(second_objects.get(&second_id).unwrap().is_some());
 }
 
 #[test]

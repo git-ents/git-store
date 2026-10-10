@@ -12,16 +12,16 @@ path = "src/main.rs"
 gix-database = { path = "../gix-database" }
 git-prolly = { path = "../git-prolly" }
 gix-store = { path = "../gix-store" }
-facet = { version = "0.50.0-rc.0", features = ["reflect"] }
-facet-git-tree = { features = ["value"], git = "https://github.com/git-ents/facet-git-tree.git", version = "0.1.0" }
-facet-value = "0.50.0-rc.5"
-facet-json = "0.50.0-rc.5"
+facet = { version = "0.50.0-rc.7", features = ["reflect"] }
+facet-git-tree = { version = "0.1.0-alpha.1", features = ["value"] }
+facet-value = "0.50.0-rc.7"
+facet-json = "0.50.0-rc.7"
 gix = { version = "0.85.0", default-features = false, features = ["sha1", "zlib-rs", "interrupt", "revision"] }
 clap = { version = "4", features = ["derive"] }
 dialoguer = { version = "0.12", default-features = false }
 anyhow = "1"
 
 [dev-dependencies]
-facet = { version = "0.50.0-rc.0", features = ["reflect"] }
+facet = { version = "0.50.0-rc.7", features = ["reflect"] }
 tempfile = "3"
 test-support = { path = "../test-support" }

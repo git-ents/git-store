@@ -5,7 +5,7 @@ edition = "2024"
 readme = "README.adoc"
 
 [dependencies]
-facet-value = "0.50.0-rc.5"
+facet-value = "0.50.0-rc.7"
 git-prolly = { path = "../git-prolly" }
 gix = { version = "0.85.0", default-features = false, features = [
     "sha1",
@@ -17,6 +17,6 @@ gix-refstore = { path = "../gix-refstore" }
 thiserror = "2"
 
 [dev-dependencies]
-facet-value = "0.50.0-rc.5"
+facet-value = "0.50.0-rc.7"
 tempfile = "3"
 test-support = { path = "../test-support" }

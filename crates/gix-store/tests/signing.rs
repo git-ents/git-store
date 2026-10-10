@@ -129,7 +129,11 @@ fn the_signer_covers_the_unsigned_commit_bytes() {
     let unsigned = gix::objs::CommitRef::from_bytes(&covered, gix::hash::Kind::Sha1).unwrap();
     assert!(unsigned.extra_headers.is_empty());
 
-    let written = store.objects().get(&commit).expect("the commit");
+    let written = store
+        .objects()
+        .get(&commit)
+        .expect("object lookup")
+        .expect("the commit");
     let gix::objs::Object::Commit(written) = written else {
         panic!("not a commit");
     };

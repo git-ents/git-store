@@ -4,7 +4,7 @@ use std::{marker::PhantomData, rc::Rc};
 
 use facet::Facet;
 use facet_git_tree::{
-    Derivation, Hints, ObjectId, Schema, SchemaPinError, check_universe_at,
+    Derivation, Hints, ObjectId, Schema, SchemaPinError, check_universe,
     deserialize_value_with_schema, identity_subtrees, migration::derive::derive, schema_of,
 };
 use facet_value::Value;
@@ -19,7 +19,7 @@ use crate::encoding::{Encoding, Typed};
 use crate::error::Error;
 use crate::identity::{EntityId, canonical_document_id};
 use crate::index;
-use crate::migrate::TargetSchema;
+use crate::migrate::{TargetSchema, read_schema_document};
 use crate::store::{Publication, PublishOptions, Store};
 use crate::tombstone::{self, DeleteResult, EntityState, Tombstone, TombstoneEntry};
 
@@ -1175,12 +1175,10 @@ where
     /// schema is in hand and nothing has been published yet.
     fn check_identity_subtrees(&self, doc: &Schema) -> Result<(), Error> {
         for (subtree, node) in identity_subtrees(doc) {
-            check_universe_at(node, &doc.defs, subtree).map_err(|source| {
-                Error::IdentityUniverse {
-                    kind: self.kind.clone(),
-                    subtree: subtree.to_owned(),
-                    source,
-                }
+            check_universe(node, &doc.defs).map_err(|source| Error::IdentityUniverse {
+                kind: self.kind.clone(),
+                subtree: subtree.to_owned(),
+                source,
             })?;
         }
         Ok(())
@@ -1196,7 +1194,7 @@ where
         {
             Some(tip) => {
                 let tree = self.store.commit_tree(tip)?;
-                Ok(Some(Schema::read_pinned(&tree, self.store.objects())?))
+                Ok(Some(read_schema_document(&tree, self.store.objects())?))
             }
             None => Ok(None),
         }

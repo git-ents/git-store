@@ -5,7 +5,7 @@
 
 use facet_git_tree::{Edge, Migration, ObjectId, Schema, apply_chain};
 use facet_value::Value;
-use gix::objs::{Find, Write};
+use gix::objs::{Data, Find, Kind, Tree, TreeRef, Write, WriteTo};
 use gix_refstore::RefStore;
 
 use crate::error::Error;
@@ -80,6 +80,63 @@ where
 
 /// One step of a chain: the document values on this side conform to, and the
 /// migration off it.
+pub(crate) fn read_schema_document<F: Find + ?Sized>(
+    tree: &ObjectId,
+    store: &F,
+) -> Result<Schema, Error> {
+    let filtered = WithoutMigration { tree, store };
+    Ok(Schema::read_pinned(tree, &filtered)?)
+}
+
+struct WithoutMigration<'a, F: ?Sized> {
+    tree: &'a ObjectId,
+    store: &'a F,
+}
+
+impl<F: Find + ?Sized> Find for WithoutMigration<'_, F> {
+    fn try_find<'a>(
+        &self,
+        id: &gix::hash::oid,
+        buffer: &'a mut Vec<u8>,
+    ) -> Result<Option<Data<'a>>, gix::objs::find::Error> {
+        let Some((kind, object_hash, bytes)) = (|| {
+            let mut source = Vec::new();
+            self.store.try_find(id, &mut source).map(|object| {
+                object.map(|object| (object.kind, object.object_hash, object.data.to_vec()))
+            })
+        })()?
+        else {
+            return Ok(None);
+        };
+        let bytes = if id == self.tree.as_ref() && kind == Kind::Tree {
+            let entries = TreeRef::from_bytes(&bytes, object_hash)
+                .map_err(|error| Box::new(error) as gix::objs::find::Error)?
+                .entries
+                .into_iter()
+                .filter(|entry| entry.filename != ENTRY)
+                .map(|entry| gix::objs::tree::Entry {
+                    mode: entry.mode,
+                    filename: entry.filename.to_owned(),
+                    oid: ObjectId::from(entry.oid.to_owned()),
+                })
+                .collect();
+            let mut filtered = Vec::new();
+            Tree { entries }
+                .write_to(&mut filtered)
+                .map_err(|error| Box::new(error) as gix::objs::find::Error)?;
+            filtered
+        } else {
+            bytes
+        };
+        *buffer = bytes;
+        Ok(Some(Data {
+            kind,
+            object_hash,
+            data: buffer,
+        }))
+    }
+}
+
 struct Step {
     from: Schema,
     migration: Migration,
@@ -111,7 +168,7 @@ where
             kind: self.kind.clone(),
         })?;
         let tree = self.store.commit_tree(tip)?;
-        let schema = Schema::read_pinned(&tree, self.store.objects())?;
+        let schema = read_schema_document(&tree, self.store.objects())?;
         Ok(TargetSchema::new(schema, history))
     }
 
@@ -152,8 +209,8 @@ where
                 kind: self.kind.clone(),
             })?;
         let target_tree = self.store.commit_tree(tip)?;
-        let stored_target = self.store.schema(target_tree)?;
-        if stored_target.as_ref() != target.schema() || target.schema().kind != self.kind.as_str() {
+        let stored_target = read_schema_document(&target_tree, self.store.objects())?;
+        if stored_target != *target.schema() || target.schema().kind != self.kind.as_str() {
             return Err(Error::TargetSchemaMismatch {
                 kind: self.kind.clone(),
                 commit: tip,
@@ -172,7 +229,7 @@ where
             let (newer, older) = (pair[0], pair[1]);
             let older_tree = self.store.commit_tree(older)?;
             steps.push(Step {
-                from: Schema::read_pinned(&older_tree, self.store.objects())?,
+                from: read_schema_document(&older_tree, self.store.objects())?,
                 migration: self.migration_at(newer)?.ok_or(Error::MigrationMissing {
                     kind: self.kind.clone(),
                     commit: newer,

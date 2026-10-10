@@ -70,7 +70,7 @@ fn stored_bytes_match_git_exactly() {
 
     assert_eq!(id, oid(GOLDEN_TWO_PARENTS));
 
-    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap() else {
+    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap() else {
         panic!("canonical write did not produce a commit");
     };
     assert_eq!(read_back.tree, commit.tree());
@@ -143,7 +143,7 @@ fn zero_parents_write_a_root_commit() {
         "seal\n",
     );
     let id = store.write_canonical(commit).unwrap();
-    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap() else {
+    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap() else {
         panic!("canonical write did not produce a commit");
     };
     assert!(read_back.parents.is_empty());
@@ -162,7 +162,7 @@ fn negative_time_offsets_frame_like_git() {
         "offset\n",
     );
     let id = store.write_canonical(commit).unwrap();
-    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap() else {
+    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap() else {
         panic!("canonical write did not produce a commit");
     };
     assert_eq!(read_back.author.time.offset, -18000);

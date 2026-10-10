@@ -82,7 +82,7 @@ fn explicit_parent_appends_above_legacy_tip_while_creating_absent_alias() {
         .unwrap();
 
     let legacy_commit = kind.put(&path("legacy"), &value!({ "n": 1 })).unwrap();
-    let legacy_tree = match store.objects().get(&legacy_commit).unwrap() {
+    let legacy_tree = match store.objects().get(&legacy_commit).unwrap().unwrap() {
         GitObject::Commit(commit) => commit.tree,
         other => panic!("expected legacy commit, got {other:?}"),
     };
@@ -103,7 +103,7 @@ fn explicit_parent_appends_above_legacy_tip_while_creating_absent_alias() {
         )
         .unwrap();
 
-    let commit = match store.objects().get(&publication.commit()).unwrap() {
+    let commit = match store.objects().get(&publication.commit()).unwrap().unwrap() {
         GitObject::Commit(commit) => commit,
         other => panic!("expected publication commit, got {other:?}"),
     };

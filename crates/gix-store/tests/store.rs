@@ -46,7 +46,10 @@ fn rewrite_tree(
     tree: ObjectId,
     mut f: impl FnMut(&mut Vec<TreeEntry>),
 ) -> ObjectId {
-    let mut entries = objects.get_tree(&tree).expect("tree present");
+    let mut entries = objects
+        .get_tree(&tree)
+        .expect("tree lookup")
+        .expect("tree present");
     f(&mut entries);
     gix::objs::Write::write(objects, &gix::objs::Tree { entries }).expect("write tree")
 }
@@ -447,7 +450,7 @@ fn old_versions_stay_readable_after_schema_evolves() {
         v1
     );
 
-    let document_tree = match store.objects().get(&old_commit).unwrap() {
+    let document_tree = match store.objects().get(&old_commit).unwrap().unwrap() {
         GitObject::Commit(commit) => commit.tree,
         other => panic!("expected a commit, got {other:?}"),
     };
@@ -522,7 +525,7 @@ fn read_and_read_as_cover_every_address_including_entity_id() {
         EntityState::Present(entry) => entry.commit,
         other => panic!("expected the freshly published entity to be present, got {other:?}"),
     };
-    let document_tree = match store.objects().get(&commit).unwrap() {
+    let document_tree = match store.objects().get(&commit).unwrap().unwrap() {
         GitObject::Commit(commit) => commit.tree,
         other => panic!("expected a commit, got {other:?}"),
     };
@@ -723,7 +726,8 @@ fn new_schema_and_data_commits_have_no_schema_or_provenance_trailers() {
         .unwrap();
 
     for commit in [schema_commit, data_commit] {
-        let gix::objs::Object::Commit(commit) = store.objects().get(&commit).unwrap() else {
+        let gix::objs::Object::Commit(commit) = store.objects().get(&commit).unwrap().unwrap()
+        else {
             panic!("not a commit");
         };
         assert!(
@@ -748,7 +752,7 @@ fn legacy_schema_and_provenance_trailers_are_ignored() {
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let value = value!({ "n": 1 });
     let original = kind.put(&entity("original"), &value).unwrap();
-    let gix::objs::Object::Commit(commit) = store.objects().get(&original).unwrap() else {
+    let gix::objs::Object::Commit(commit) = store.objects().get(&original).unwrap().unwrap() else {
         panic!("not a commit");
     };
 
@@ -865,12 +869,13 @@ fn retrieve_at_reports_a_subtree_object_that_is_not_present() {
 
     // The schema entry names a tree that was never written to this store.
     let absent = ObjectId::from_hex(b"0123456789012345678901234567890123456789").unwrap();
-    let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap() else {
+    let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap().unwrap() else {
         panic!("expected a commit");
     };
     let value_tree = store
         .objects()
         .get_tree(&commit_obj.tree)
+        .unwrap()
         .unwrap()
         .into_iter()
         .find(|e| e.filename == "value")
@@ -923,7 +928,9 @@ fn store_anonymous_binds_the_schema_by_subtree() {
         .unwrap();
     let schema_ref = RefName::new("refs/schema/counter").unwrap();
     let schema_commit = store.refs().read(&schema_ref).unwrap().unwrap();
-    let GitObject::Commit(schema_commit_obj) = store.objects().get(&schema_commit).unwrap() else {
+    let GitObject::Commit(schema_commit_obj) =
+        store.objects().get(&schema_commit).unwrap().unwrap()
+    else {
         panic!("expected a commit");
     };
     let schema_tree = schema_commit_obj.tree;
@@ -936,10 +943,10 @@ fn store_anonymous_binds_the_schema_by_subtree() {
         .unwrap();
 
     // Bound to the very same schema tree object, not a copy of it.
-    let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap() else {
+    let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap().unwrap() else {
         panic!("expected a commit");
     };
-    let root = store.objects().get_tree(&commit_obj.tree).unwrap();
+    let root = store.objects().get_tree(&commit_obj.tree).unwrap().unwrap();
     let bound_schema = root.iter().find(|e| e.filename == "schema").unwrap().oid;
     assert_eq!(
         bound_schema, schema_tree,
@@ -1447,7 +1454,7 @@ fn put_message_sets_the_commit_summary_without_schema_trailer() {
         .at(&entity("c"))
         .unwrap();
 
-    let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap() else {
+    let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap().unwrap() else {
         panic!("expected a commit");
     };
     let message = String::from_utf8_lossy(&commit_obj.message).into_owned();
@@ -1797,7 +1804,9 @@ fn delete_retries_over_a_concurrent_update_and_keeps_the_winner_in_history() {
         .unwrap()
         .commit;
 
-    let gix::objs::Object::Commit(original_object) = store.objects().get(&original).unwrap() else {
+    let gix::objs::Object::Commit(original_object) =
+        store.objects().get(&original).unwrap().unwrap()
+    else {
         panic!("expected a commit");
     };
     let signature = store.refs().signature().unwrap();
@@ -2198,11 +2207,11 @@ fn an_unrecognized_pin_in_a_data_commits_schema_subtree_is_refused_on_retrieve()
 
     let reference = store.dynamic(seg("recipe")).reference(&entity("carbonara"));
     let tip = store.refs().read(&reference).unwrap().unwrap();
-    let GitObject::Commit(tip_obj) = store.objects().get(&tip).unwrap() else {
+    let GitObject::Commit(tip_obj) = store.objects().get(&tip).unwrap().unwrap() else {
         panic!("expected a commit");
     };
     let root = tip_obj.tree;
-    let root_entries = store.objects().get_tree(&root).unwrap();
+    let root_entries = store.objects().get_tree(&root).unwrap().unwrap();
     let schema_tree = root_entries
         .iter()
         .find(|e| e.filename == "schema")
@@ -2378,7 +2387,7 @@ fn a_foreign_schema_tree_has_no_chain() {
 
 /// The tree of the commit `id` names.
 fn commit_tree(store: &Store<MemoryRefStore, ObjectStore>, id: ObjectId) -> ObjectId {
-    let GitObject::Commit(commit) = store.objects().get(&id).unwrap() else {
+    let GitObject::Commit(commit) = store.objects().get(&id).unwrap().unwrap() else {
         panic!("expected a commit");
     };
     commit.tree
@@ -2450,7 +2459,11 @@ fn transaction_stale_expectation_leaves_every_staged_ref_untouched() {
 /// Rewrite a current-format object graph with the historical no-newline
 /// blob spelling, reproducing pre-newline leaf framing in memory.
 fn strip_leaf_newlines(store: &ObjectStore, oid: ObjectId) -> ObjectId {
-    match store.get(&oid).expect("fixture object") {
+    match store
+        .get(&oid)
+        .expect("fixture lookup")
+        .expect("fixture object")
+    {
         GitObject::Blob(blob) => {
             let bytes = blob.data.strip_suffix(b"\n").unwrap_or(&blob.data);
             store
