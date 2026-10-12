@@ -4,10 +4,8 @@ use std::{marker::PhantomData, rc::Rc};
 
 use facet::Facet;
 use facet_git_tree::{
-    Derivation, Hints, ObjectId, Schema, SchemaPinError, check_universe,
-    deserialize_value_with_schema, identity_subtrees, migration::derive::derive, schema_of,
+    ObjectId, Schema, SchemaPinError, check_universe, identity_subtrees, schema_of,
 };
-use facet_value::Value;
 use gix::objs::{Find, Write};
 use gix_refstore::{
     ApplyError, Committer, RefEdit, RefName, RefPath, RefPrefix, RefSegment, RefStore,
@@ -19,7 +17,6 @@ use crate::encoding::{Encoding, Typed};
 use crate::error::Error;
 use crate::identity::{EntityId, canonical_document_id};
 use crate::index;
-use crate::migrate::{TargetSchema, read_schema_document};
 use crate::store::{Publication, PublishOptions, Store};
 use crate::tombstone::{self, DeleteResult, EntityState, Tombstone, TombstoneEntry};
 
@@ -182,22 +179,6 @@ where
         }
     }
 
-    /// [`read`](Self::read), upcast to an explicitly selected `target`
-    /// schema and history.
-    ///
-    /// The migration axis is available for every address [`read`](Self::read)
-    /// accepts, including [`At::Entity`] — closing the gap where entity-id
-    /// addressing had no migration support. The target is used only after
-    /// the value's embedded schema has decoded, and a tombstone is returned
-    /// as [`EntityState::Deleted`] without consulting `target` at all.
-    pub fn read_as(
-        &self,
-        at: impl Into<At>,
-        target: &TargetSchema,
-    ) -> Result<EntityState<Value>, Error> {
-        self.read_dynamic(at, target)
-    }
-
     fn resolve_named(&self, name: &RefPath) -> Result<Option<ObjectId>, Error> {
         self.store
             .refs()
@@ -245,73 +226,6 @@ where
             commit,
             message,
         }))
-    }
-
-    fn read_commit_migrated(
-        &self,
-        commit: ObjectId,
-        target: &TargetSchema,
-    ) -> Result<EntityState<Value>, Error> {
-        let (value_tree, schema_tree, doc, message) = self.read_bound(commit)?;
-        self.migrated_state(value_tree, schema_tree, doc, commit, message, target)
-    }
-
-    fn read_tree_migrated(
-        &self,
-        tree: ObjectId,
-        target: &TargetSchema,
-    ) -> Result<EntityState<Value>, Error> {
-        let (value_tree, schema_tree) = self.store.split(tree, tree)?;
-        let doc = self.store.schema(schema_tree)?;
-        self.migrated_state(value_tree, schema_tree, doc, tree, String::new(), target)
-    }
-
-    fn migrated_state(
-        &self,
-        value_tree: ObjectId,
-        schema_tree: ObjectId,
-        doc: Rc<Schema>,
-        commit: ObjectId,
-        message: String,
-        target: &TargetSchema,
-    ) -> Result<EntityState<Value>, Error> {
-        if let Some(tombstone) = tombstone::read(self.store, &value_tree, &doc)? {
-            self.ensure_kind(&tombstone.kind)?;
-            return Ok(EntityState::Deleted(TombstoneEntry {
-                tombstone,
-                commit,
-                message,
-            }));
-        }
-        self.ensure_document_kind(&doc)?;
-        let value = deserialize_value_with_schema(&value_tree, &doc, self.store.objects())?;
-        let schema = self.schema();
-        let value = schema.upcast_to(&value, &schema_tree, target)?;
-        Ok(EntityState::Present(Entry {
-            value,
-            commit,
-            message,
-        }))
-    }
-
-    /// The address dispatch behind [`read_as`](Self::read_as).
-    fn read_dynamic(
-        &self,
-        at: impl Into<At>,
-        target: &TargetSchema,
-    ) -> Result<EntityState<Value>, Error> {
-        match at.into() {
-            At::Name(name) => match self.resolve_named(&name)? {
-                Some(commit) => self.read_commit_migrated(commit, target),
-                None => Ok(EntityState::Absent),
-            },
-            At::Entity(id) => match self.resolve_entity(id)? {
-                Some(commit) => self.read_commit_migrated(commit, target),
-                None => Ok(EntityState::Absent),
-            },
-            At::Commit(commit) => self.read_commit_migrated(commit, target),
-            At::Tree(tree) => self.read_tree_migrated(tree, target),
-        }
     }
 
     /// Decode a `{value/, schema/}` tree directly — the read-side mirror of
@@ -649,9 +563,7 @@ where
             }
         }
 
-        // Republishing identical content is a no-op, which keeps migration
-        // and repeated writes idempotent. Otherwise the ref advances like a
-        // branch, so every previous publication stays reachable.
+        // Republishing identical content is a no-op; otherwise history advances.
         let (commit, edit) = match current {
             Some(commit) if self.store.commit_tree(commit)? == tree => (commit, None),
             Some(expected) => {
@@ -1108,19 +1020,17 @@ where
         &self.reference
     }
 
-    /// Publish (or evolve) the schema, committing it forward over the current
-    /// tip.
+    /// Publish the schema, committing it forward over the current tip.
     pub fn put(&self, doc: &Schema) -> Result<ObjectId, Error>
     where
         R: Committer,
         O: Write,
     {
-        self.write(doc, &Hints::new())
+        self.write(doc)
     }
 
-    /// [`put`](Self::put) with authoring hints, which are what let a
-    /// remove-plus-add pair be recognised as the rename it actually is.
-    pub fn write(&self, doc: &Schema, hints: &Hints) -> Result<ObjectId, Error>
+    /// Write the pinned schema document and publish it over the current tip.
+    pub fn write(&self, doc: &Schema) -> Result<ObjectId, Error>
     where
         R: Committer,
         O: Write,
@@ -1133,35 +1043,15 @@ where
         let message = format!("schema {}\n", self.kind);
         self.store
             .commit_forward(&self.reference, &message, |parent| {
-                let previous = match parent {
-                    Some(tip) => {
-                        let tree = self.store.commit_tree(tip)?;
-                        // A tip pinned to a schema-schema this binary does not
-                        // recognize is refused: publishing over it would silently
-                        // replace a document whose meaning was never established
-                        // here. A tip that is unpinned or otherwise unreadable stays
-                        // overwritable — republishing is the migration path those
-                        // errors name.
-                        if let Err(err @ SchemaPinError::Unrecognized { .. }) =
-                            Schema::read_pin(&tree, self.store.objects())
-                        {
-                            return Err(err.into());
-                        }
-                        Schema::read_pinned(&tree, self.store.objects()).ok()
+                if let Some(tip) = parent {
+                    let tree = self.store.commit_tree(tip)?;
+                    if let Err(error @ SchemaPinError::Unrecognized { .. }) =
+                        Schema::read_pin(&tree, self.store.objects())
+                    {
+                        return Err(error.into());
                     }
-                    None => None,
-                };
-                let mut tree = doc.write_pinned(self.store.objects())?;
-                // An edge this build can derive completely is recorded; a partial one
-                // is not, and the gap surfaces at read time as MigrationMissing
-                // naming the commit, rather than as a silently lossy upcast here.
-                if let Some(previous) = previous
-                    && let Derivation::Complete(migration) = derive(&previous, &doc, hints)
-                {
-                    let written = migration.write_pinned(self.store.objects())?;
-                    tree = self.store.bind_migration(tree, written)?;
                 }
-                Ok(tree)
+                Ok(doc.write_pinned(self.store.objects())?)
             })
     }
 
@@ -1194,7 +1084,7 @@ where
         {
             Some(tip) => {
                 let tree = self.store.commit_tree(tip)?;
-                Ok(Some(read_schema_document(&tree, self.store.objects())?))
+                Ok(Some(Schema::read_pinned(&tree, self.store.objects())?))
             }
             None => Ok(None),
         }

@@ -8,10 +8,8 @@ use crate::identity::EntityId;
 /// Where to read an entity from.
 ///
 /// This is the address axis of a read, independent of the result shape
-/// ([`EntityState`](crate::EntityState) and its projections) and the
-/// migration axis ([`crate::Kind::read`] versus [`crate::Kind::read_as`]).
-/// Every combination of the three is reachable through one pair of methods
-/// instead of a differently-named method per cell.
+/// ([`EntityState`](crate::EntityState) and its projections). A single
+/// [`Kind::read`](crate::Kind::read) method accepts every address variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum At {
     /// A caller-chosen alias under the data prefix.

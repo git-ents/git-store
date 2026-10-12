@@ -1078,7 +1078,7 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
     let refs_before_reads = refs_snapshot(path);
 
     // This is the composable shell/jq-like sequence: each command consumes an
-    // object id emitted by the previous command, and no migration command is
+    // object id emitted by the previous command.
     // involved.
     let (encoded, err, ok) = run(
         path,
@@ -1356,143 +1356,8 @@ fn porcelain_commands_honor_the_output_format() {
     assert_eq!(json_string_field(&out, "status"), "deleted");
 }
 
-/// A `Recipe` with one field renamed, to migrate toward.
-#[derive(Facet)]
-struct Dish {
-    title: String,
-    servings: u32,
-    steps: Vec<String>,
-}
-
-/// The whole point of the plumbing: drive a schema migration from outside,
-/// without a `migrate` subcommand and without the CLI transforming anything.
-///
-/// This is the loop an external caller (a script, or an LLM asked to rename a
-/// field) actually runs, so it exercises the three things that loop needs and
-/// nothing else can supply: `ls --stale` for the worklist, `entity resolve`
-/// for a compare-and-swap token that costs no ref-path construction, and
-/// `document publish --batch` to land the result atomically.
-#[test]
-fn the_plumbing_drives_an_external_schema_migration() {
-    let dir = tempfile::tempdir().unwrap();
-    init_repo(dir.path());
-    let path = dir.path();
-
-    let v1 = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
-    let (_, err, ok) = run(path, Some(&v1), &["schema", "put", "recipe"]);
-    assert!(ok, "schema put failed: {err}");
-    for name in ["carbonara", "cacio"] {
-        let (_, err, ok) = run(
-            path,
-            None,
-            &[
-                "put",
-                "recipe",
-                name,
-                r#"{"title":"x","serves":4,"steps":["boil"]}"#,
-            ],
-        );
-        assert!(ok, "put {name} failed: {err}");
-    }
-
-    // Nothing is stale while every entity is bound to the published schema.
-    let (stale, err, ok) = run(
-        path,
-        None,
-        &["--format", "ndjson", "ls", "recipe", "--stale"],
-    );
-    assert!(ok, "ls --stale failed: {err}");
-    assert!(stale.trim().is_empty(), "nothing should be stale: {stale}");
-
-    let v2 = facet_json::to_string(&schema_of::<Dish>().unwrap()).unwrap();
-    let (_, err, ok) = run(path, Some(&v2), &["schema", "put", "recipe"]);
-    assert!(ok, "schema evolve failed: {err}");
-    let (schema, err, ok) = run(
-        path,
-        None,
-        &["--format", "json", "schema", "show", "recipe"],
-    );
-    assert!(ok, "schema show failed: {err}");
-    let schema_tree = json_string_field(&schema, "schema_tree");
-
-    // Advancing the schema makes every existing entity stale, and that is the
-    // worklist — no ref path was spelled to obtain it.
-    let (stale, err, ok) = run(
-        path,
-        None,
-        &["--format", "ndjson", "ls", "recipe", "--stale"],
-    );
-    assert!(ok, "ls --stale failed: {err}");
-    let names: Vec<String> = stale
-        .lines()
-        .map(|line| json_string_field(line, "name"))
-        .collect();
-    assert_eq!(names, vec!["cacio", "carbonara"]);
-
-    let mut batch = String::new();
-    for name in &names {
-        let (encoded, err, ok) = run(
-            path,
-            Some(r#"{"title":"x","servings":4,"steps":["boil"]}"#),
-            &["value", "encode", "--schema", &schema_tree],
-        );
-        assert!(ok, "value encode failed: {err}");
-        let (bound, err, ok) = run(
-            path,
-            None,
-            &["document", "bind", encoded.trim(), "--schema", &schema_tree],
-        );
-        assert!(ok, "document bind failed: {err}");
-        let (resolved, err, ok) = run(
-            path,
-            None,
-            &["--format", "json", "entity", "resolve", "recipe", name],
-        );
-        assert!(ok, "entity resolve failed: {err}");
-        batch.push_str(&format!(
-            r#"{{"kind":"recipe","document_tree":"{}","expected":"{}","alias":"{name}"}}"#,
-            bound.trim(),
-            json_string_field(&resolved, "commit"),
-        ));
-        batch.push('\n');
-    }
-
-    let (published, err, ok) = run(
-        path,
-        Some(&batch),
-        &["--format", "json", "document", "publish", "--batch"],
-    );
-    assert!(ok, "batch publish failed: {err}");
-    assert_eq!(
-        published.lines().count(),
-        1,
-        "json is one record: {published}"
-    );
-
-    // The migration is complete, and the values read back under the new
-    // schema — the stored trees were never rewritten, only republished.
-    let (stale, err, ok) = run(
-        path,
-        None,
-        &["--format", "ndjson", "ls", "recipe", "--stale"],
-    );
-    assert!(ok, "ls --stale failed: {err}");
-    assert!(
-        stale.trim().is_empty(),
-        "migration left stale entities: {stale}"
-    );
-    let (value, err, ok) = run(
-        path,
-        None,
-        &["--format", "json", "get", "recipe", "carbonara"],
-    );
-    assert!(ok, "get failed: {err}");
-    assert!(value.contains("servings"), "not migrated: {value}");
-}
-
 /// A batch is one compare-and-swap: a single stale expectation anywhere in it
-/// leaves every ref it would have touched unchanged, so an interrupted or
-/// raced migration never leaves a half-migrated kind to reason about.
+/// leaves every ref it would have touched unchanged.
 #[test]
 fn a_batch_publish_lands_whole_or_not_at_all() {
     let dir = tempfile::tempdir().unwrap();
@@ -1701,7 +1566,6 @@ fn every_command_the_docs_show_exists() {
         "crates/gix-store/README.adoc",
         "docs/specification.adoc",
         "docs/design-alignment-plan.adoc",
-        "docs/migrate-existing-entities.sh",
     ];
 
     let dir = tempfile::tempdir().unwrap();

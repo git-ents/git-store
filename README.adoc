@@ -6,9 +6,7 @@
 Store self-contained structured documents in Git with versioned schemas and
 ordinary Git history. Every document carries the exact `{schema, value}` pair
 used to encode it, so older values remain readable after a schema evolves and
-ordinary reads do not depend on a current schema ref. The CLI is composable
-plumbing for manually scripted migrations; it does not contain a hard-coded
-migration workflow.
+ordinary reads do not depend on a current schema ref.
 
 == Install
 
@@ -129,15 +127,9 @@ schema publication/history ref, not the type definition of an existing
 document. `entity delete <kind> <entity-id>` publishes a typed tombstone and
 keeps the canonical ref; it does not hard-delete or prune the entity.
 
-Bash, Git, or another caller owns migration traversal, source/target selection,
-transforms, batching, retry/resume, and policy. The CLI provides no `migrate`
-subcommand and does not silently rewrite stored objects. It does supply the
-plumbing such a caller needs: `ls <kind> --stale` is the worklist of entities
-not bound to the kind's current schema tree, `get` and `entity resolve` return
-the compare-and-swap token alongside the value so no caller constructs a ref
-path, and `document publish --batch` lands a rewritten set as one
-all-or-nothing compare-and-swap. See the migration recipe in
-link:crates/git-store/README.adoc#script-boundary[`crates/git-store/README.adoc`].
+Schema-bound values can be encoded, bound, and published as separate steps
+when callers need explicit control over document construction or atomic
+compare-and-swap batches.
 
 == Compatibility limitations
 
@@ -146,12 +138,8 @@ this build recognizes. Historical schema objects from before the embedded kind
 field cannot be made self-describing by inferring a name from a ref; they are
 not automatically upgraded. They require an explicit compatibility conversion
 or republishing under the current schema format before new self-contained data
-can be written against them. Likewise, base reads do not guess a migration
-source or target: `read_as` is an explicit opt-in operation taking a
-`TargetSchema` the caller selects, which `KindSchema::current_target` builds
-from the selected `Kind`'s current published schema and history. If the source schema is not in that history, or a migration
-edge is missing, the operation fails rather than silently guessing or rewriting
-the stored object.
+can be written against them. Reads always use the schema embedded in each
+document; publication history is available for inspection, not value conversion.
 
 == Crates
 

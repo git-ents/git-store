@@ -85,13 +85,6 @@ const AFTER_HELP: &str = "\
 The pipeline: value encode → document bind → document publish
 `put` is shorthand for exactly that composition.
 
-Migrating a kind to a new schema is that pipeline in a loop. There is no
-`migrate` command: nothing here transforms a value, the caller does.
-  ls <kind> --stale             what is not on the current schema yet
-  get <kind> <name>             the value, and the commit to expect on it
-  entity resolve <kind> <name>  that commit again, without a ref path
-  document publish --batch      land the rewritten set atomically
-
 Exit codes: 1 error · 2 invalid args or shape · 3 not found · 4 CAS conflict · 5 schema/value/document failure";
 
 #[derive(Parser)]
@@ -277,17 +270,8 @@ enum Command {
     /// Validate the repository's supported object format and schema bootstrap.
     Doctor,
     /// List kinds, or the entity names within a kind.
-    ///
-    /// With `--stale`, list only those entities whose bound schema tree is
-    /// not the kind's current one — the worklist a schema migration has left
-    /// to do, and the question a resumed migration asks first.
     #[command(visible_alias = "ls")]
-    List {
-        kind: Option<String>,
-        /// Only entities not bound to the kind's current schema tree.
-        #[arg(long, requires = "kind")]
-        stale: bool,
-    },
+    List { kind: Option<String> },
     /// Show an entity's version history, newest first.
     Log { kind: String, name: String },
     /// Delete an entity.
@@ -573,11 +557,8 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
         Command::Get { kind, name } => get(&repo, &store, &kind, &name, output)?,
         Command::Check { tree_ish, schema } => check(&repo, &store, &tree_ish, &schema, output)?,
         Command::Doctor => doctor(&repo, &store, output)?,
-        Command::List {
-            kind: Some(kind),
-            stale,
-        } => list_entities(&repo, &store, &kind, stale, output)?,
-        Command::List { kind: None, .. } => list_kinds(&store, output)?,
+        Command::List { kind: Some(kind) } => list_entities(&store, &kind, output)?,
+        Command::List { kind: None } => list_kinds(&store, output)?,
         Command::Log { kind, name } => log(&repo, &store, &kind, &name, output)?,
         Command::Rm { kind, name } => rm(&store, &kind, &name, output)?,
         Command::Schema { command } => match command {
@@ -698,12 +679,6 @@ fn exit_class_of(error: &anyhow::Error) -> ExitClass {
             || cause
                 .downcast_ref::<facet_git_tree::SchemaPinError>()
                 .is_some()
-            || cause
-                .downcast_ref::<facet_git_tree::MigrationError>()
-                .is_some()
-            || cause
-                .downcast_ref::<facet_git_tree::MigrationPinError>()
-                .is_some()
         {
             class = class.prefer(ExitClass::Schema);
         }
@@ -742,14 +717,7 @@ fn store_error_exit_class(error: &gix_store::Error) -> ExitClass {
         | gix_store::Error::Schema(_)
         | gix_store::Error::SchemaWrite(_)
         | gix_store::Error::SchemaRead(_)
-        | gix_store::Error::SchemaPin(_)
-        | gix_store::Error::MigrationPin(_)
-        | gix_store::Error::Migration(_)
-        | gix_store::Error::SchemaNotInHistory { .. }
-        | gix_store::Error::TargetHistoryEmpty { .. }
-        | gix_store::Error::TargetSchemaMismatch { .. }
-        | gix_store::Error::TargetSchemaNotInHistory { .. }
-        | gix_store::Error::MigrationMissing { .. } => ExitClass::Schema,
+        | gix_store::Error::SchemaPin(_) => ExitClass::Schema,
         gix_store::Error::ReservedTrailer { .. }
         | gix_store::Error::NameTaken { .. }
         | gix_store::Error::EntityIdCollision { .. }
@@ -1292,11 +1260,9 @@ fn document_publish(
 /// all-or-nothing compare-and-swap.
 ///
 /// [`gix_store::Transaction`] checks every staged expectation before writing
-/// anything, so a migration over many entities either lands whole or leaves
-/// the store exactly as it was — no half-migrated kind to reason about on the
-/// next run. Records are read as NDJSON so a caller can generate them a line
-/// at a time; a malformed line names its own line number and nothing is
-/// published.
+/// anything, so the batch either lands whole or leaves the store unchanged.
+/// Records are read as NDJSON so a caller can generate them a line at a time;
+/// a malformed line names its own line number and nothing is published.
 fn document_publish_batch(
     repo: &gix::Repository,
     store: &RepoStore<'_>,
@@ -2054,39 +2020,13 @@ fn list_kinds(store: &RepoStore<'_>, format: OutputFormat) -> Result<()> {
     emit_list(format, "kinds", items)
 }
 
-/// `list`/`ls <kind>`: the live entity names published under `kind`, each
-/// with the publication commit that names it — so enumerating a kind and
-/// collecting its compare-and-swap tokens is one invocation, not one per
-/// entity over a hand-built ref path.
-///
-/// `--stale` narrows the list to entities whose bound schema tree is not the
-/// kind's current one. Documents carry their own schema, so a kind mid-
-/// migration is a legitimate mixed state; this is how a caller asks what is
-/// left of it.
-fn list_entities(
-    repo: &gix::Repository,
-    store: &RepoStore<'_>,
-    kind: &str,
-    stale: bool,
-    format: OutputFormat,
-) -> Result<()> {
+/// `list`/`ls <kind>` lists live entity names and their publication commits.
+fn list_entities(store: &RepoStore<'_>, kind: &str, format: OutputFormat) -> Result<()> {
     let handle = store.dynamic(segment("kind", kind)?);
-    // `list_entries` includes tombstoned names; `list` is the live set. Read
-    // both rather than filtering by hand, so "live" keeps one definition.
     let live: BTreeSet<RefPath> = handle.list()?.into_iter().collect();
-    let current = if stale {
-        Some(handle.schema().current_snapshot()?.schema_tree())
-    } else {
-        None
-    };
     let mut items = Vec::new();
     for (name, commit) in handle.list_entries()? {
         if !live.contains(&name) {
-            continue;
-        }
-        if let Some(current) = current
-            && bound_schema_tree(repo, store, commit)? == Some(current)
-        {
             continue;
         }
         let mut fields = VObject::new();
@@ -2098,23 +2038,6 @@ fn list_entities(
         });
     }
     emit_list(format, "entities", items)
-}
-
-/// The schema tree a publication commit's document is bound to, or `None`
-/// when its tree is not a bound `{schema/, value/}` document — a legacy
-/// unbound root is never "current", so `--stale` keeps it.
-fn bound_schema_tree(
-    repo: &gix::Repository,
-    store: &RepoStore<'_>,
-    commit: ObjectId,
-) -> Result<Option<SchemaTree>> {
-    let tree = resolve_tree(repo, &commit.to_string())?;
-    match store.inspect_document(DocumentTree::from(tree))? {
-        DocumentInspection::Bound(prepared) => Ok(Some(prepared.schema_tree())),
-        DocumentInspection::LegacyValueRoot { .. } | DocumentInspection::Malformed { .. } => {
-            Ok(None)
-        }
-    }
 }
 
 /// `log <kind> <name>`: `name`'s publication history, newest first.

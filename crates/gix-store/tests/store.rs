@@ -10,8 +10,7 @@ use std::convert::Infallible;
 
 use facet::Facet;
 use facet_git_tree::{
-    Constant, DeserializeError, GitObject, Hints, Node, ObjectStore, SchemaPinError, StructField,
-    Target, TreeEntry, schema_of,
+    DeserializeError, GitObject, ObjectStore, SchemaPinError, TreeEntry, schema_of,
 };
 use facet_value::value;
 use gix::bstr::ByteSlice;
@@ -21,7 +20,7 @@ use gix_store::{
     ApplyError, At, Committer, Compat, DeleteResult, DocumentInspection, DocumentKind,
     DocumentShapeError, DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore,
     ObjectId, RefName, RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree,
-    TargetSchema, ValueTree, entity_id_name, entity_name, entity_name_under,
+    ValueTree, entity_id_name, entity_name, entity_name_under,
 };
 
 fn seg(s: &str) -> RefSegment {
@@ -458,65 +457,7 @@ fn old_versions_stay_readable_after_schema_evolves() {
 }
 
 #[test]
-fn explicit_target_migration_uses_captured_schema_history() {
-    let store = store();
-    let kind = store.dynamic(seg("counter"));
-    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
-    let old = kind.put(&entity("old"), &value!({ "n": 1 })).unwrap();
-
-    let mut evolved = schema_of::<Counter>().unwrap();
-    let Node::Struct(fields) = evolved.defs.get_mut("Counter").unwrap() else {
-        panic!("Counter schema should have a struct definition");
-    };
-    fields.insert(
-        "label".into(),
-        StructField {
-            node: Node::String,
-            has_default: true,
-        },
-    );
-    let hints = Hints::new().defaulted(
-        Target::Def("Counter".into()),
-        "label",
-        Constant::Text("migrated".into()),
-    );
-    kind.schema().write(&evolved, &hints).unwrap();
-
-    let target = TargetSchema::new(
-        kind.schema().get().unwrap().unwrap(),
-        kind.schema().history().unwrap(),
-    );
-    assert_eq!(
-        kind.read_as(old, &target).unwrap().value(),
-        Some(value!({ "n": 1, "label": "migrated" }))
-    );
-
-    // The explicit target is self-contained. The live schema ref may disappear
-    // after a caller has captured the target and its history.
-    let schema_ref = RefName::new("refs/schema/counter").unwrap();
-    let schema_tip = store.refs().read(&schema_ref).unwrap().unwrap();
-    store
-        .refs()
-        .apply(RefEdit::Delete {
-            name: schema_ref,
-            expected: schema_tip,
-        })
-        .unwrap();
-    assert_eq!(
-        kind.read_as(old, &target).unwrap().value(),
-        Some(value!({ "n": 1, "label": "migrated" }))
-    );
-
-    let unavailable = TargetSchema::new(target.schema().clone(), vec![target.history()[0]]);
-    let err = kind.read_as(old, &unavailable).unwrap_err();
-    assert!(
-        matches!(err, Error::TargetSchemaNotInHistory { .. }),
-        "expected an explicit target-history error, got {err:?}"
-    );
-}
-
-#[test]
-fn read_and_read_as_cover_every_address_including_entity_id() {
+fn read_addresses_include_entity_id() {
     let store = store();
     let kind = store.dynamic(seg("counter"));
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
@@ -531,76 +472,19 @@ fn read_and_read_as_cover_every_address_including_entity_id() {
     };
     let name = entity("alias");
     kind.put_with_alias(&name, &value!({ "n": 1 })).unwrap();
+    let expected = Some(value!({ "n": 1 }));
 
-    let value = value!({ "n": 1 });
-    // Every address axis reaches the same document: a caller-chosen alias,
-    // the content-derived entity id, the publication commit, and the bare
-    // document tree addressed without any ref.
-    assert_eq!(
-        kind.read(At::Name(name.clone())).unwrap().value(),
-        Some(value.clone())
-    );
-    assert_eq!(
-        kind.read(At::Entity(id)).unwrap().value(),
-        Some(value.clone())
-    );
-    assert_eq!(
-        kind.read(At::Commit(commit)).unwrap().value(),
-        Some(value.clone())
-    );
+    assert_eq!(kind.read(At::Name(name)).unwrap().value(), expected);
+    assert_eq!(kind.read(At::Entity(id)).unwrap().value(), expected);
+    assert_eq!(kind.read(At::Commit(commit)).unwrap().value(), expected);
     assert_eq!(
         kind.read(At::Tree(document_tree)).unwrap().value(),
-        Some(value.clone())
-    );
-
-    let mut evolved = schema_of::<Counter>().unwrap();
-    let Node::Struct(fields) = evolved.defs.get_mut("Counter").unwrap() else {
-        panic!("Counter schema should have a struct definition");
-    };
-    fields.insert(
-        "label".into(),
-        StructField {
-            node: Node::String,
-            has_default: true,
-        },
-    );
-    let hints = Hints::new().defaulted(
-        Target::Def("Counter".into()),
-        "label",
-        Constant::Text("migrated".into()),
-    );
-    kind.schema().write(&evolved, &hints).unwrap();
-    let target = TargetSchema::new(
-        kind.schema().get().unwrap().unwrap(),
-        kind.schema().history().unwrap(),
-    );
-    let migrated = value!({ "n": 1, "label": "migrated" });
-
-    // The migration axis is available for every address `read` accepts,
-    // including `At::Entity` — previously there was no migration-aware read
-    // addressed by `EntityId` at all.
-    assert_eq!(
-        kind.read_as(At::Name(name), &target).unwrap().value(),
-        Some(migrated.clone())
-    );
-    assert_eq!(
-        kind.read_as(At::Entity(id), &target).unwrap().value(),
-        Some(migrated.clone())
-    );
-    assert_eq!(
-        kind.read_as(At::Commit(commit), &target).unwrap().value(),
-        Some(migrated.clone())
-    );
-    assert_eq!(
-        kind.read_as(At::Tree(document_tree), &target)
-            .unwrap()
-            .value(),
-        Some(migrated)
+        expected
     );
 }
 
 #[test]
-fn tombstone_migrated_read_bypasses_an_unavailable_target() {
+fn tombstone_reads_without_the_schema_publication_ref() {
     let store = store();
     let kind = store.dynamic(seg("counter"));
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
@@ -610,7 +494,6 @@ fn tombstone_migrated_read_bypasses_an_unavailable_target() {
         other => panic!("expected tombstone, got {other:?}"),
     };
 
-    let target = TargetSchema::new(schema_of::<Counter>().unwrap(), Vec::new());
     let schema_ref = RefName::new("refs/schema/counter").unwrap();
     let schema_tip = store.refs().read(&schema_ref).unwrap().unwrap();
     store
@@ -622,7 +505,7 @@ fn tombstone_migrated_read_bypasses_an_unavailable_target() {
         .unwrap();
 
     assert!(matches!(
-        kind.read_as(tombstone, &target).unwrap(),
+        kind.read(entity_id_name(id)).unwrap(),
         EntityState::Deleted(entry) if entry.commit == tombstone
     ));
 }
@@ -1250,9 +1133,6 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
         vec![(entity_id_name(id), tombstone_commit)]
     );
 
-    // The migrated reader classifies the embedded tombstone before looking
-    // for schema history, so deleting the schema ref does not affect it.
-    let target = kind.schema().current_target().unwrap();
     let schema_ref = RefName::new("refs/schema/counter").unwrap();
     let schema_tip = store.refs().read(&schema_ref).unwrap().unwrap();
     store
@@ -1263,7 +1143,7 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
         })
         .unwrap();
     assert!(matches!(
-        kind.read_as(entity_id_name(id), &target).unwrap(),
+        kind.read(entity_id_name(id)).unwrap(),
         EntityState::Deleted(_)
     ));
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
@@ -2090,52 +1970,8 @@ fn an_unknown_variant_with_a_recognized_pin_fails_as_a_reflection_error() {
     );
 }
 
-/// Publishing over a schema tip pinned to a schema-schema this binary does
-/// not recognize is refused. Declining to *read* such a schema while
-/// overwriting it anyway would make the same unkeepable claim from the other
-/// direction.
-#[test]
-fn put_schema_refuses_to_publish_over_a_tip_with_an_unrecognized_pin() {
-    let store = store();
-
-    let doc = schema_of::<Counter>().unwrap();
-    let good_tree = doc.write_pinned(store.objects()).unwrap();
-    let bogus_pin = write_blob(store.objects(), b"not a schema-schema\n");
-    let ahead = rewrite_tree(store.objects(), good_tree, |entries| {
-        for entry in entries.iter_mut() {
-            if entry.filename == "schema" {
-                entry.oid = bogus_pin;
-            }
-        }
-    });
-    commit_ref(
-        &store,
-        "refs/schema/counter",
-        "schema counter\n",
-        ahead,
-        None,
-    );
-
-    let err = store
-        .dynamic(seg("counter"))
-        .schema()
-        .put(&doc)
-        .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::SchemaPin(SchemaPinError::Unrecognized { tree, pinned })
-                if tree == ahead && pinned == bogus_pin
-        ),
-        "expected publishing over an unrecognized-pin tip to be refused, got {err:?}"
-    );
-}
-
-/// The counterpart to the test above, and the reason publishing checks the
-/// tip's pin rather than merely that it *has* one: a tip that predates
-/// pinning — or is otherwise unpinned — stays overwritable. Republishing is
-/// the remedy [`SchemaPinError::Unpinned`] names, so refusing here would
-/// strand every pre-pinning repository with no way to migrate.
+/// An unpinned schema tip stays overwritable so callers can republish it
+/// using the current pinned schema format.
 #[test]
 fn put_schema_still_republishes_over_an_unpinned_tip() {
     let store = store();
@@ -2262,137 +2098,6 @@ fn an_unrecognized_pin_in_a_data_commits_schema_subtree_is_refused_on_retrieve()
 
 /// Two generations of one type. Derivation pairs definitions by name, so the
 /// type keeps its name across the edge exactly as a real evolution would.
-mod v1 {
-    use facet::Facet;
-    #[derive(Facet)]
-    pub struct Thing {
-        pub name: String,
-    }
-}
-mod v2 {
-    use facet::Facet;
-    #[derive(Facet)]
-    pub struct Thing {
-        pub name: String,
-        pub rank: u32,
-    }
-}
-
-/// `rank` is new on the target side, so the edge derives only with a default
-/// to fill it: without the hint the added field has no image.
-fn rank_defaulted() -> Hints {
-    Hints::new().defaulted(Target::Def("Thing".into()), "rank", Constant::Integer(0))
-}
-
-/// A schema advance records the derived migration in the advancing commit's
-/// own tree, and a value written under the predecessor upcasts through it.
-#[test]
-fn an_old_value_upcasts_to_the_current_schema() {
-    let store = store();
-    let thing = || store.dynamic(seg("thing"));
-
-    thing()
-        .schema()
-        .put(&schema_of::<v1::Thing>().unwrap())
-        .unwrap();
-    thing()
-        .put(&entity("a"), &value!({ "name": "old" }))
-        .unwrap();
-
-    let advance = thing()
-        .schema()
-        .write(&schema_of::<v2::Thing>().unwrap(), &rank_defaulted())
-        .unwrap();
-
-    // The migration travels in the schema commit's own tree.
-    assert!(
-        thing().schema().migration_at(advance).unwrap().is_some(),
-        "the advancing commit must record its migration"
-    );
-
-    // Reading under the value's own bound schema is unchanged...
-    assert_eq!(
-        thing().read(entity("a")).unwrap().value(),
-        Some(value!({ "name": "old" }))
-    );
-    // ...and reading it as the current schema fills the added field.
-    assert_eq!(
-        thing()
-            .read_as(entity("a"), &thing().schema().current_target().unwrap())
-            .unwrap()
-            .value(),
-        Some(value!({ "name": "old", "rank": 0 }))
-    );
-}
-
-/// Upcasting never rewrites: the stored value keeps its object id, so every
-/// attestation bound to that id survives the schema advance.
-#[test]
-fn upcasting_leaves_the_stored_value_untouched() {
-    let store = store();
-    let thing = || store.dynamic(seg("thing"));
-
-    thing()
-        .schema()
-        .put(&schema_of::<v1::Thing>().unwrap())
-        .unwrap();
-    let commit = thing()
-        .put(&entity("a"), &value!({ "name": "old" }))
-        .unwrap();
-    let before = commit_tree(&store, commit);
-
-    thing()
-        .schema()
-        .write(&schema_of::<v2::Thing>().unwrap(), &rank_defaulted())
-        .unwrap();
-    thing()
-        .read_as(entity("a"), &thing().schema().current_target().unwrap())
-        .unwrap();
-
-    assert_eq!(
-        before,
-        commit_tree(&store, commit),
-        "upcasting must not rewrite the stored value"
-    );
-}
-
-/// A value whose bound schema was never published under this kind has no
-/// chain to the current schema, and says so.
-#[test]
-fn a_foreign_schema_tree_has_no_chain() {
-    let store = store();
-    store
-        .dynamic(seg("thing"))
-        .schema()
-        .put(&schema_of::<v1::Thing>().unwrap())
-        .unwrap();
-    let commit = store
-        .dynamic(seg("thing"))
-        .put(&entity("a"), &value!({ "name": "old" }))
-        .unwrap();
-
-    // Republish an unrelated shape as a *different* kind, then ask that kind
-    // to upcast a commit bound to the first kind's schema.
-    store
-        .dynamic(seg("other"))
-        .schema()
-        .put(&schema_of::<v2::Thing>().unwrap())
-        .unwrap();
-
-    let other = store.dynamic(seg("other"));
-    let target = other.schema().current_target().unwrap();
-    let err = other.read_as(commit, &target).unwrap_err();
-    assert!(matches!(err, Error::KindMismatch { .. }), "{err:?}");
-}
-
-/// The tree of the commit `id` names.
-fn commit_tree(store: &Store<MemoryRefStore, ObjectStore>, id: ObjectId) -> ObjectId {
-    let GitObject::Commit(commit) = store.objects().get(&id).unwrap().unwrap() else {
-        panic!("expected a commit");
-    };
-    commit.tree
-}
-
 #[test]
 fn transaction_publishes_two_entities_across_kinds_atomically() {
     let store = store();

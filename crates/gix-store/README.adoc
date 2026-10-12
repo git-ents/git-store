@@ -148,10 +148,9 @@ let store = Store::open(&repo);
 `Store::new(MemoryRefStore::new(), ObjectStore::default())` is the same store
 with no filesystem behind it, which is what most of this crate's own tests use.
 
-== CLI and migration boundaries
+== CLI and schema boundaries
 
-The CLI is a composable Git-plumbing boundary, not a migration engine. Its pure
-forms are `git store compile <kind> <value>` (compile and print a bound
+The CLI is a composable Git-plumbing boundary. Its pure forms are `git store compile <kind> <value>` (compile and print a bound
 document-tree OID) and `git store cat <tree-ish>` (decode that tree directly,
 needing no name and no schema ref). The explicit library operations behind the
 plumbing are `encode_value`/`decode_value`, `bind_document`,
@@ -164,10 +163,10 @@ are `git store value encode --schema <tree-ish>`,
 `git store value decode <value-tree> --schema <tree-ish>`, and
 `git store document bind <value-tree> --schema <tree-ish>`. The schema argument
 may name a schema tree, publication commit, or revision peeling to that tree;
-no kind lookup, schema-history guess, or commit trailer is consulted.
-`git store schema show <kind> --at <commit>` addresses a historical schema
-publication directly, reporting its publication commit and schema-tree OIDs. A base document read uses the schema embedded in that
-document and does not consult schema history.
+no kind lookup or commit trailer is consulted. `git store schema show <kind>
+--at <commit>` addresses a historical schema publication directly, reporting
+its publication commit and schema-tree OIDs. A document read uses the schema
+embedded in that document and does not consult schema history.
 
 The CLI also exposes `ref list`, `ref resolve`, `object inspect`, and
 `object tree`. Their machine-readable forms are `--format text|json|ndjson` or
@@ -182,16 +181,8 @@ uses a one-shot compare-and-swap. It publishes under `--alias <name>`,
 defaulting to the entity's content-derived name when none is given; the
 expectation applies to that ref, and the ref and materialized index are
 published in one batch. A stale expectation fails without retry; objects written before a lost
-CAS may remain unreachable. Bash, Git, or another caller owns traversal,
-transforms, batching, retry/resume, and policy. There is no hard-coded CLI
-`migrate` workflow, and these commands never silently rewrite a stored tree.
-
-`Kind::read_as` is the explicit library convenience for in-memory upcasting
-toward a caller-selected `TargetSchema`, which `KindSchema::current_target`
-builds from the kind's current published schema and history. It fails when the
-source schema or migration edge is unavailable and does not rewrite the stored
-tree.
-
+CAS may remain unreachable. These commands never silently rewrite a stored
+tree; the caller decides how and when to construct new documents.
 A schema document must carry the embedded kind name and a schema-schema pin
 recognized by this build. Old schema objects lacking the kind name cannot be
 made self-describing by guessing from `refs/schema/<publication>` and are not

@@ -155,8 +155,6 @@ three-way behavior first, including delete/modify and add/add cases.
 * Connect table schemas to the existing `gix-store` schema/document model.
 * Pin the schema used by each table snapshot so historical commits remain
   readable after schema evolution.
-* Add schema migration tooling as an explicit operation, not implicit decoding
-  behavior.
 * Add query support only after snapshot and merge semantics are stable.
 
 SQL is a later interface. The initial database API should remain useful for

@@ -1,8 +1,7 @@
 //! Store structured values in Git with versioned schemas.
 //!
-//! Values remain readable against the schema bound to each stored version, and
-//! schema migrations are applied when values are read without rewriting the
-//! stored objects. [`Store`] works with configurable ref and object backends;
+//! Values are read against the schema bound to each stored version.
+//! [`Store`] works with configurable ref and object backends;
 //! [`RepoStore`] provides the integration for a `gix::Repository`.
 //!
 //! [`tree`] documents the tree format used by this crate. [`Store::kind`]
@@ -23,7 +22,6 @@ mod error;
 mod identity;
 mod index;
 mod kind;
-mod migrate;
 
 mod store;
 mod tombstone;
@@ -43,7 +41,6 @@ pub use identity::{
 pub use kind::{
     Entry, Kind, KindSchema, NamedEntries, Put, entity_id_name, entity_name, entity_name_under,
 };
-pub use migrate::TargetSchema;
 
 pub use canonical::CanonicalCommit;
 pub use store::{Compat, Layout, Publication, PublishOptions, RepoStore, Store, decode};
@@ -72,8 +69,7 @@ where
     /// borrow the publication ref. This permits callers to retain a historical
     /// schema while the kind advances or its publication ref is removed.
     /// Subject to the store's [`Compat`](crate::Compat) setting: `Strict`
-    /// (the default) rejects pre-`kind` documents, `LegacyLeaves` accepts
-    /// them.
+    /// rejects pre-`kind` documents, `LegacyLeaves` accepts them.
     pub fn snapshot_at(&self, commit: ObjectId) -> Result<SchemaSnapshot, Error> {
         let schema_tree = self.store.commit_tree(commit)?;
         let schema = match self.store.compat() {

@@ -38,11 +38,7 @@ buildable and should add regression coverage before removing the old behavior.
 >   tree only.
 > - Old schema documents without an embedded kind name are not repaired by
 >   guessing from a ref and are not automatically upgraded. They need an
->   explicit conversion or republishing under the current format. Base reads do
->   not use migration history; `read_as` is an explicit opt-in taking a
->   `TargetSchema` the caller selects, which `KindSchema::current_target`
->   builds from the selected `Kind`'s current published schema and history. Missing source history or migration edges
->   fail rather than being guessed, and stored objects are not rewritten.
+>   explicit conversion or republishing under the current format.
 
 == Target invariants
 
@@ -65,8 +61,7 @@ The implementation is complete when all of these are true:
    authoritative identity.
 . Deletion has an explicit, documented representation that remains
    distinguishable from an absent/pruned ref.
-. Schema history and migration are explicit authoring/history operations, not
-   hidden dependencies of base reads.
+. Schema history is available for inspection, not a dependency of base reads.
 
 == Current baseline
 
@@ -79,10 +74,9 @@ APIs.
 The main remaining seams are:
 
 * `crates/gix-store/src/kind.rs`: kind lookup, put/remove behavior, commit
-  construction, schema publication, and migrated reads.
+  construction, and schema publication.
 * `crates/gix-store/src/store.rs`: kind/dynamic handles and provenance access.
 * `crates/gix-store/src/provenance.rs`: trailer parsing and public provenance.
-* `crates/gix-store/src/migrate.rs`: schema-history-dependent upcasting.
 * `crates/facet-git-tree/src/schema/mod.rs`: the schema document shape.
 * `crates/facet-git-tree/src/schema/pin.rs` and `schema/codec.rs`: current
   generation/bootstrap machinery.
@@ -193,31 +187,7 @@ requires zero provenance trailers.
 
 == Phase 3: separate type identity from ref namespace
 
-Introduce an explicit schema/document lookup model rather than making
-`Kind::new("recipe")` the source of truth for type selection.
 
-Suggested sequence:
-
-. Define a schema identity type based on the schema tree/content digest.
-. Make schema publication refs point to that identity/history, while storing
-   the kind name inside the schema document.
-. Add APIs that can decode a document from its embedded schema without a kind
-   handle or schema ref.
-. Retain named convenience APIs only as an optional index/compatibility layer,
-   and make their delegation to content-based lookup explicit.
-. Update migration APIs so they require an explicitly selected target schema
-   rather than silently treating the current `refs/schema/<kind>` value as
-   part of a base read.
-
-Use `kind.rs`, `store.rs`, `migrate.rs`, and `index.rs` as the primary change
-sites. Add tests for:
-
-* decoding from an entity commit with no kind/ref namespace supplied;
-* moving or renaming a publication ref without changing decode behavior;
-* two kinds with distinct embedded names/content not colliding in lookup;
-* base reads never invoking schema-history lookup;
-* migrated reads explicitly requiring the target schema/history and failing
-  clearly when it is unavailable.
 
 The old named API has been removed outright rather than deprecated: the CLI
 and workspace tests were the only callers, so no compatibility release was
@@ -242,7 +212,7 @@ Then:
   caller's name, and naming an entity by its derived ID is one available
   choice rather than a layout the store imposes;
 * define collision behavior and idempotent repeated writes;
-* migrate CLI syntax and documentation away from mandatory caller-controlled
+* move CLI syntax and documentation away from mandatory caller-controlled
   names;
 * preserve a compatibility read path for existing `refs/store/<kind>/<name>`
   refs during the transition, if required by the release policy.
@@ -271,28 +241,6 @@ Implement:
 Add tests for delete, fetch, mirror, prune/partial-fetch simulation, repeated
 delete, restore, and concurrent delete-vs-update races. Update the CLI and
 README to distinguish “not found” from “deleted”.
-
-== Phase 6: migration, compatibility, and documentation cleanup
-
-After the new primitives are in place:
-
-* make schema history an opt-in migration source, not a dependency of base
-  decoding;
-* define how old documents lacking the new kind-name field are handled;
-* define whether old named entity refs are rewritten, indexed as aliases, or
-  supported indefinitely;
-* define whether old `Schema:` trailers are retained only as ignored bytes;
-* update `README.adoc`, `crates/gix-store/README.adoc`, and relevant API docs to
-  remove claims that the kind ref defines the type or that trailers are useful
-  provenance;
-* update examples and CLI help;
-* add a compatibility section to the specification with versioning and
-  rollout expectations.
-
-Avoid rewriting historical Git objects. Prefer readers that understand both
-formats and writers that emit only the settled format. If an incompatible
-wire/schema change is unavoidable, gate it behind an explicit format version
-and provide a diagnostic rather than silently guessing.
 
 == Validation matrix
 
@@ -323,7 +271,7 @@ Also run the doctor check in a repository containing:
 . Phase 1 schema self-hosting/bootstrap and `doctor`.
 . Phase 2 trailer removal.
 . Phase 3 content-based schema/type lookup.
-. Phase 4 entity identity migration.
+. Phase 4 entity identity.
 . Phase 5 tombstones.
 . Phase 6 compatibility and documentation cleanup.
 

@@ -172,55 +172,6 @@ pub enum Error {
     /// A schema document is incompatible with the schema definition supported by this binary.
     #[error(transparent)]
     SchemaPin(#[from] facet_git_tree::SchemaPinError),
-    /// A migration document is incompatible with the migration definition supported by this binary.
-    #[error(transparent)]
-    MigrationPin(#[from] facet_git_tree::MigrationPinError),
-    /// Applying a migration to a value failed, with the offending path in the
-    /// message.
-    #[error(transparent)]
-    Migration(#[from] facet_git_tree::MigrationError),
-    /// A value is bound to a schema that is not part of the kind's published history.
-    #[error("schema tree {schema_tree} is not in the published history of kind {kind}")]
-    SchemaNotInHistory {
-        /// The kind whose history was searched.
-        kind: RefSegment,
-        /// The schema tree bound into the value's own commit.
-        schema_tree: ObjectId,
-    },
-    /// The selected target history contains no schema commits.
-    #[error("selected target schema history for kind {kind} is empty")]
-    TargetHistoryEmpty {
-        /// The kind whose target history was empty.
-        kind: RefSegment,
-    },
-    /// The selected target document does not match the selected history tip.
-    #[error(
-        "selected target schema for kind {kind} does not match schema commit {commit} (tree {schema_tree})"
-    )]
-    TargetSchemaMismatch {
-        /// The kind whose target was invalid.
-        kind: RefSegment,
-        /// The selected target schema commit.
-        commit: ObjectId,
-        /// The tree stored by the selected target commit.
-        schema_tree: ObjectId,
-    },
-    /// The source schema is not present in the explicitly selected target history.
-    #[error("schema tree {schema_tree} is not in the selected target history of kind {kind}")]
-    TargetSchemaNotInHistory {
-        /// The kind whose selected history was searched.
-        kind: RefSegment,
-        /// The schema tree bound into the value.
-        schema_tree: ObjectId,
-    },
-    /// A schema update has no migration from its predecessor, so older values cannot be updated.
-    #[error("schema commit {commit} of kind {kind} has no update from its predecessor")]
-    MigrationMissing {
-        /// The kind whose schema history holds the gap.
-        kind: RefSegment,
-        /// The schema commit lacking the update information.
-        commit: ObjectId,
-    },
     /// The configured [`Signer`](gix_refstore::Signer) could not produce
     /// signature bytes, so nothing was written.
     #[error("signing the commit failed")]

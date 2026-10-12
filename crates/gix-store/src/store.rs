@@ -127,9 +127,8 @@ impl Default for Layout {
 /// A content-addressed store layered over a [`RefStore`] and an object
 /// database.
 ///
-/// Stored values retain the schema version they were validated against. Reads
-/// use that bound schema, and schema migrations transform values at read time
-/// without rewriting existing Git objects.
+/// Stored values retain the schema against which they were validated. Reads
+/// use that bound schema without consulting publication history.
 pub struct Store<R, O> {
     refs: R,
     objects: O,
@@ -504,17 +503,6 @@ where
                     oid: entry.oid.to_owned(),
                 })
                 .collect())
-        })
-    }
-
-    /// One named entry of a tree, or `None` when the tree does not carry it.
-    pub(crate) fn find_entry(&self, tree: ObjectId, name: &str) -> Result<Option<ObjectId>, Error> {
-        self.with_tree(tree, |tree| {
-            Ok(tree
-                .entries
-                .iter()
-                .find(|entry| entry.filename == name)
-                .map(|entry| entry.oid.to_owned()))
         })
     }
 
