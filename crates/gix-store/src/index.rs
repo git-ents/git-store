@@ -233,8 +233,10 @@ fn decode_hex(bytes: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     bytes
-        .chunks_exact(2)
-        .map(|pair| Some(hex_digit(pair[0])? << 4 | hex_digit(pair[1])?))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[high, low]| Some(hex_digit(high)? << 4 | hex_digit(low)?))
         .collect()
 }
 

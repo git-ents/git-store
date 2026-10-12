@@ -120,11 +120,11 @@ impl KeyCodec for HexKeyCodec {
             });
         }
         let mut out = Vec::with_capacity(encoded.len() / 2);
-        for pair in encoded.chunks_exact(2) {
-            let high = hex_digit(pair.first().copied().unwrap_or_default())
-                .ok_or_else(|| KeyError::InvalidEncoding(encoded.to_vec()))?;
-            let low = hex_digit(pair.last().copied().unwrap_or_default())
-                .ok_or_else(|| KeyError::InvalidEncoding(encoded.to_vec()))?;
+        for &[high_raw, low_raw] in encoded.as_chunks::<2>().0 {
+            let high =
+                hex_digit(high_raw).ok_or_else(|| KeyError::InvalidEncoding(encoded.to_vec()))?;
+            let low =
+                hex_digit(low_raw).ok_or_else(|| KeyError::InvalidEncoding(encoded.to_vec()))?;
             out.push((high << 4) | low);
         }
         Ok(out)
