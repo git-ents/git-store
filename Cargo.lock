@@ -794,6 +794,9 @@ dependencies = [
 name = "git-database"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
+ "facet-json",
  "facet-value",
  "git-prolly",
  "gix",
@@ -829,7 +832,6 @@ dependencies = [
  "facet-json",
  "facet-value",
  "git-database",
- "git-prolly",
  "gix",
  "gix-refstore",
  "tempfile",

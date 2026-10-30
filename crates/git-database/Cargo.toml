@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2024"
 readme = "README.adoc"
 
+[features]
+default = ["cli"]
+cli = ["dep:anyhow", "dep:clap", "dep:facet-json"]
+
 [dependencies]
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+facet-json = { workspace = true, optional = true }
 facet-value = { workspace = true }
 git-prolly = { workspace = true }
 gix = { workspace = true, features = [

@@ -65,6 +65,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "cli")]
+pub mod cli;
+
 mod database;
 mod error;
 mod format;

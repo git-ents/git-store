@@ -3,6 +3,12 @@
 A versioned database experience on top of ordinary Git objects, refs, and
 commits, composed from `git-prolly` and `git-store`-style ref plumbing.
 
+The default `cli` feature adds the `cli` module: the Dolt-shaped `db` command
+surface, which the `git-store` binary exposes as `git store db`, together with
+the output-format and exit-code plumbing it shares with that binary. Library
+consumers that want neither can depend on the crate with `default-features =
+false`.
+
 A database *snapshot* is a canonical Git tree: one reserved metadata blob
 (`!database`, naming the format and the Prolly configuration) plus one tree
 entry per table, each pointing at a Prolly root. A database *commit* is an

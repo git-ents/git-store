@@ -16,8 +16,7 @@ cli = [
     "dep:clap",
     "dep:dialoguer",
     "dep:facet-json",
-    "dep:git-database",
-    "dep:git-prolly",
+    "git-database/cli",
     "gix/interrupt",
     "gix/revision",
 ]
@@ -30,8 +29,7 @@ facet = { workspace = true }
 facet-git-tree = { workspace = true }
 facet-json = { workspace = true, optional = true }
 facet-value = { workspace = true }
-git-database = { workspace = true, optional = true }
-git-prolly = { workspace = true, optional = true }
+git-database = { workspace = true, default-features = false, optional = true }
 gix = { workspace = true, features = ["sha1", "zlib-rs"] }
 gix-refstore = { workspace = true }
 thiserror = { workspace = true }

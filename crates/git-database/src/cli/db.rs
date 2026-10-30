@@ -1,5 +1,5 @@
-//! `git store db`: the Dolt command surface over the [`git_database`]
-//! versioned database.
+//! `git store db`: the Dolt command surface over this crate's versioned
+//! database.
 //!
 //! The command names and shapes mirror Dolt's CLI — `init`, `status`, `ls`,
 //! `add`, `commit`, `table {create,rm,mv,import,export}`, `schema show`,
@@ -12,15 +12,15 @@
 use std::io::Read as _;
 use std::path::PathBuf;
 
+use crate::{ChangeKind, Database, TableStatus};
 use anyhow::Result;
 use clap::Subcommand;
 use facet_json::from_str;
 use facet_value::{VArray, VObject, Value};
-use git_database::{ChangeKind, Database, TableStatus};
 use gix::ObjectId;
 use gix::objs::{CommitRef, Find as _};
 
-use crate::{
+use super::{
     ExitClass, ListItem, OutputFormat, cli_error, emit_list, emit_single, oid_value, string_array,
 };
 
@@ -43,22 +43,20 @@ fn row_symbol(kind: ChangeKind) -> &'static str {
 }
 
 /// The stable failure class of a database error, for the process exit code.
-pub(crate) fn db_exit_class(error: &git_database::Error) -> ExitClass {
-    use git_database::Error as E;
+pub fn db_exit_class(error: &crate::Error) -> ExitClass {
+    use crate::Error as E;
     match error {
         E::TableNotFound(_) | E::BranchNotFound(_) | E::TagNotFound(_) | E::KeyNotFound(_) => {
             ExitClass::NotFound
         }
         // A lost compare-and-swap race is always retryable, whatever wrote.
-        E::Write(git_database::WriteStateError::Conflict(_))
-        | E::Merge(git_database::MergeError::Write(git_database::WriteStateError::Conflict(_)))
-        | E::Merge(git_database::MergeError::Conflicts { .. }) => ExitClass::Cas,
-        E::Merge(git_database::MergeError::BranchNotFound(_)) => ExitClass::NotFound,
+        E::Write(crate::WriteStateError::Conflict(_))
+        | E::Merge(crate::MergeError::Write(crate::WriteStateError::Conflict(_)))
+        | E::Merge(crate::MergeError::Conflicts { .. }) => ExitClass::Cas,
+        E::Merge(crate::MergeError::BranchNotFound(_)) => ExitClass::NotFound,
         // Merging onto an unborn head is a caller mistake, not a storage
         // failure: there is nothing to merge into.
-        E::Merge(git_database::MergeError::State(git_database::ReadStateError::NoDatabase)) => {
-            ExitClass::Invalid
-        }
+        E::Merge(crate::MergeError::State(crate::ReadStateError::NoDatabase)) => ExitClass::Invalid,
         E::Prolly(git_prolly::Error::KeyNotFound(_)) => ExitClass::NotFound,
         // Malformed keys are caller mistakes, not storage failures.
         E::Prolly(git_prolly::Error::Key(_)) | E::Prolly(git_prolly::Error::DuplicateKey(_)) => {
@@ -73,32 +71,30 @@ pub(crate) fn db_exit_class(error: &git_database::Error) -> ExitClass {
         | E::Checkout(_)
         | E::BranchName(_)
         | E::EmptyDatabase
-        | E::Commit(git_database::CommitError::Detached) => ExitClass::Invalid,
-        E::Snapshot(git_database::SnapshotError::ConfigMismatch { .. })
-        | E::State(git_database::ReadStateError::Snapshot(
-            git_database::SnapshotError::ConfigMismatch { .. },
-        )) => ExitClass::Schema,
+        | E::Commit(crate::CommitError::Detached) => ExitClass::Invalid,
+        E::Snapshot(crate::SnapshotError::ConfigMismatch { .. })
+        | E::State(crate::ReadStateError::Snapshot(crate::SnapshotError::ConfigMismatch {
+            ..
+        })) => ExitClass::Schema,
         E::Snapshot(
-            git_database::SnapshotError::MetadataMissing { .. }
-            | git_database::SnapshotError::UnknownFormat(_),
+            crate::SnapshotError::MetadataMissing { .. } | crate::SnapshotError::UnknownFormat(_),
         )
-        | E::State(git_database::ReadStateError::Snapshot(
-            git_database::SnapshotError::MetadataMissing { .. }
-            | git_database::SnapshotError::UnknownFormat(_),
+        | E::State(crate::ReadStateError::Snapshot(
+            crate::SnapshotError::MetadataMissing { .. } | crate::SnapshotError::UnknownFormat(_),
         )) => ExitClass::Invalid,
         _ => ExitClass::Other,
     }
 }
 
 /// Wrap a database error with its stable exit class.
-fn db_error<E: Into<git_database::Error>>(error: E) -> anyhow::Error {
-    let error: git_database::Error = error.into();
+fn db_error<E: Into<crate::Error>>(error: E) -> anyhow::Error {
+    let error: crate::Error = error.into();
     let class = db_exit_class(&error);
     cli_error(class, error.to_string())
 }
 
 #[derive(Subcommand)]
-pub(crate) enum DbCommand {
+pub enum DbCommand {
     /// Initialize an empty database, pointing `refs/db/HEAD` at an unborn
     /// `main`; idempotent.
     Init,
@@ -237,7 +233,7 @@ pub(crate) enum DbCommand {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum DbTableCommand {
+pub enum DbTableCommand {
     /// Create a table in the working snapshot.
     ///
     /// Tables are key/value for now: schemas are a later plan step, so no
@@ -276,7 +272,7 @@ pub(crate) enum DbTableCommand {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum DbSchemaCommand {
+pub enum DbSchemaCommand {
     /// Show what schema a table carries — every table is key/value until
     /// schemas land, and this reports the pinned tree configuration.
     Show {
@@ -286,7 +282,7 @@ pub(crate) enum DbSchemaCommand {
 }
 
 /// Dispatch one `db` subcommand.
-pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputFormat) -> Result<()> {
+pub fn run(repo: &gix::Repository, command: DbCommand, output: OutputFormat) -> Result<()> {
     let db = Database::open(repo);
     match command {
         DbCommand::Init => {
@@ -370,7 +366,7 @@ pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputForm
         DbCommand::Merge { branch } => {
             let commit = match db.merge(&branch) {
                 Ok(commit) => commit,
-                Err(git_database::MergeError::Conflicts { conflicts }) => {
+                Err(crate::MergeError::Conflicts { conflicts }) => {
                     // Machine consumers get the conflict list on stdout in
                     // the requested format, not just prose on stderr.
                     let items = conflicts
@@ -447,8 +443,8 @@ pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputForm
 
 fn db_fields_init() -> VObject {
     let mut fields = VObject::new();
-    fields.insert("head", git_database::HEAD_REF);
-    fields.insert("branch", git_database::DEFAULT_BRANCH);
+    fields.insert("head", crate::HEAD_REF);
+    fields.insert("branch", crate::DEFAULT_BRANCH);
     fields
 }
 
@@ -488,17 +484,15 @@ fn status(db: &Database, output: OutputFormat) -> Result<()> {
 /// The checked-out branch's short name, for headers.
 fn branch_name(db: &Database) -> Result<String> {
     match db.head().map_err(db_error)? {
-        git_database::Head::Branch { branch, .. } | git_database::Head::Unborn { branch } => {
-            Ok(branch
-                .as_str()
-                .strip_prefix(git_database::HEADS_PREFIX)
-                .and_then(|rest| rest.strip_prefix('/'))
-                .unwrap_or(branch.as_str())
-                .to_owned())
-        }
-        git_database::Head::Detached { commit } => Ok(format!("(detached at {commit})")),
-        git_database::Head::Missing => Err(db_error(git_database::Error::State(
-            git_database::ReadStateError::NoDatabase,
+        crate::Head::Branch { branch, .. } | crate::Head::Unborn { branch } => Ok(branch
+            .as_str()
+            .strip_prefix(crate::HEADS_PREFIX)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .unwrap_or(branch.as_str())
+            .to_owned()),
+        crate::Head::Detached { commit } => Ok(format!("(detached at {commit})")),
+        crate::Head::Missing => Err(db_error(crate::Error::State(
+            crate::ReadStateError::NoDatabase,
         ))),
     }
 }
@@ -678,11 +672,11 @@ fn read_source(file: Option<&PathBuf>) -> Result<String> {
 fn schema(db: &Database, command: DbSchemaCommand, output: OutputFormat) -> Result<()> {
     let DbSchemaCommand::Show { table } = command;
     let snapshot = db.working_state().map_err(db_error)?.snapshot;
-    let config = git_database::config_summary(snapshot.config());
+    let config = crate::config_summary(snapshot.config());
     if let Some(table) = table {
         let Some(root) = snapshot.table(&table) else {
-            return Err(db_error(git_database::Error::TableNotFound(
-                git_database::TableName::new(&table).map_err(db_error)?,
+            return Err(db_error(crate::Error::TableNotFound(
+                crate::TableName::new(&table).map_err(db_error)?,
             )));
         };
         let mut fields = VObject::new();
@@ -805,11 +799,11 @@ fn resolve_base(repo: &gix::Repository, db: &Database, spec: &str) -> Result<Obj
             .head()
             .map_err(db_error)?
             .commit()
-            .ok_or_else(|| db_error(git_database::Error::EmptyDatabase));
+            .ok_or_else(|| db_error(crate::Error::EmptyDatabase));
     }
     for candidate in [
-        format!("{}/{spec}", git_database::HEADS_PREFIX),
-        format!("{}/{spec}", git_database::TAGS_PREFIX),
+        format!("{}/{spec}", crate::HEADS_PREFIX),
+        format!("{}/{spec}", crate::TAGS_PREFIX),
         spec.to_owned(),
     ] {
         if let Ok(id) = repo.rev_parse_single(candidate.as_str()) {
@@ -953,14 +947,14 @@ fn branch(
 /// The checked-out branch's short name, failing when there is none.
 fn current_branch(db: &Database) -> Result<String> {
     match db.head().map_err(db_error)? {
-        git_database::Head::Branch { branch, .. } => Ok(strip_heads(branch.as_str()).to_owned()),
+        crate::Head::Branch { branch, .. } => Ok(strip_heads(branch.as_str()).to_owned()),
         _ => Err(cli_error(ExitClass::Invalid, "no current branch")),
     }
 }
 
 /// Strip the `refs/db/heads/` prefix from a full branch ref.
 fn strip_heads(name: &str) -> &str {
-    name.strip_prefix(git_database::HEADS_PREFIX)
+    name.strip_prefix(crate::HEADS_PREFIX)
         .and_then(|rest| rest.strip_prefix('/'))
         .unwrap_or(name)
 }
@@ -1001,7 +995,7 @@ fn checkout(
                     fields.insert("root", oid_value(root));
                     return emit_single(output, fields, || format!("restored {target} at {root}"));
                 }
-                Err(git_database::Error::TableNotFound(_)) => {
+                Err(crate::Error::TableNotFound(_)) => {
                     return Err(cli_error(
                         ExitClass::NotFound,
                         format!("{target:?} is neither a branch nor a table"),

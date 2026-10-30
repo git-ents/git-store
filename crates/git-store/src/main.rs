@@ -20,18 +20,20 @@
 //! entity ref under the selected data prefix is itself a valid `<tree-ish>`
 //! for `cat`/`check`.
 
-mod db;
 mod interactive;
 
 use std::collections::BTreeSet;
-use std::fmt;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
+use git_database::cli::{
+    ClassifiedContext, ExitClass, ListItem, OutputFormat, cli_context, cli_error, emit_fields,
+    emit_list, emit_record, emit_single, json_record, oid_value, string_array,
+};
 use git_store::{
     ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId, EntityState,
     Expectation, GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions, RefName,
@@ -118,100 +120,6 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum OutputFormat {
-    Text,
-    Json,
-    Ndjson,
-}
-
-impl OutputFormat {
-    fn from_cli(format: Option<Self>, json: bool) -> Self {
-        if json {
-            Self::Json
-        } else {
-            format.unwrap_or(Self::Text)
-        }
-    }
-
-    fn machine(self) -> bool {
-        !matches!(self, Self::Text)
-    }
-}
-
-/// The stable machine-facing class of a CLI failure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExitClass {
-    Cas,
-    NotFound,
-    Schema,
-    Invalid,
-    Other,
-}
-
-impl ExitClass {
-    fn rank(self) -> u8 {
-        match self {
-            Self::Cas => 4,
-            Self::NotFound => 3,
-            Self::Schema => 2,
-            Self::Invalid => 1,
-            Self::Other => 0,
-        }
-    }
-
-    fn code(self) -> i32 {
-        match self {
-            Self::Cas => 4,
-            Self::NotFound => 3,
-            Self::Schema => 5,
-            Self::Invalid => 2,
-            Self::Other => 1,
-        }
-    }
-
-    fn prefer(self, other: Self) -> Self {
-        if other.rank() > self.rank() {
-            other
-        } else {
-            self
-        }
-    }
-}
-
-/// A CLI-owned typed context: its display text is for people, while `class` is
-/// the independent machine-facing classification used for the process exit.
-#[derive(Debug)]
-struct ClassifiedContext {
-    class: ExitClass,
-    message: String,
-}
-
-impl ClassifiedContext {
-    fn new(class: ExitClass, message: impl Into<String>) -> Self {
-        Self {
-            class,
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for ClassifiedContext {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ClassifiedContext {}
-
-pub(crate) fn cli_error(class: ExitClass, message: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(ClassifiedContext::new(class, message))
-}
-
-fn cli_context(class: ExitClass, message: impl Into<String>) -> ClassifiedContext {
-    ClassifiedContext::new(class, message)
-}
-
 #[derive(Subcommand)]
 enum Command {
     /// Compile a value under a kind's schema; prints the document tree — a
@@ -284,7 +192,7 @@ enum Command {
     #[command(name = "db")]
     Db {
         #[command(subcommand)]
-        command: db::DbCommand,
+        command: git_database::cli::db::DbCommand,
     },
 }
 
@@ -616,7 +524,7 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
                 output,
             )?,
         },
-        Command::Db { command } => db::run(&repo, command, output)?,
+        Command::Db { command } => git_database::cli::db::run(&repo, command, output)?,
         Command::Entity { command } => match command {
             EntityCommand::Resolve { kind, name } => {
                 entity_resolve(&repo, &store, &kind, &name, output)?
@@ -709,109 +617,6 @@ fn deserialize_exit_class(error: &facet_git_tree::DeserializeError) -> ExitClass
         facet_git_tree::DeserializeError::NotATree(_)
         | facet_git_tree::DeserializeError::InvalidOrdinal(_) => ExitClass::Invalid,
         _ => ExitClass::Other,
-    }
-}
-
-pub(crate) fn json_record() -> VObject {
-    let mut record = VObject::new();
-    record.insert("status", "ok");
-    record.insert("code", "ok");
-    record
-}
-
-pub(crate) fn oid_value(oid: impl Into<ObjectId>) -> Value {
-    oid.into().to_string().into()
-}
-
-pub(crate) fn string_array<I>(items: I) -> Value
-where
-    I: IntoIterator,
-    I::Item: Into<String>,
-{
-    let mut array = VArray::new();
-    for item in items {
-        array.push(item.into());
-    }
-    array.into()
-}
-
-pub(crate) fn emit_record(format: OutputFormat, record: VObject) -> Result<()> {
-    debug_assert!(format.machine(), "emit_record is for json/ndjson only");
-    let value: Value = record.into();
-    println!(
-        "{}",
-        facet_json::to_string(&value).map_err(|e| anyhow::anyhow!("encoding JSON: {e}"))?
-    );
-    Ok(())
-}
-
-/// Print one command's result: `text()` under [`OutputFormat::Text`], or
-/// `fields` layered over the standard `status`/`code` envelope under `json`
-/// or `ndjson` — the two formats agree for a single-result command, and
-/// differ only for a list ([`emit_list`]). Every command routes its output
-/// through this or [`emit_list`], so no command can silently ignore the
-/// selected format.
-pub(crate) fn emit_single(
-    format: OutputFormat,
-    fields: VObject,
-    text: impl FnOnce() -> String,
-) -> Result<()> {
-    if format.machine() {
-        emit_fields(format, fields)
-    } else {
-        println!("{}", text());
-        Ok(())
-    }
-}
-
-/// [`emit_single`]'s machine-format half: the standard envelope with `fields`
-/// layered over it, for a command whose text rendering is empty (`check`) or
-/// handled separately by the caller.
-fn emit_fields(format: OutputFormat, fields: VObject) -> Result<()> {
-    let mut record = json_record();
-    record.extend(fields);
-    emit_record(format, record)
-}
-
-/// One row of a [`emit_list`] result: `fields` are the bare, unwrapped
-/// machine data for that row and `text` its one-line human rendering.
-pub(crate) struct ListItem {
-    pub(crate) fields: VObject,
-    pub(crate) text: String,
-}
-
-/// Print a list-shaped command's result. Text prints one line per item.
-/// `ndjson` prints one enveloped record per item. `json` prints one envelope
-/// whose `list_field` holds the array of bare item objects — the same shape
-/// [`ref_list`] and [`object_tree`] already used, generalized to every
-/// list-producing command.
-pub(crate) fn emit_list(
-    format: OutputFormat,
-    list_field: &str,
-    items: Vec<ListItem>,
-) -> Result<()> {
-    match format {
-        OutputFormat::Text => {
-            for item in items {
-                println!("{}", item.text);
-            }
-            Ok(())
-        }
-        OutputFormat::Ndjson => {
-            for item in items {
-                emit_fields(format, item.fields)?;
-            }
-            Ok(())
-        }
-        OutputFormat::Json => {
-            let mut values = VArray::new();
-            for item in items {
-                values.push(Value::from(item.fields));
-            }
-            let mut record = json_record();
-            record.insert(list_field, values);
-            emit_record(format, record)
-        }
     }
 }
 
