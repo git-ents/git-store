@@ -115,30 +115,6 @@ fn explicit_parent_appends_above_legacy_tip_while_creating_absent_alias() {
 }
 
 #[test]
-fn rejects_a_prepared_document_from_another_kind() {
-    let store = store();
-    let source = store.dynamic(seg("source"));
-    source
-        .schema()
-        .put(&facet_git_tree::schema_of::<Counter>().unwrap())
-        .unwrap();
-    let tree = source.compile(&value!({ "n": 4 })).unwrap();
-    let prepared = prepared(&store, tree);
-
-    let target = store.dynamic(seg("target"));
-    target
-        .schema()
-        .put(&facet_git_tree::schema_of::<Counter>().unwrap())
-        .unwrap();
-    assert!(
-        target
-            .publish_prepared(&prepared, options(None, Some(Expectation::Absent)))
-            .is_err()
-    );
-    assert!(target.list_entries().unwrap().is_empty());
-}
-
-#[test]
 fn stale_explicit_expectation_is_not_retried_or_published() {
     let store = store();
     let kind = store.dynamic(seg("counter"));

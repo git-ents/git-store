@@ -71,75 +71,6 @@ fn run_with_layout(
     run(dir, stdin, &full)
 }
 
-fn git_bytes(path: &Path, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
-    let mut command = Command::new("git");
-    command.current_dir(path).args(args);
-    command.stdin(if input.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    });
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    if let Some(input) = input {
-        child.stdin.take().unwrap().write_all(input).unwrap();
-    }
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
-}
-
-/// Remove the current schema's `kind` and pin entries and rewrite all leaf
-/// blobs without their current framing newline, producing a pre-kind fixture.
-fn legacy_schema_tree(path: &Path, tree: &str, root: bool) -> String {
-    let listing = git_bytes(path, &["ls-tree", tree], None);
-    let mut entries = Vec::new();
-    for line in String::from_utf8(listing).unwrap().lines() {
-        let (metadata, name) = line.split_once('\t').unwrap();
-        let mut fields = metadata.split_whitespace();
-        let mode = fields.next().unwrap();
-        let kind = fields.next().unwrap();
-        let oid = fields.next().unwrap();
-        if root && !matches!(name, "root" | "defs") {
-            continue;
-        }
-        let child = if kind == "blob" {
-            let bytes = git_bytes(path, &["cat-file", "blob", oid], None);
-            let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-            String::from_utf8(git_bytes(
-                path,
-                &["hash-object", "-w", "--stdin"],
-                Some(bytes),
-            ))
-            .unwrap()
-            .trim()
-            .to_owned()
-        } else if kind == "tree" {
-            legacy_schema_tree(path, oid, false)
-        } else {
-            panic!("unexpected schema entry kind {kind:?}");
-        };
-        entries.push(format!("{mode} {kind} {child}\t{name}\n"));
-    }
-    entries.sort();
-    String::from_utf8(git_bytes(
-        path,
-        &["mktree"],
-        Some(entries.concat().as_bytes()),
-    ))
-    .unwrap()
-    .trim()
-    .to_owned()
-}
-
 #[test]
 fn store_get_list_and_remove() {
     let dir = tempfile::tempdir().unwrap();
@@ -389,11 +320,9 @@ fn failures_have_typed_exit_codes() {
 }
 
 /// A hand-authored schema JSON document — exactly the shape every file under
-/// `crates/git-store/schemas/*.json` has — carries an explicit `kind` but no
-/// `version` key because there is no such field any more: the schema-schema pin
-/// is a storage-layer splice `schema put` adds on write, not something a caller
-/// declares. The publication kind is selected by the CLI/ref, and `schema show`
-/// prints the normalized document.
+/// `crates/git-store/schemas/*.json` has — is a plain `facet-git-tree` schema:
+/// no `version` key, since the publication kind is selected by the CLI/ref and
+/// `schema show` prints the normalized document.
 #[test]
 fn hand_authored_schema_json_publishes_with_no_version_key() {
     let dir = tempfile::tempdir().unwrap();
@@ -401,7 +330,6 @@ fn hand_authored_schema_json_publishes_with_no_version_key() {
     let path = dir.path();
 
     let book_schema = r#"{
-        "kind": "input-name-is-replaced",
         "root": { "Ref": "Book" },
         "defs": {
             "Book": {
@@ -428,126 +356,6 @@ fn hand_authored_schema_json_publishes_with_no_version_key() {
     let value = r#"{"title":"Dune","year":1965}"#;
     let (_, err, ok) = run(path, Some(value), &["put", "book", "dune"]);
     assert!(ok, "put against hand-authored schema failed: {err}");
-}
-
-#[test]
-fn schema_legacy_leaves_is_explicit_for_current_and_historical_reads() {
-    let dir = tempfile::tempdir().unwrap();
-    init_repo(dir.path());
-    let path = dir.path();
-
-    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
-    let (current_commit, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
-    assert!(ok, "schema put failed: {err}");
-    let current_commit = current_commit.trim();
-    let current_tree = String::from_utf8(git_bytes(
-        path,
-        &["rev-parse", "refs/schema/recipe^{tree}"],
-        None,
-    ))
-    .unwrap()
-    .trim()
-    .to_owned();
-    let legacy_tree = legacy_schema_tree(path, &current_tree, true);
-    let legacy_commit = String::from_utf8(git_bytes(
-        path,
-        &["commit-tree", &legacy_tree, "-m", "legacy schema"],
-        None,
-    ))
-    .unwrap()
-    .trim()
-    .to_owned();
-    let update = git_bytes(
-        path,
-        &[
-            "update-ref",
-            "refs/schema/recipe",
-            &legacy_commit,
-            current_commit,
-        ],
-        None,
-    );
-    assert!(
-        update.is_empty(),
-        "schema ref update unexpectedly wrote output"
-    );
-
-    let (_, err, ok) = run(path, None, &["schema", "show", "recipe"]);
-    assert!(
-        !ok,
-        "strict schema show unexpectedly accepted legacy schema: {err}"
-    );
-    assert!(
-        err.contains("no schema-schema pin") || err.contains("unpinned"),
-        "strict diagnostic: {err}"
-    );
-
-    let (out, err, ok) = run(
-        path,
-        None,
-        &[
-            "schema",
-            "show",
-            "recipe",
-            "--compat",
-            "legacy-leaves",
-            "--json",
-        ],
-    );
-    assert!(ok, "legacy schema show failed: {err}");
-    assert_eq!(json_string_field(&out, "kind"), "legacy-unknown");
-    assert!(out.contains("\"root\""), "schema: {out}");
-    assert!(out.contains("\"defs\""), "schema: {out}");
-
-    let (out, err, ok) = run(
-        path,
-        None,
-        &[
-            "schema",
-            "show",
-            "recipe",
-            "--at",
-            &legacy_commit,
-            "--compat",
-            "legacy-leaves",
-            "--json",
-        ],
-    );
-    assert!(ok, "historical legacy schema show failed: {err}");
-    assert!(out.contains("\"commit\""), "machine schema record: {out}");
-    assert!(out.contains(&legacy_commit), "machine schema record: {out}");
-    assert!(
-        out.contains("\"schema_tree\""),
-        "machine schema record: {out}"
-    );
-
-    let (_, err, ok) = run(
-        path,
-        None,
-        &["schema", "show", "recipe", "--at", &legacy_commit],
-    );
-    assert!(
-        !ok,
-        "strict schema show unexpectedly accepted legacy schema at a revision: {err}"
-    );
-
-    let (out, err, ok) = run(
-        path,
-        None,
-        &[
-            "schema",
-            "show",
-            "recipe",
-            "--at",
-            &legacy_commit,
-            "--compat",
-            "legacy-leaves",
-        ],
-    );
-    assert!(ok, "legacy schema show at a revision failed: {err}");
-    assert!(out.contains("kind: legacy-unknown"), "inspect: {out}");
-    assert!(out.contains("schema tree:"), "inspect: {out}");
-    assert!(out.contains("serves: uint"), "inspect: {out}");
 }
 
 /// The actual hand-authored files under `crates/git-store/schemas/*.json`
@@ -703,10 +511,7 @@ fn doctor_accepts_a_valid_repository_and_current_meta_schema() {
 
     let (out, err, ok) = run(dir.path(), None, &["doctor"]);
     assert!(ok, "doctor failed: {err}");
-    assert_eq!(
-        out.trim(),
-        "git-store doctor: ok (object format: sha1; schema fixed point: valid)"
-    );
+    assert_eq!(out.trim(), "git-store doctor: ok (object format: sha1)");
     assert!(err.is_empty(), "doctor stderr: {err}");
 }
 
@@ -1006,10 +811,7 @@ fn embedded_document_reads_without_schema_ref_and_ignores_legacy_trailers() {
 
     let (out, err, ok) = run(path, None, &["doctor"]);
     assert!(ok, "doctor without a schema ref failed: {err}");
-    assert_eq!(
-        out.trim(),
-        "git-store doctor: ok (object format: sha1; schema fixed point: valid)"
-    );
+    assert_eq!(out.trim(), "git-store doctor: ok (object format: sha1)");
 }
 
 /// `cat` decodes through any commit/ref whose tree has the compiled
@@ -1553,7 +1355,7 @@ fn every_command_the_docs_show_exists() {
     /// The commands that nest a subcommand under themselves.
     const GROUPS: [&str; 6] = ["value", "document", "entity", "object", "ref", "schema"];
     /// Global options that consume the token after them.
-    const VALUED: [&str; 4] = ["--format", "--data-prefix", "--schema-prefix", "--compat"];
+    const VALUED: [&str; 3] = ["--format", "--data-prefix", "--schema-prefix"];
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

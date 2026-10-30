@@ -16,9 +16,6 @@ use gix_refstore::{RefSegment, RefStore};
 
 use crate::{EntityId, Entry, Error, Store};
 
-/// The embedded schema kind used by tombstone documents.
-pub(crate) const SCHEMA_KIND: &str = "gix-store.tombstone.v1";
-
 /// The explicit deletion state carried by a tombstone value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 #[repr(u8)]
@@ -135,7 +132,7 @@ impl<V> EntityState<V> {
 }
 
 pub(crate) fn schema() -> Result<Schema, Error> {
-    Ok(schema_of::<Tombstone>()?.with_kind(SCHEMA_KIND)?)
+    Ok(schema_of::<Tombstone>()?)
 }
 
 pub(crate) fn write<R, O>(store: &Store<R, O>, tombstone: &Tombstone) -> Result<ObjectId, Error>
@@ -146,12 +143,16 @@ where
     let doc = schema()?;
     let value = serialize_into(tombstone, store.objects())?;
     validate_with_schema(&value, &doc, store.objects())?;
-    let schema = doc.write_pinned(store.objects())?;
+    let schema = serialize_into(&doc, store.objects())?;
     store.bind_schema(value, schema)
 }
 
 /// Return `None` for an ordinary document and decode a tombstone document
 /// before any kind schema-history lookup can occur.
+///
+/// A schema no longer carries an embedded kind, so a tombstone is recognized
+/// by its schema being exactly the canonical [`Tombstone`] schema this library
+/// compiles in. Any other schema names an ordinary value.
 pub(crate) fn read<R, O>(
     store: &Store<R, O>,
     value: &ObjectId,
@@ -161,12 +162,9 @@ where
     R: RefStore,
     O: Find,
 {
-    if doc.kind != SCHEMA_KIND {
-        return Ok(None);
-    }
     let expected = schema()?;
     if *doc != expected {
-        return Err(Error::TombstoneSchemaMismatch);
+        return Ok(None);
     }
     let tombstone: Tombstone = deserialize(value, store.objects())?;
     if tombstone.state != TombstoneState::Deleted

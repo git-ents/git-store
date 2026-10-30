@@ -107,7 +107,7 @@ fn changing_identity_bearing_content_changes_the_id() {
 fn a_marked_subtree_in_the_universe_registers() {
     let store = store();
     let doc = schema_of::<Binding>().unwrap();
-    let expected = doc.clone().with_kind("binding").unwrap();
+    let expected = doc.clone();
     store.dynamic(seg("binding")).schema().put(&doc).unwrap();
     assert_eq!(
         store.dynamic(seg("binding")).schema().get().unwrap(),
@@ -144,7 +144,7 @@ fn a_marked_subtree_outside_the_universe_is_refused() {
 fn an_unmarked_schema_is_unconstrained() {
     let store = store();
     let doc = schema_of::<ActionKey>().unwrap();
-    let expected = doc.clone().with_kind("params").unwrap();
+    let expected = doc.clone();
     store.dynamic(seg("params")).schema().put(&doc).unwrap();
     assert_eq!(
         store.dynamic(seg("params")).schema().get().unwrap(),

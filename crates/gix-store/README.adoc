@@ -49,10 +49,7 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
 * *Schemas are self-hosted and refs are separate.* A [`Schema`] is an
   ordinary `Facet` value stored through the same tree encoding as everything
   else. A schema publication such as `refs/schema/<publication>` is an index
-  and history/authoring mechanism; it is not the type definition. The schema
-  document carries its own kind name and pins the generation of the
-  schema-schema it was written against, so a document this binary does not
-  speak is refused rather than misread.
+  and history/authoring mechanism; it is not the type definition.
 * *Encoding is validation.* A value that does not conform to its selected
   schema fails with the offending path instead of writing a lossy tree.
 * *Documents are self-contained.* Every data commit's tree is exactly a
@@ -183,12 +180,7 @@ expectation applies to that ref, and the ref and materialized index are
 published in one batch. A stale expectation fails without retry; objects written before a lost
 CAS may remain unreachable. These commands never silently rewrite a stored
 tree; the caller decides how and when to construct new documents.
-A schema document must carry the embedded kind name and a schema-schema pin
-recognized by this build. Old schema objects lacking the kind name cannot be
-made self-describing by guessing from `refs/schema/<publication>` and are not
-automatically upgraded; republish or explicitly convert them before relying
-on the current self-contained contract. SHA-256 repositories are also outside
-this build's supported object format.
+SHA-256 repositories are outside this build's supported object format.
 
 == Scope
 

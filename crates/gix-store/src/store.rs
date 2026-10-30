@@ -4,7 +4,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use facet::Facet;
 use facet_git_tree::ObjectId;
-use facet_git_tree::{Schema, deserialize_value_with_schema_legacy_leaves};
+use facet_git_tree::{Schema, deserialize};
 use facet_value::Value;
 use gix::objs::{Find, Write, WriteTo};
 use gix_refstore::{
@@ -91,17 +91,6 @@ impl Publication {
     }
 }
 
-/// How strictly a [`Store`] decodes stored leaves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Compat {
-    /// Reject pre-`kind` documents and pre-newline leaves.
-    #[default]
-    Strict,
-    /// Accept legacy leaf framing: pre-`kind` schema documents and
-    /// pre-newline leaf blobs.
-    LegacyLeaves,
-}
-
 /// Where a store's refs live.
 pub struct Layout {
     /// Entities: `<data>/<kind>/<name>`. Default `refs/store`.
@@ -135,7 +124,6 @@ pub struct Store<R, O> {
     layout: Layout,
     signer: Option<Box<dyn ErasedSigner>>,
     schemas: RefCell<HashMap<ObjectId, Rc<Schema>>>,
-    compat: Compat,
 }
 
 /// The extra commit header a signed write's bytes land in.
@@ -184,7 +172,6 @@ where
             layout,
             signer: None,
             schemas: RefCell::new(HashMap::new()),
-            compat: Compat::default(),
         }
     }
 
@@ -195,17 +182,6 @@ where
     pub fn with_signer(mut self, signer: impl Signer + 'static) -> Self {
         self.signer = Some(Box::new(signer));
         self
-    }
-
-    /// Set how strictly this store's decode paths accept stored leaves.
-    pub fn with_compat(mut self, compat: Compat) -> Self {
-        self.compat = compat;
-        self
-    }
-
-    /// This store's current leaf-decoding compatibility setting.
-    pub(crate) fn compat(&self) -> Compat {
-        self.compat
     }
 
     /// Stage publications and deletions, across any number of kinds, to
@@ -248,7 +224,7 @@ where
             return Ok(Rc::clone(schema));
         }
 
-        let schema = Rc::new(Schema::read_pinned(&tree, self.objects())?);
+        let schema = Rc::new(deserialize::<Schema>(&tree, self.objects())?);
         self.schemas.borrow_mut().insert(tree, Rc::clone(&schema));
         Ok(schema)
     }
@@ -273,55 +249,23 @@ where
     ///
     /// No kind name, schema ref, or schema history is consulted. This is the
     /// dynamic counterpart to [`Kind::decode`](crate::Kind::decode) for callers
-    /// that have a document tree but no kind handle. Subject to
-    /// [`with_compat`](Self::with_compat): [`Compat::Strict`] (the default)
-    /// rejects pre-`kind` documents and pre-newline leaves,
-    /// [`Compat::LegacyLeaves`] accepts them.
+    /// that have a document tree but no kind handle.
     pub fn decode(&self, tree: ObjectId) -> Result<Value, Error> {
-        match self.compat {
-            Compat::Strict => self.decode_with::<Dynamic>(tree),
-            Compat::LegacyLeaves => {
-                let (value_tree, schema_tree) = split_document(tree, tree, self.objects())?;
-                self.decode_value_compat(value_tree, schema_tree)
-            }
-        }
+        self.decode_with::<Dynamic>(tree)
     }
 
     /// Decode a value subtree using the explicitly supplied schema subtree.
     ///
     /// No kind name, schema ref, publication history, or trailer is consulted.
     /// The schema is read from `schema_tree` and the value is validated while it
-    /// is decoded. Subject to [`with_compat`](Self::with_compat), as
-    /// [`decode`](Self::decode) is.
+    /// is decoded.
     pub fn decode_value(
         &self,
         value_tree: ValueTree,
         schema_tree: SchemaTree,
     ) -> Result<Value, Error> {
-        match self.compat {
-            Compat::Strict => {
-                let doc = self.schema(schema_tree.object_id())?;
-                Dynamic::read(&value_tree.object_id(), &doc, self.objects())
-            }
-            Compat::LegacyLeaves => {
-                self.decode_value_compat(value_tree.object_id(), schema_tree.object_id())
-            }
-        }
-    }
-
-    /// The legacy-leaves decode path shared by [`decode`](Self::decode) and
-    /// [`decode_value`](Self::decode_value) under [`Compat::LegacyLeaves`].
-    fn decode_value_compat(
-        &self,
-        value_tree: ObjectId,
-        schema_tree: ObjectId,
-    ) -> Result<Value, Error> {
-        let doc = Schema::read_pinned_legacy(&schema_tree, self.objects())?;
-        Ok(deserialize_value_with_schema_legacy_leaves(
-            &value_tree,
-            &doc,
-            self.objects(),
-        )?)
+        let doc = self.schema(schema_tree.object_id())?;
+        Dynamic::read(&value_tree.object_id(), &doc, self.objects())
     }
 
     /// Encode a dynamic value under an explicitly supplied schema subtree.
@@ -713,7 +657,7 @@ fn decode_with<E: Encoding, S: Find + ?Sized>(
     objects: &S,
 ) -> Result<E::Value, Error> {
     let (value_tree, schema_tree) = split_document(tree, tree, objects)?;
-    let doc = Schema::read_pinned(&schema_tree, objects)?;
+    let doc = deserialize::<Schema>(&schema_tree, objects)?;
     E::read(&value_tree, &doc, objects)
 }
 

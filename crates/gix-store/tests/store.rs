@@ -9,18 +9,15 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use facet::Facet;
-use facet_git_tree::{
-    DeserializeError, GitObject, ObjectStore, SchemaPinError, TreeEntry, schema_of,
-};
+use facet_git_tree::{GitObject, ObjectStore, TreeEntry, schema_of, serialize_into};
 use facet_value::value;
 use gix::bstr::ByteSlice;
-use gix::objs::Write as _;
 use gix_refstore::RefEdit;
 use gix_store::{
-    ApplyError, At, Committer, Compat, DeleteResult, DocumentInspection, DocumentKind,
-    DocumentShapeError, DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore,
-    ObjectId, RefName, RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree,
-    ValueTree, entity_id_name, entity_name, entity_name_under,
+    ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
+    DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore, ObjectId, RefName,
+    RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree, entity_id_name,
+    entity_name, entity_name_under,
 };
 
 fn seg(s: &str) -> RefSegment {
@@ -35,40 +32,12 @@ fn store() -> Store<MemoryRefStore, ObjectStore> {
     Store::new(MemoryRefStore::new(), ObjectStore::default())
 }
 
-/// Rewrite `tree`'s top-level entries via `f`, write the result, and return
-/// its object id. Shared by the schema-schema pin tests below, which
-/// hand-edit a normally-published schema tree to look like a document
-/// written against a schema-schema this binary does not recognize, or with
-/// no pin at all.
-fn rewrite_tree(
-    objects: &ObjectStore,
-    tree: ObjectId,
-    mut f: impl FnMut(&mut Vec<TreeEntry>),
-) -> ObjectId {
-    let mut entries = objects
-        .get_tree(&tree)
-        .expect("tree lookup")
-        .expect("tree present");
-    f(&mut entries);
-    gix::objs::Write::write(objects, &gix::objs::Tree { entries }).expect("write tree")
-}
-
-fn write_blob(objects: &ObjectStore, data: &[u8]) -> ObjectId {
-    gix::objs::Write::write(
-        objects,
-        &gix::objs::Blob {
-            data: data.to_vec(),
-        },
-    )
-    .expect("write blob")
-}
-
 fn bound_document(
     store: &Store<MemoryRefStore, ObjectStore>,
     value: &facet_value::Value,
     doc: &facet_git_tree::Schema,
 ) -> ObjectId {
-    let schema_tree = doc.write_pinned(store.objects()).expect("write schema");
+    let schema_tree = serialize_into(doc, store.objects()).expect("write schema");
     let value_tree = facet_git_tree::serialize_value_with_schema(value, doc, store.objects())
         .expect("write value");
     let mut entries = vec![
@@ -153,7 +122,7 @@ struct Colliding {
 #[test]
 fn embedded_document_decodes_without_a_kind_or_publication_ref() {
     let store = store();
-    let doc = schema_of::<Counter>().unwrap().with_kind("orphan").unwrap();
+    let doc = schema_of::<Counter>().unwrap();
     let expected = value!({ "n": 7 });
     let tree = bound_document(&store, &expected, &doc);
 
@@ -164,11 +133,8 @@ fn embedded_document_decodes_without_a_kind_or_publication_ref() {
 #[test]
 fn explicit_schema_value_codecs_round_trip_without_a_kind_handle() {
     let store = store();
-    let doc = schema_of::<Counter>()
-        .unwrap()
-        .with_kind("counter")
-        .unwrap();
-    let schema_tree = doc.write_pinned(store.objects()).unwrap();
+    let doc = schema_of::<Counter>().unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
     let expected = value!({ "n": 7 });
 
     let value_tree = store
@@ -189,11 +155,8 @@ fn explicit_schema_value_codecs_round_trip_without_a_kind_handle() {
 #[test]
 fn binding_and_inspection_describe_a_prepared_document() {
     let store = store();
-    let doc = schema_of::<Counter>()
-        .unwrap()
-        .with_kind("counter")
-        .unwrap();
-    let schema_tree = doc.write_pinned(store.objects()).unwrap();
+    let doc = schema_of::<Counter>().unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
     let value_tree = store
         .encode_value(&value!({ "n": 7 }), SchemaTree::from(schema_tree))
         .unwrap();
@@ -222,10 +185,7 @@ fn inspection_reports_malformed_envelopes_without_guessing() {
         .encode_value(
             &value!({ "n": 7 }),
             SchemaTree::from(
-                schema_of::<Counter>()
-                    .unwrap()
-                    .write_pinned(store.objects())
-                    .unwrap(),
+                serialize_into(&schema_of::<Counter>().unwrap(), store.objects()).unwrap(),
             ),
         )
         .unwrap();
@@ -259,12 +219,12 @@ fn schema_snapshots_are_owned_and_independent_of_publication_progress() {
     let store = store();
     let schema = store.dynamic(seg("counter")).schema();
     let first = schema_of::<Counter>().unwrap();
-    let first_published = first.clone().with_kind("counter").unwrap();
+    let first_published = first.clone();
     let first_commit = schema.put(&first).unwrap();
     let first_snapshot = schema.current_snapshot().unwrap();
 
     let second = schema_of::<CounterWithLabel>().unwrap();
-    let second_published = second.clone().with_kind("counter").unwrap();
+    let second_published = second.clone();
     let second_commit = schema.put(&second).unwrap();
     let current = schema.current_snapshot().unwrap();
     let historical = schema.snapshot_at(first_commit).unwrap();
@@ -284,7 +244,7 @@ fn store_retrieve_list_and_schema_roundtrip() {
     let store = store();
 
     let doc = schema_of::<Recipe>().unwrap();
-    let expected = doc.clone().with_kind("recipe").unwrap();
+    let expected = doc.clone();
     store.dynamic(seg("recipe")).schema().put(&doc).unwrap();
     assert_eq!(
         store
@@ -1004,75 +964,6 @@ fn delete_name_tombstones_a_rewound_name_from_its_current_target() {
     }
 }
 #[test]
-fn ordinary_reads_and_canonical_recognition_reject_cross_kind_documents() {
-    let store = store();
-    let counter = store.dynamic(seg("counter"));
-    let foreign = store.dynamic(seg("foreign"));
-    counter
-        .schema()
-        .put(&schema_of::<Counter>().unwrap())
-        .unwrap();
-    foreign
-        .schema()
-        .put(&schema_of::<Counter>().unwrap())
-        .unwrap();
-    let foreign_id = foreign.put_entity(&value!({ "n": 1 })).unwrap();
-    let foreign_commit = foreign
-        .read(foreign_id)
-        .map(|state| state.present())
-        .unwrap()
-        .unwrap()
-        .commit;
-
-    let alias = RefName::new("refs/store/counter/out-of-band").unwrap();
-    store
-        .refs()
-        .apply(RefEdit::Create {
-            name: alias,
-            new: foreign_commit,
-        })
-        .unwrap();
-    assert!(matches!(
-        counter.read(entity("out-of-band")),
-        Err(Error::KindMismatch { .. })
-    ));
-
-    assert!(counter.list().unwrap().contains(&entity("out-of-band")));
-}
-
-#[test]
-fn ordinary_reads_reject_cross_kind_tombstones() {
-    let store = store();
-    let counter = store.dynamic(seg("counter"));
-    let foreign = store.dynamic(seg("foreign"));
-    counter
-        .schema()
-        .put(&schema_of::<Counter>().unwrap())
-        .unwrap();
-    foreign
-        .schema()
-        .put(&schema_of::<Counter>().unwrap())
-        .unwrap();
-    let foreign_id = foreign.put_entity(&value!({ "n": 1 })).unwrap();
-    let tombstone = match foreign.delete_entity(foreign_id).unwrap() {
-        DeleteResult::Deleted(entry) => entry.commit,
-        other => panic!("expected foreign tombstone, got {other:?}"),
-    };
-    store
-        .refs()
-        .apply(RefEdit::Create {
-            name: RefName::new("refs/store/counter/foreign-tombstone").unwrap(),
-            new: tombstone,
-        })
-        .unwrap();
-
-    assert!(matches!(
-        counter.read(entity("foreign-tombstone")),
-        Err(Error::KindMismatch { .. })
-    ));
-}
-
-#[test]
 fn delete_removes_an_entity() {
     let store = store();
 
@@ -1770,10 +1661,6 @@ fn update_rebuilds_from_the_entry_the_retry_actually_commits_over() {
 /// all, rather than recreating an entity from nothing, and gets its own error
 /// type back.
 #[test]
-#[expect(
-    clippy::result_large_err,
-    reason = "the test error intentionally wraps the public store error"
-)]
 fn try_update_lets_rebuild_refuse_an_absent_entry() {
     #[derive(Debug)]
     enum Refusal {
@@ -1841,261 +1728,6 @@ fn anonymous_retries_to_success_on_pure_contention() {
     );
 }
 
-// --- schema-schema pin ---
-
-/// A stored schema tree with no `schema` pin entry at all — the shape every
-/// schema published before pinning existed has — is refused as
-/// [`SchemaPinError::Unpinned`], naming re-publishing as the remedy, not
-/// silently read as though it were the genesis generation (it is not: only a
-/// known root generation's own tree id is entitled to that reading).
-#[test]
-fn schema_with_no_pin_entry_is_refused() {
-    let store = store();
-
-    let good_tree = schema_of::<Counter>()
-        .unwrap()
-        .write_pinned(store.objects())
-        .unwrap();
-    let stripped = rewrite_tree(store.objects(), good_tree, |entries| {
-        entries.retain(|e| e.filename != "schema");
-    });
-    commit_ref(
-        &store,
-        "refs/schema/counter",
-        "schema counter\n",
-        stripped,
-        None,
-    );
-
-    let err = store.dynamic(seg("counter")).schema().get().unwrap_err();
-    assert!(
-        matches!(
-            &err,
-            Error::SchemaPin(SchemaPinError::Unpinned(oid)) if *oid == stripped
-        ),
-        "{err:?}"
-    );
-}
-
-/// The critical case the whole schema-schema pin exists for: a schema tree
-/// that both pins a schema-schema this binary does not recognize, *and*
-/// contains a `Node` variant this binary has never heard of (simulated as a
-/// `root` tagged `DateTime`, the same repro the old version-marker issue
-/// named) — something a full typed deserialize cannot get through.
-/// [`gix_store::KindSchema::get`] must report the pin error here, not the
-/// reflection error the corrupt content would otherwise produce, which is
-/// only possible because [`facet_git_tree::Schema::read_pinned`] checks
-/// the pin out of band *before* attempting to deserialize the rest of the
-/// document.
-#[test]
-fn unrecognized_pin_is_refused_before_a_reflection_incompatible_read_is_attempted() {
-    let store = store();
-
-    let good_tree = schema_of::<Counter>()
-        .unwrap()
-        .write_pinned(store.objects())
-        .unwrap();
-    let bogus_pin = write_blob(store.objects(), b"not a schema-schema\n");
-    let bogus_root = write_blob(store.objects(), b"DateTime\n");
-    let corrupt = rewrite_tree(store.objects(), good_tree, |entries| {
-        for entry in entries.iter_mut() {
-            if entry.filename == "schema" {
-                entry.oid = bogus_pin;
-            } else if entry.filename == "root" {
-                entry.mode = gix::objs::tree::EntryKind::Blob.into();
-                entry.oid = bogus_root;
-            }
-        }
-    });
-    commit_ref(
-        &store,
-        "refs/schema/counter",
-        "schema counter\n",
-        corrupt,
-        None,
-    );
-
-    let err = store.dynamic(seg("counter")).schema().get().unwrap_err();
-    assert!(
-        matches!(
-            &err,
-            Error::SchemaPin(SchemaPinError::Unrecognized { tree, pinned })
-                if *tree == corrupt && *pinned == bogus_pin
-        ),
-        "expected SchemaPin(Unrecognized) (the out-of-band pin check catching the unrecognized \
-         pin before a full deserialize is attempted), got {err:?} instead — a reflection error \
-         here would mean the pin check ran too late to matter"
-    );
-}
-
-/// The negative control for the test above: the very same `DateTime`-tagged
-/// root, but with the pin left intact and recognized, is not caught by the
-/// pin check (there is nothing to catch) and instead fails during the full
-/// typed deserialize with a reflection error — confirming the corrupted
-/// content really would break an ordinary read, so the pin check in the
-/// previous test is not simply vacuous.
-#[test]
-fn an_unknown_variant_with_a_recognized_pin_fails_as_a_reflection_error() {
-    let store = store();
-
-    let good_tree = schema_of::<Counter>()
-        .unwrap()
-        .write_pinned(store.objects())
-        .unwrap();
-    let bogus_root = write_blob(store.objects(), b"DateTime\n");
-    let corrupt = rewrite_tree(store.objects(), good_tree, |entries| {
-        for entry in entries.iter_mut() {
-            if entry.filename == "root" {
-                entry.mode = gix::objs::tree::EntryKind::Blob.into();
-                entry.oid = bogus_root;
-            }
-        }
-    });
-    commit_ref(
-        &store,
-        "refs/schema/counter",
-        "schema counter\n",
-        corrupt,
-        None,
-    );
-
-    let err = store.dynamic(seg("counter")).schema().get().unwrap_err();
-    assert!(
-        matches!(
-            &err,
-            Error::SchemaPin(SchemaPinError::Deserialize(DeserializeError::Reflect(msg)))
-                if msg.contains("DateTime")
-        ),
-        "{err:?}"
-    );
-}
-
-/// An unpinned schema tip stays overwritable so callers can republish it
-/// using the current pinned schema format.
-#[test]
-fn put_schema_still_republishes_over_an_unpinned_tip() {
-    let store = store();
-
-    let doc = schema_of::<Counter>().unwrap();
-    let expected = doc.clone().with_kind("counter").unwrap();
-    let good_tree = doc.write_pinned(store.objects()).unwrap();
-    let stripped = rewrite_tree(store.objects(), good_tree, |entries| {
-        entries.retain(|e| e.filename != "schema");
-    });
-    commit_ref(
-        &store,
-        "refs/schema/counter",
-        "schema counter\n",
-        stripped,
-        None,
-    );
-    assert!(
-        store.dynamic(seg("counter")).schema().get().is_err(),
-        "fixture should start unreadable, or this proves nothing"
-    );
-
-    store.dynamic(seg("counter")).schema().put(&doc).unwrap();
-    assert_eq!(
-        store
-            .dynamic(seg("counter"))
-            .schema()
-            .get()
-            .unwrap()
-            .as_ref(),
-        Some(&expected)
-    );
-}
-
-/// The *data* read path is pin-gated too, not only [`gix_store::KindSchema::get`].
-///
-/// Subtree binding puts the schema inside every data commit (`{schema/,
-/// value/}`) precisely so a fetched value stays readable where its kind was
-/// never published — which makes the data path the one that most needs this
-/// gate, and the one a reader in another repository actually travels.
-/// `read` resolves `schema/` through the same pin-checked `read_pinned` as
-/// everything else; without this test, a refactor inlining a plain
-/// deserialize there would drop the gate on exactly that path and leave the
-/// rest of the suite green.
-#[test]
-fn an_unrecognized_pin_in_a_data_commits_schema_subtree_is_refused_on_retrieve() {
-    let store = store();
-
-    store
-        .dynamic(seg("recipe"))
-        .schema()
-        .put(&schema_of::<Recipe>().unwrap())
-        .unwrap();
-    let carbonara = value!({ "title": "Carbonara", "serves": 4, "steps": ["boil"] });
-    store
-        .dynamic(seg("recipe"))
-        .put(&entity("carbonara"), &carbonara)
-        .unwrap();
-    // Reading works before the rewrite, so the failure below is the pin
-    // gate rather than a fixture that never read in the first place.
-    assert_eq!(
-        store
-            .dynamic(seg("recipe"))
-            .read(entity("carbonara"))
-            .unwrap()
-            .value(),
-        Some(carbonara)
-    );
-
-    let reference = store.dynamic(seg("recipe")).reference(&entity("carbonara"));
-    let tip = store.refs().read(&reference).unwrap().unwrap();
-    let GitObject::Commit(tip_obj) = store.objects().get(&tip).unwrap().unwrap() else {
-        panic!("expected a commit");
-    };
-    let root = tip_obj.tree;
-    let root_entries = store.objects().get_tree(&root).unwrap().unwrap();
-    let schema_tree = root_entries
-        .iter()
-        .find(|e| e.filename == "schema")
-        .unwrap()
-        .oid;
-
-    // Repoint only the pin entry inside the bound schema subtree: the
-    // document stays perfectly decodable, so nothing but the gate can reject
-    // it.
-    let bogus_pin = write_blob(store.objects(), b"not a schema-schema\n");
-    let corrupt_schema = rewrite_tree(store.objects(), schema_tree, |entries| {
-        for entry in entries.iter_mut() {
-            if entry.filename == "schema" {
-                entry.oid = bogus_pin;
-            }
-        }
-    });
-    let corrupt_root = rewrite_tree(store.objects(), root, |entries| {
-        for entry in entries.iter_mut() {
-            if entry.filename == "schema" {
-                entry.oid = corrupt_schema;
-            }
-        }
-    });
-    commit_ref(
-        &store,
-        reference.as_str(),
-        "store recipe/carbonara\n",
-        corrupt_root,
-        Some(tip),
-    );
-
-    let err = store
-        .dynamic(seg("recipe"))
-        .read(entity("carbonara"))
-        .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::SchemaPin(SchemaPinError::Unrecognized { tree, pinned })
-                if tree == corrupt_schema && pinned == bogus_pin
-        ),
-        "expected the data read path to refuse an unrecognized-pin bound schema, got {err:?} — a \
-         successful read here would mean a value fetched from elsewhere is decoded against a \
-         schema this binary cannot vouch for"
-    );
-}
-
 /// Two generations of one type. Derivation pairs definitions by name, so the
 /// type keeps its name across the edge exactly as a real evolution would.
 #[test]
@@ -2159,90 +1791,4 @@ fn transaction_stale_expectation_leaves_every_staged_ref_untouched() {
     assert!(b.list_entries().unwrap().is_empty());
     assert_eq!(a.list_entries().unwrap().len(), 1);
     assert_eq!(a.read(existing).unwrap().value(), Some(value!({ "n": 1 })));
-}
-
-/// Rewrite a current-format object graph with the historical no-newline
-/// blob spelling, reproducing pre-newline leaf framing in memory.
-fn strip_leaf_newlines(store: &ObjectStore, oid: ObjectId) -> ObjectId {
-    match store
-        .get(&oid)
-        .expect("fixture lookup")
-        .expect("fixture object")
-    {
-        GitObject::Blob(blob) => {
-            let bytes = blob.data.strip_suffix(b"\n").unwrap_or(&blob.data);
-            store
-                .write_buf(gix::objs::Kind::Blob, bytes)
-                .expect("write legacy blob")
-        }
-        GitObject::Tree(tree) => {
-            let entries = tree
-                .entries
-                .into_iter()
-                .map(|entry| gix::objs::tree::Entry {
-                    mode: entry.mode,
-                    filename: entry.filename,
-                    oid: strip_leaf_newlines(store, entry.oid),
-                })
-                .collect();
-            store
-                .write(&gix::objs::Tree { entries })
-                .expect("write legacy tree")
-        }
-        other => panic!("unexpected fixture object: {other:?}"),
-    }
-}
-
-#[test]
-fn compat_strict_is_the_default_and_rejects_pre_newline_leaves() {
-    let store = store();
-    let schema_tree = schema_of::<Counter>()
-        .unwrap()
-        .write_pinned(store.objects())
-        .unwrap();
-    let ordinary = store
-        .encode_value(&value!({ "n": 7 }), SchemaTree::from(schema_tree))
-        .unwrap();
-    let legacy_value_tree = strip_leaf_newlines(store.objects(), ordinary.object_id());
-
-    let err = store
-        .decode_value(
-            ValueTree::from(legacy_value_tree),
-            SchemaTree::from(schema_tree),
-        )
-        .unwrap_err();
-    assert!(matches!(err, Error::SchemaRead(_)), "{err:?}");
-}
-
-#[test]
-fn compat_legacy_leaves_accepts_what_strict_rejects() {
-    let store = store();
-    let schema_tree = schema_of::<Counter>()
-        .unwrap()
-        .write_pinned(store.objects())
-        .unwrap();
-    let ordinary = store
-        .encode_value(&value!({ "n": 7 }), SchemaTree::from(schema_tree))
-        .unwrap();
-    let legacy_value_tree = strip_leaf_newlines(store.objects(), ordinary.object_id());
-
-    let store = store.with_compat(Compat::LegacyLeaves);
-    assert_eq!(
-        store
-            .decode_value(
-                ValueTree::from(legacy_value_tree),
-                SchemaTree::from(schema_tree)
-            )
-            .unwrap(),
-        value!({ "n": 7 })
-    );
-
-    // An ordinary, current-format tree still decodes identically under
-    // either setting.
-    assert_eq!(
-        store
-            .decode_value(ordinary, SchemaTree::from(schema_tree))
-            .unwrap(),
-        value!({ "n": 7 })
-    );
 }

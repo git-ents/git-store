@@ -1,5 +1,4 @@
 {
-  "kind": "recipe",
   "root": {
     "Ref": "Recipe"
   },

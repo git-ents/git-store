@@ -1,5 +1,4 @@
 {
-  "kind": "task",
   "root": {
     "Ref": "Task"
   },

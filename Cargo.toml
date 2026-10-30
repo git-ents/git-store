@@ -8,7 +8,7 @@ clap = { version = "4", features = ["derive"] }
 criterion = "0.5"
 dialoguer = { version = "0.12", default-features = false }
 facet = { version = "=0.50.0-rc.7", features = ["reflect"] }
-facet-git-tree = { version = "0.1.0-alpha.1", features = ["value"] }
+facet-git-tree = { git = "https://github.com/git-ents/facet-git-tree", features = ["value"] }
 facet-json = "0.50.0-rc.7"
 facet-value = "0.50.0-rc.7"
 git-prolly = { path = "crates/git-prolly" }

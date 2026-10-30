@@ -130,10 +130,6 @@ pub enum Error {
         /// The tombstone publication commit.
         commit: ObjectId,
     },
-    /// The embedded schema claims to be a tombstone schema but is not the
-    /// canonical tombstone schema this library understands.
-    #[error("embedded tombstone schema is not the canonical gix-store tombstone schema")]
-    TombstoneSchemaMismatch,
     /// A tombstone document does not carry a valid explicit deletion state.
     #[error("embedded tombstone value is invalid")]
     InvalidTombstone,
@@ -169,9 +165,6 @@ pub enum Error {
     /// Schema-directed deserialization of a stored value failed.
     #[error(transparent)]
     SchemaRead(#[from] facet_git_tree::SchemaReadError),
-    /// A schema document is incompatible with the schema definition supported by this binary.
-    #[error(transparent)]
-    SchemaPin(#[from] facet_git_tree::SchemaPinError),
     /// The configured [`Signer`](gix_refstore::Signer) could not produce
     /// signature bytes, so nothing was written.
     #[error("signing the commit failed")]
@@ -182,9 +175,9 @@ pub enum Error {
     #[error("could not compute kind fingerprint")]
     Fingerprint(#[source] gix::hash::hasher::Error),
     /// The repository's object format is not the SHA-1 this build's schema
-    /// codec and fixed-point digest are written for.
+    /// codec is written for.
     #[error(
-        "unsupported Git object format: expected sha1, observed {observed}; this build's schema codec and fixed-point digest are SHA-1-only"
+        "unsupported Git object format: expected sha1, observed {observed}; this build's schema codec is SHA-1-only"
     )]
     UnsupportedObjectFormat {
         /// The object hash algorithm actually observed, e.g. `"sha256"`.

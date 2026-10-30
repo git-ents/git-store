@@ -133,13 +133,12 @@ compare-and-swap batches.
 
 == Compatibility limitations
 
-A schema document must carry an embedded kind name and a schema-schema pin that
-this build recognizes. Historical schema objects from before the embedded kind
-field cannot be made self-describing by inferring a name from a ref; they are
-not automatically upgraded. They require an explicit compatibility conversion
-or republishing under the current schema format before new self-contained data
-can be written against them. Reads always use the schema embedded in each
-document; publication history is available for inspection, not value conversion.
+A schema document is a plain `facet-git-tree` schema. A schema object whose
+shape this build does not speak cannot be repaired by inferring anything from
+`refs/schema/<publication>`; republish it under the current format before
+writing new self-contained data against it. Reads always use the schema
+embedded in each document; publication history is available for inspection,
+not value conversion.
 
 == Crates
 

@@ -4,7 +4,7 @@ use std::{marker::PhantomData, rc::Rc};
 
 use facet::Facet;
 use facet_git_tree::{
-    ObjectId, Schema, SchemaPinError, check_universe, identity_subtrees, schema_of,
+    ObjectId, Schema, check_universe, identity_subtrees, schema_of, serialize_into,
 };
 use gix::objs::{Find, Write};
 use gix_refstore::{
@@ -219,7 +219,6 @@ where
                 message,
             }));
         }
-        self.ensure_document_kind(&doc)?;
         let value = E::read(&value_tree, &doc, self.store.objects())?;
         Ok(EntityState::Present(Entry {
             value,
@@ -292,10 +291,6 @@ where
                 found: found.to_owned(),
             })
         }
-    }
-
-    fn ensure_document_kind(&self, doc: &Schema) -> Result<(), Error> {
-        self.ensure_kind(&doc.kind)
     }
 
     /// An entity's commits, tip-first along first parents; empty when absent.
@@ -500,12 +495,11 @@ where
         }
     }
 
-    /// Validate `tree`'s embedded kind, resolve the name and ref it
-    /// publishes to, and — when `expect` still holds — the commit it will
-    /// point at and the [`RefEdit`] (if any) that moves the ref there,
-    /// without writing or applying anything. `expect` of `None` skips the
-    /// compare-and-swap check entirely, so the ref advances unconditionally
-    /// like a branch.
+    /// Resolve the name and ref `tree` publishes to and — when `expect`
+    /// still holds — the commit it will point at and the [`RefEdit`] (if
+    /// any) that moves the ref there, without writing or applying anything.
+    /// `expect` of `None` skips the compare-and-swap check entirely, so the
+    /// ref advances unconditionally like a branch.
     ///
     /// Shared by [`publish_document_checked`](Self::publish_document_checked),
     /// which applies the resulting edit itself in a retry loop, and by
@@ -524,20 +518,8 @@ where
         O: Write,
     {
         // Publication is only defined for a complete bound document, not for
-        // an arbitrary tree that happens to have an object id. Reading the
-        // embedded schema here also keeps compatibility writes subject to the
-        // same kind check as prepared writes.
-        let (_, schema_tree) = self.store.split(tree, tree)?;
-        let document = self.store.schema(schema_tree)?;
-        if document.kind != self.name.as_str() {
-            return Err(Error::backend(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "prepared document belongs to kind {:?}, expected {:?}",
-                    document.kind, self.name
-                ),
-            )));
-        }
+        // an arbitrary tree that happens to have an object id.
+        self.store.split(tree, tree)?;
         let id = canonical_document_id(tree);
         // The caller-selected name is the ref. Callers that want a
         // content-derived name ask for one explicitly; the store does not
@@ -612,17 +594,7 @@ where
         R: Committer,
         O: Write,
     {
-        let (_, schema_tree) = self.store.split(tree, tree)?;
-        let document = self.store.schema(schema_tree)?;
-        if document.kind != self.name.as_str() {
-            return Err(Error::backend(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "prepared document belongs to kind {:?}, expected {:?}",
-                    document.kind, self.name
-                ),
-            )));
-        }
+        self.store.split(tree, tree)?;
         let commit = self.store.write_commit(message, tree, None)?;
         let name = name(commit);
         let reference = self.reference(&name);
@@ -965,7 +937,7 @@ where
                 kind: self.name.clone(),
             })?;
         let tree = self.store.commit_tree(tip)?;
-        let doc = Schema::read_pinned(&tree, self.store.objects())?;
+        let doc = (*self.store.schema(tree)?).clone();
         Ok((tip, doc))
     }
 }
@@ -981,7 +953,7 @@ where
         R: Committer,
         O: Write,
     {
-        let doc = schema_of::<T>()?.with_kind(self.name.as_str())?;
+        let doc = schema_of::<T>()?;
         self.schema().put(&doc)
     }
 }
@@ -1029,29 +1001,17 @@ where
         self.write(doc)
     }
 
-    /// Write the pinned schema document and publish it over the current tip.
+    /// Write the schema document and publish it over the current tip.
     pub fn write(&self, doc: &Schema) -> Result<ObjectId, Error>
     where
         R: Committer,
         O: Write,
     {
-        // The ref segment is the caller-selected publication name. Do not
-        // preserve a Rust Shape identifier (or a hand-authored JSON value)
-        // in the embedded schema document.
-        let doc = doc.clone().with_kind(self.kind.as_str())?;
-        self.check_identity_subtrees(&doc)?;
+        self.check_identity_subtrees(doc)?;
         let message = format!("schema {}\n", self.kind);
         self.store
-            .commit_forward(&self.reference, &message, |parent| {
-                if let Some(tip) = parent {
-                    let tree = self.store.commit_tree(tip)?;
-                    if let Err(error @ SchemaPinError::Unrecognized { .. }) =
-                        Schema::read_pin(&tree, self.store.objects())
-                    {
-                        return Err(error.into());
-                    }
-                }
-                Ok(doc.write_pinned(self.store.objects())?)
+            .commit_forward(&self.reference, &message, |_parent| {
+                Ok(serialize_into(doc, self.store.objects())?)
             })
     }
 
@@ -1084,7 +1044,7 @@ where
         {
             Some(tip) => {
                 let tree = self.store.commit_tree(tip)?;
-                Ok(Some(Schema::read_pinned(&tree, self.store.objects())?))
+                Ok(Some((*self.store.schema(tree)?).clone()))
             }
             None => Ok(None),
         }

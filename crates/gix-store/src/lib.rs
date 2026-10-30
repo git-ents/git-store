@@ -8,10 +8,6 @@
 //! provides typed access, while [`Store::dynamic`] provides access through
 //! [`facet_value::Value`].
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::result_large_err,
-    reason = "the public store API preserves typed error variants"
-)]
 
 mod address;
 mod canonical;
@@ -43,7 +39,7 @@ pub use kind::{
 };
 
 pub use canonical::CanonicalCommit;
-pub use store::{Compat, Layout, Publication, PublishOptions, RepoStore, Store, decode};
+pub use store::{Layout, Publication, PublishOptions, RepoStore, Store, decode};
 pub use tombstone::{
     DeleteResult, EntityState, ReadResult, ReadState, Tombstone, TombstoneEntry, TombstoneState,
 };
@@ -68,20 +64,13 @@ where
     /// The commit is addressed directly and the resulting schema does not
     /// borrow the publication ref. This permits callers to retain a historical
     /// schema while the kind advances or its publication ref is removed.
-    /// Subject to the store's [`Compat`](crate::Compat) setting: `Strict`
-    /// rejects pre-`kind` documents, `LegacyLeaves` accepts them.
     pub fn snapshot_at(&self, commit: ObjectId) -> Result<SchemaSnapshot, Error> {
         let schema_tree = self.store.commit_tree(commit)?;
-        let schema = match self.store.compat() {
-            crate::Compat::Strict => Schema::read_pinned(&schema_tree, self.store.objects())?,
-            crate::Compat::LegacyLeaves => {
-                Schema::read_pinned_legacy(&schema_tree, self.store.objects())?
-            }
-        };
+        let schema = self.store.schema(schema_tree)?;
         Ok(SchemaSnapshot {
             commit,
             schema_tree: SchemaTree::from(schema_tree),
-            schema,
+            schema: (*schema).clone(),
         })
     }
 

@@ -1,8 +1,3 @@
-#![expect(
-    clippy::result_large_err,
-    reason = "the CLI passes through the typed store error"
-)]
-
 //! `git-store`: a git external subcommand (`git store …`) that stores anything
 //! in Git as a real tree. JSON lives only here, at the CLI boundary; the
 //! [`Store`] underneath is oid-in/oid-out.
@@ -38,9 +33,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use gix_store::{
-    ApplyError, Compat, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId,
-    EntityState, Expectation, GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions,
-    RefName, RefPath, RefPrefix, RefSegment, RefStore, RepoStore, SchemaTree, ValueTree,
+    ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId, EntityState,
+    Expectation, GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions, RefName,
+    RefPath, RefPrefix, RefSegment, RefStore, RepoStore, SchemaTree, ValueTree,
 };
 
 /// A handle on one kind, over the CLI's own repo-backed store.
@@ -119,29 +114,8 @@ struct Cli {
         value_name = "PREFIX"
     )]
     schema_prefix: String,
-    /// How every decode in this invocation reads stored leaves: `strict`
-    /// rejects pre-`kind` documents and pre-newline leaf blobs,
-    /// `legacy-leaves` accepts them.
-    #[arg(long, global = true, value_enum, default_value = "strict")]
-    compat: CompatArg,
     #[command(subcommand)]
     command: Command,
-}
-
-/// CLI spelling of [`Compat`], the store's leaf-decoding strictness.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum CompatArg {
-    Strict,
-    LegacyLeaves,
-}
-
-impl From<CompatArg> for Compat {
-    fn from(value: CompatArg) -> Self {
-        match value {
-            CompatArg::Strict => Compat::Strict,
-            CompatArg::LegacyLeaves => Compat::LegacyLeaves,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -541,14 +515,14 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
                 .is_some_and(|format| format.eq_ignore_ascii_case("sha256"))
             {
                 bail!(
-                    "unsupported Git object format: expected sha1, observed sha256; this build's schema codec and fixed-point digest are SHA-1-only"
+                    "unsupported Git object format: expected sha1, observed sha256; this build's schema codec is SHA-1-only"
                 );
             }
             return Err(error).context("not inside a git repository");
         }
     };
     repo.object_cache_size_if_unset(4 * 1024 * 1024);
-    let store = RepoStore::open_with_layout(&repo, layout).with_compat(cli.compat.into());
+    let store = RepoStore::open_with_layout(&repo, layout);
 
     match cli.command {
         Command::Compile(args) => compile(&store, args, output)?,
@@ -556,7 +530,7 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
         Command::Cat { tree_ish } => cat(&repo, &store, &tree_ish, output)?,
         Command::Get { kind, name } => get(&repo, &store, &kind, &name, output)?,
         Command::Check { tree_ish, schema } => check(&repo, &store, &tree_ish, &schema, output)?,
-        Command::Doctor => doctor(&repo, &store, output)?,
+        Command::Doctor => doctor(&repo, output)?,
         Command::List { kind: Some(kind) } => list_entities(&store, &kind, output)?,
         Command::List { kind: None } => list_kinds(&store, output)?,
         Command::Log { kind, name } => log(&repo, &store, &kind, &name, output)?,
@@ -569,7 +543,7 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
             } => {
                 let handle = store.dynamic(segment("kind", &kind)?);
                 let doc = if interactive {
-                    interactive::build_schema(&kind)?
+                    interactive::build_schema()?
                 } else {
                     schema_doc_from_json(&read_source(file.as_ref())?)?
                 };
@@ -676,9 +650,6 @@ fn exit_class_of(error: &anyhow::Error) -> ExitClass {
             || cause
                 .downcast_ref::<facet_git_tree::SchemaWriteError>()
                 .is_some()
-            || cause
-                .downcast_ref::<facet_git_tree::SchemaPinError>()
-                .is_some()
         {
             class = class.prefer(ExitClass::Schema);
         }
@@ -716,13 +687,11 @@ fn store_error_exit_class(error: &gix_store::Error) -> ExitClass {
         | gix_store::Error::IdentityUniverse { .. }
         | gix_store::Error::Schema(_)
         | gix_store::Error::SchemaWrite(_)
-        | gix_store::Error::SchemaRead(_)
-        | gix_store::Error::SchemaPin(_) => ExitClass::Schema,
+        | gix_store::Error::SchemaRead(_) => ExitClass::Schema,
         gix_store::Error::ReservedTrailer { .. }
         | gix_store::Error::NameTaken { .. }
         | gix_store::Error::EntityIdCollision { .. }
         | gix_store::Error::Deleted { .. }
-        | gix_store::Error::TombstoneSchemaMismatch
         | gix_store::Error::InvalidTombstone
         | gix_store::Error::Signer(_)
         | gix_store::Error::Fingerprint(_)
@@ -876,13 +845,13 @@ fn resolve_schema_tree(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
 
 /// The bare (no `status`/`code`) machine fields for one schema snapshot,
 /// shared by [`schema_show`]'s single-kind path.
-fn schema_fields(snapshot: &gix_store::SchemaSnapshot) -> Result<VObject> {
+fn schema_fields(kind: &str, snapshot: &gix_store::SchemaSnapshot) -> Result<VObject> {
     let schema_json = facet_json::to_string(&snapshot.schema)
         .map_err(|e| anyhow::anyhow!("encoding schema JSON: {e}"))?;
     let schema: Value = facet_json::from_str(&schema_json)
         .map_err(|e| anyhow::anyhow!("encoding schema JSON: {e}"))?;
     let mut fields = VObject::new();
-    fields.insert("kind", snapshot.schema.kind.clone());
+    fields.insert("kind", kind.to_owned());
     fields.insert("commit", oid_value(snapshot.commit));
     fields.insert("schema_tree", oid_value(snapshot.schema_tree));
     fields.insert("schema", schema);
@@ -1516,10 +1485,10 @@ fn raw_git_dir(start: &Path) -> Option<PathBuf> {
 /// Check invariants that depend on the repository object database rather than
 /// on a particular kind or ref namespace, and print the result.
 ///
-/// The checks themselves — object format and the meta-schema fixed point —
-/// live in [`gix_store::check_repository`]; this only gathers its inputs and
-/// formats its outcome.
-fn doctor(repo: &gix::Repository, store: &RepoStore<'_>, format: OutputFormat) -> Result<()> {
+/// The check itself — object format — lives in
+/// [`gix_store::check_repository`]; this only gathers its inputs and formats
+/// its outcome.
+fn doctor(repo: &gix::Repository, format: OutputFormat) -> Result<()> {
     let observed = repo.object_hash();
     // A SHA-256 repository is reported as SHA-1 by gix builds without its
     // `sha256` feature. Inspect the raw extension as well so this build does
@@ -1529,30 +1498,22 @@ fn doctor(repo: &gix::Repository, store: &RepoStore<'_>, format: OutputFormat) -
         .string("extensions.objectformat")
         .is_some_and(|format| format.as_ref().eq_ignore_ascii_case(b"sha256"));
     doctor_with(
-        || gix_store::check_repository(observed, configured_sha256, store.objects()),
+        || gix_store::check_repository(observed, configured_sha256),
         format,
     )
 }
 
-/// Format the outcome of one repository check, attaching CLI context to a
-/// fixed-point failure specifically.
+/// Format the outcome of one repository check.
 fn doctor_with(
     check: impl FnOnce() -> Result<gix_store::DoctorReport, gix_store::Error>,
     format: OutputFormat,
 ) -> Result<()> {
-    let report = check().map_err(|error| match error {
-        gix_store::Error::SchemaPin(_) => anyhow::Error::new(error).context(cli_context(
-            ExitClass::Schema,
-            "schema fixed-point validation failed",
-        )),
-        error => anyhow::Error::new(error),
-    })?;
+    let report = check().map_err(anyhow::Error::new)?;
     let mut fields = VObject::new();
     fields.insert("object_format", report.object_format.to_string());
-    fields.insert("schema_fixed_point", "valid");
     emit_single(format, fields, || {
         format!(
-            "git-store doctor: ok (object format: {}; schema fixed point: valid)",
+            "git-store doctor: ok (object format: {})",
             report.object_format
         )
     })
@@ -1852,13 +1813,13 @@ fn schema_show(
         }
         None => handle.schema().current_snapshot()?,
     };
-    let fields = schema_fields(&snapshot)?;
+    let fields = schema_fields(kind, &snapshot)?;
     emit_single(format, fields, || {
         let mut text = String::new();
         if at.is_some() {
             text.push_str(&format!(
                 "kind: {}\ncommit: {}\nschema tree: {}\n",
-                snapshot.schema.kind, snapshot.commit, snapshot.schema_tree
+                kind, snapshot.commit, snapshot.schema_tree
             ));
         }
         text.push_str(&type_layout(kind, &snapshot.schema));
@@ -1949,9 +1910,7 @@ fn read_stdin() -> Result<String> {
     Ok(buf)
 }
 
-/// Parse a hand-authored schema JSON document into a [`Schema`]. The
-/// publication boundary replaces its embedded kind with the selected CLI
-/// kind, so the input may use any valid kind name or the generated default.
+/// Parse a hand-authored schema JSON document into a [`Schema`].
 fn schema_doc_from_json(json: &str) -> Result<Schema> {
     let value: Value = facet_json::from_str(json)
         .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid schema JSON: {e}")))?;
@@ -2230,27 +2189,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn doctor_reports_fixed_point_failure_with_context() {
-        let injected = gix_store::Error::SchemaPin(facet_git_tree::SchemaPinError::Unpinned(
-            gix::ObjectId::null(gix::hash::Kind::Sha1),
-        ));
-        let error = doctor_with(|| Err(injected), OutputFormat::Text)
-            .expect_err("the injected fixed-point failure must reach the caller");
-        let message = format!("{error:#}");
-        assert!(message.contains("schema fixed-point validation failed"));
-        assert!(message.contains("carries no schema-schema pin"));
-    }
-
-    #[test]
     fn doctor_rejects_a_configured_sha256_repository() {
         let error = doctor_with(
-            || {
-                gix_store::check_repository(
-                    gix::hash::Kind::Sha1,
-                    true,
-                    &facet_git_tree::ObjectStore::default(),
-                )
-            },
+            || gix_store::check_repository(gix::hash::Kind::Sha1, true),
             OutputFormat::Text,
         )
         .unwrap_err();
