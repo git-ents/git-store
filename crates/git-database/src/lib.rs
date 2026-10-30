@@ -47,7 +47,7 @@
 //!
 //! ```
 //! use facet_value::Value;
-//! use gix_database::Database;
+//! use git_database::Database;
 //!
 //! let dir = tempfile::TempDir::new()?;
 //! let repo = gix::init(dir.path())?;

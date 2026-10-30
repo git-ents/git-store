@@ -9,7 +9,7 @@ name = "git-store"
 path = "src/main.rs"
 
 [dependencies]
-gix-database = { workspace = true }
+git-database = { workspace = true }
 git-prolly = { workspace = true }
 gix-store = { workspace = true }
 facet = { workspace = true }

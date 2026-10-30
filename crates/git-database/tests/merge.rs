@@ -1,8 +1,8 @@
 //! Three-way merge tests: disjoint row merges, same-key conflicts, and
 //! table-level drop/modify behavior.
 
+use git_database::{ConflictKind, Database, Error, MergeError, Snapshot};
 use gix::ObjectId;
-use gix_database::{ConflictKind, Database, Error, MergeError, Snapshot};
 
 fn fresh_repo() -> (tempfile::TempDir, gix::Repository) {
     let dir = tempfile::TempDir::new().expect("temp dir");

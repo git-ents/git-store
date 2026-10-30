@@ -1,8 +1,8 @@
 //! Branch/tag administration and working/index recovery: delete, rename,
 //! restore, unstage, hard reset, and table moves.
 
+use git_database::{Database, Error, TAGS_PREFIX, WriteStateError};
 use gix::ObjectId;
-use gix_database::{Database, Error, TAGS_PREFIX, WriteStateError};
 use gix_refstore::{RefName, RefStore as _};
 
 fn repo() -> (tempfile::TempDir, gix::Repository) {
@@ -17,7 +17,7 @@ fn db(repo: &gix::Repository) -> Database<'_> {
 }
 
 fn head_branch(repo: &gix::Repository) -> Option<ObjectId> {
-    use gix_database::HEAD_REF;
+    use git_database::HEAD_REF;
     gix_refstore::GixRefStore::new(repo)
         .read(&RefName::new(HEAD_REF).expect("built-in ref name is valid"))
         .expect("read HEAD")
@@ -390,7 +390,7 @@ fn deleting_a_branch_head_names_restores_the_ref() {
                 gix::refs::FullName::try_from("refs/db/heads/raced").expect("valid"),
             ),
         },
-        name: gix::refs::FullName::try_from(gix_database::HEAD_REF).expect("valid"),
+        name: gix::refs::FullName::try_from(git_database::HEAD_REF).expect("valid"),
         deref: false,
     };
     repo.edit_reference(edit).expect("retarget head");
@@ -501,10 +501,10 @@ fn a_branch_needs_a_commit_to_exist() {
 }
 
 /// The Dolt-style verb for a table-level change kind.
-fn change_kind(kind: gix_database::ChangeKind) -> &'static str {
+fn change_kind(kind: git_database::ChangeKind) -> &'static str {
     match kind {
-        gix_database::ChangeKind::Added => "new table",
-        gix_database::ChangeKind::Removed => "deleted table",
-        gix_database::ChangeKind::Modified => "modified",
+        git_database::ChangeKind::Added => "new table",
+        git_database::ChangeKind::Removed => "deleted table",
+        git_database::ChangeKind::Modified => "modified",
     }
 }

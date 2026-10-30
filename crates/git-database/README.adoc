@@ -1,4 +1,4 @@
-= gix-database
+= git-database
 
 A versioned database experience on top of ordinary Git objects, refs, and
 commits, composed from `git-prolly` and `gix-store`-style ref plumbing.

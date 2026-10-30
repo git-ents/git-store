@@ -2,11 +2,11 @@
 //! rejection of malformed or foreign trees.
 
 use facet_value::Value;
+use git_database::{METADATA_NAME, Snapshot};
 use git_prolly::{ProllyConfig, ProllyStore};
 use gix::ObjectId;
 use gix::objs::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 use gix::objs::{Kind, Tree, Write as _};
-use gix_database::{METADATA_NAME, Snapshot};
 
 fn repo() -> (tempfile::TempDir, gix::Repository) {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -31,7 +31,7 @@ fn populated(store: &ProllyStore<'_>) -> (Snapshot, ObjectId) {
         .insert(None, b"alice", &Value::from(1))
         .expect("insert");
     let mut snapshot = Snapshot::empty(ProllyConfig::default());
-    snapshot.set_table(gix_database::TableName::new("users").expect("valid"), root);
+    snapshot.set_table(git_database::TableName::new("users").expect("valid"), root);
     let tree = snapshot.write(store.repo()).expect("write");
     (snapshot, tree)
 }
@@ -77,9 +77,9 @@ fn unchanged_table_roots_keep_their_object_ids() {
         .insert(None, b"alice", &Value::from(1))
         .expect("insert");
     let mut before = Snapshot::empty(ProllyConfig::default());
-    before.set_table(gix_database::TableName::new("users").expect("valid"), users);
+    before.set_table(git_database::TableName::new("users").expect("valid"), users);
     before.set_table(
-        gix_database::TableName::new("items").expect("valid"),
+        git_database::TableName::new("items").expect("valid"),
         store.empty_root(),
     );
     let first_tree = before.write(&repo).expect("write");
@@ -89,7 +89,7 @@ fn unchanged_table_roots_keep_their_object_ids() {
         .insert(Some(users), b"bob", &Value::from(2))
         .expect("insert");
     after.set_table(
-        gix_database::TableName::new("users").expect("valid"),
+        git_database::TableName::new("users").expect("valid"),
         users2,
     );
     let second_tree = after.write(&repo).expect("write");
@@ -148,7 +148,7 @@ fn rejects_trees_without_metadata() {
         }],
     );
     match Snapshot::read(&repo, bare, None) {
-        Err(gix_database::SnapshotError::MetadataMissing { tree, name }) => {
+        Err(git_database::SnapshotError::MetadataMissing { tree, name }) => {
             assert_eq!(tree, bare);
             assert_eq!(name, METADATA_NAME);
         }
@@ -177,7 +177,7 @@ fn rejects_metadata_that_is_not_a_blob() {
         ],
     );
     match Snapshot::read(&repo, tree, None) {
-        Err(gix_database::SnapshotError::MetadataNotBlob { name, kind, .. }) => {
+        Err(git_database::SnapshotError::MetadataNotBlob { name, kind, .. }) => {
             assert_eq!(name, METADATA_NAME);
             assert_eq!(kind, "tree");
         }
@@ -201,7 +201,7 @@ fn rejects_foreign_format_lines() {
         }],
     );
     match Snapshot::read(&repo, tree, None) {
-        Err(gix_database::SnapshotError::UnknownFormat(line)) => {
+        Err(git_database::SnapshotError::UnknownFormat(line)) => {
             assert_eq!(line, b"other-db v1");
         }
         other => panic!("expected UnknownFormat, got {other:?}"),
@@ -213,7 +213,7 @@ fn rejects_tables_that_are_not_trees() {
     let (_dir, repo) = repo();
     let metadata = blob(
         &repo,
-        gix_database::metadata_bytes(ProllyConfig::default()).as_slice(),
+        git_database::metadata_bytes(ProllyConfig::default()).as_slice(),
     );
     let tree = write_tree(
         &repo,
@@ -231,7 +231,7 @@ fn rejects_tables_that_are_not_trees() {
         ],
     );
     match Snapshot::read(&repo, tree, None) {
-        Err(gix_database::SnapshotError::TableNotTree { table, kind, .. }) => {
+        Err(git_database::SnapshotError::TableNotTree { table, kind, .. }) => {
             assert_eq!(table, "users");
             assert_eq!(kind, "blob");
         }
@@ -244,7 +244,7 @@ fn rejects_reserved_table_names() {
     let (_dir, repo) = repo();
     let metadata = blob(
         &repo,
-        gix_database::metadata_bytes(ProllyConfig::default()).as_slice(),
+        git_database::metadata_bytes(ProllyConfig::default()).as_slice(),
     );
     for name in ["!sneaky", ".."] {
         let tree = write_tree(
@@ -260,7 +260,7 @@ fn rejects_reserved_table_names() {
                     filename: name.into(),
                     oid: repo
                         .find_tree(
-                            gix_database::Snapshot::empty(ProllyConfig::default())
+                            git_database::Snapshot::empty(ProllyConfig::default())
                                 .write(&repo)
                                 .expect("empty tree"),
                         )
@@ -271,7 +271,7 @@ fn rejects_reserved_table_names() {
             ],
         );
         match Snapshot::read(&repo, tree, None) {
-            Err(gix_database::SnapshotError::TableName { source, .. }) => {
+            Err(git_database::SnapshotError::TableName { source, .. }) => {
                 assert!(
                     source.to_string().contains("reserved"),
                     "expected a reserved-name rejection for {name:?}, got {source}"
@@ -287,7 +287,7 @@ fn rejects_absent_table_roots() {
     let (_dir, repo) = repo();
     let metadata = blob(
         &repo,
-        gix_database::metadata_bytes(ProllyConfig::default()).as_slice(),
+        git_database::metadata_bytes(ProllyConfig::default()).as_slice(),
     );
     let dangling: ObjectId = "0"
         .repeat(repo.object_hash().len_in_bytes() * 2)
@@ -309,7 +309,7 @@ fn rejects_absent_table_roots() {
         ],
     );
     match Snapshot::read(&repo, tree, None) {
-        Err(gix_database::SnapshotError::ObjectNotFound { oid }) => assert_eq!(oid, dangling),
+        Err(git_database::SnapshotError::ObjectNotFound { oid }) => assert_eq!(oid, dangling),
         other => panic!("expected ObjectNotFound, got {other:?}"),
     }
 }
@@ -324,7 +324,7 @@ fn rejects_mismatched_prolly_configuration() {
         ..ProllyConfig::default()
     };
     match Snapshot::read(&repo, tree, Some(other)) {
-        Err(gix_database::SnapshotError::ConfigMismatch { .. }) => {}
+        Err(git_database::SnapshotError::ConfigMismatch { .. }) => {}
         other => panic!("expected ConfigMismatch, got {other:?}"),
     }
     Snapshot::read(&repo, tree, Some(ProllyConfig::default())).expect("matching config reads");
@@ -335,11 +335,11 @@ fn write_rejects_table_roots_that_are_not_trees() {
     let (_dir, repo) = repo();
     let mut snapshot = Snapshot::empty(ProllyConfig::default());
     snapshot.set_table(
-        gix_database::TableName::new("users").expect("valid"),
+        git_database::TableName::new("users").expect("valid"),
         blob(&repo, b"scalar"),
     );
     match snapshot.write(&repo) {
-        Err(gix_database::SnapshotError::TableNotTree { .. }) => {}
+        Err(git_database::SnapshotError::TableNotTree { .. }) => {}
         other => panic!("expected TableNotTree, got {other:?}"),
     }
 }
@@ -347,12 +347,12 @@ fn write_rejects_table_roots_that_are_not_trees() {
 #[test]
 fn table_name_rules() {
     for name in ["users", "user_events", "Ünicode", "0"] {
-        gix_database::TableName::new(name).expect("valid name");
+        git_database::TableName::new(name).expect("valid name");
     }
     for name in ["", "!meta", ".", "..", "a/b", "a b", "a\tb"] {
-        gix_database::TableName::new(name).expect_err("invalid name");
+        git_database::TableName::new(name).expect_err("invalid name");
     }
-    gix_database::TableName::new(&"x".repeat(256)).expect_err("too long");
+    git_database::TableName::new(&"x".repeat(256)).expect_err("too long");
 }
 
 #[test]
@@ -389,7 +389,7 @@ fn tables_are_sorted_and_complete() {
     let mut snapshot = Snapshot::empty(ProllyConfig::default());
     for name in ["zeta", "alpha", "mid"] {
         snapshot.set_table(
-            gix_database::TableName::new(name).expect("valid"),
+            git_database::TableName::new(name).expect("valid"),
             store.empty_root(),
         );
     }
@@ -398,7 +398,7 @@ fn tables_are_sorted_and_complete() {
     let names: Vec<&str> = read
         .tables()
         .keys()
-        .map(gix_database::TableName::as_str)
+        .map(git_database::TableName::as_str)
         .collect();
     assert_eq!(names, vec!["alpha", "mid", "zeta"]);
 }

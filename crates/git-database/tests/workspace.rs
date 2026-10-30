@@ -1,9 +1,9 @@
 //! Workspace tests: working/index/branch state, CAS conflicts, commits,
 //! branches, and checkout.
 
+use git_database::{ChangeKind, Database, Error, HEAD_REF, Head, INDEX_REF, WORKING_REF};
 use gix::ObjectId;
 use gix::objs::{CommitRef, Find as _, Kind};
-use gix_database::{ChangeKind, Database, Error, HEAD_REF, Head, INDEX_REF, WORKING_REF};
 use gix_refstore::{RefName, RefStore as _};
 
 fn repo() -> (tempfile::TempDir, gix::Repository) {
@@ -188,7 +188,7 @@ fn a_rival_working_write_is_not_silently_overwritten() {
     let stale = read_ref(&repo, &working_ref()).expect("working ref");
     let mut rival = database.working_state().expect("state").snapshot;
     rival.set_table(
-        gix_database::TableName::new("users").expect("valid"),
+        git_database::TableName::new("users").expect("valid"),
         database.store().empty_root(),
     );
     let tree = rival.write(&repo).expect("tree");
@@ -309,7 +309,7 @@ fn branches_and_checkout() {
     // A dirty working snapshot blocks checkout.
     database.put("users", b"dave", &"four".into()).expect("put");
     match database.checkout("main", false) {
-        Err(Error::Checkout(gix_database::CheckoutError::Dirty { branch })) => {
+        Err(Error::Checkout(git_database::CheckoutError::Dirty { branch })) => {
             assert_eq!(branch, "main");
         }
         other => panic!("expected a dirty refusal, got {other:?}"),
@@ -322,7 +322,7 @@ fn branches_and_checkout() {
     );
 
     match database.checkout("nope", false) {
-        Err(Error::Checkout(gix_database::CheckoutError::UnknownBranch(_))) => {}
+        Err(Error::Checkout(git_database::CheckoutError::UnknownBranch(_))) => {}
         other => panic!("expected an unknown-branch refusal, got {other:?}"),
     }
 }
@@ -370,7 +370,7 @@ fn commit_refuses_a_detached_head() {
     ));
     assert!(matches!(
         database.commit("x"),
-        Err(gix_database::CommitError::Detached)
+        Err(git_database::CommitError::Detached)
     ));
 }
 
@@ -394,7 +394,7 @@ fn snapshots_of_commits_are_readable_and_config_checked() {
     let tree = CommitRef::from_bytes(data.data, data.object_hash)
         .expect("commit")
         .tree();
-    let read = gix_database::Snapshot::read(&repo, tree, None)
+    let read = git_database::Snapshot::read(&repo, tree, None)
         .expect("a committed snapshot is an ordinary readable Git tree");
     assert_eq!(read, snapshot);
 }

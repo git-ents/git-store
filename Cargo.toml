@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gix-refstore", "crates/gix-store", "crates/git-store", "crates/git-prolly", "crates/gix-database", "crates/test-support"]
+members = ["crates/gix-refstore", "crates/gix-store", "crates/git-store", "crates/git-prolly", "crates/git-database", "crates/test-support"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -13,7 +13,7 @@ facet-json = "0.50.0-rc.7"
 facet-value = "0.50.0-rc.7"
 git-prolly = { path = "crates/git-prolly" }
 gix = { version = "0.85.0", default-features = false }
-gix-database = { path = "crates/gix-database" }
+git-database = { path = "crates/git-database" }
 gix-hash = { version = "0.25.1", features = ["sha1"] }
 gix-refstore = { path = "crates/gix-refstore" }
 gix-store = { path = "crates/gix-store" }

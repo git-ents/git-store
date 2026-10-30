@@ -21,7 +21,7 @@ workspaces, commits, or merge policy. It should compose `git-prolly` with
 
 == Target crates
 
-Add a reusable library crate, tentatively `gix-database`, to this workspace.
+Add a reusable library crate, tentatively `git-database`, to this workspace.
 It should depend on `git-prolly` and `gix-store`. Keep the existing `git-store`
 binary as the user-facing CLI and add database commands there only after the
 library contracts are stable.
@@ -29,7 +29,7 @@ library contracts are stable.
 The intended dependency direction is:
 
 ....
-git-store (CLI) -> gix-database -> git-prolly
+git-store (CLI) -> git-database -> git-prolly
                               \-> gix-store -> facet-git-tree / gix-refstore
 ....
 
@@ -74,7 +74,7 @@ commits and refs, with CAS updates through the existing ref-store abstractions.
 
 === 2. Define the database snapshot format
 
-* Add `gix-database` with `Snapshot`, `Table`, and format/error types.
+* Add `git-database` with `Snapshot`, `Table`, and format/error types.
 * Implement canonical read/write of a snapshot's table-name-to-root map.
 * Validate table names, duplicate names, object kinds, object existence, and
   supported Prolly configuration.

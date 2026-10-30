@@ -1,4 +1,4 @@
-//! `git store db`: the Dolt command surface over the [`gix_database`]
+//! `git store db`: the Dolt command surface over the [`git_database`]
 //! versioned database.
 //!
 //! The command names and shapes mirror Dolt's CLI — `init`, `status`, `ls`,
@@ -16,9 +16,9 @@ use anyhow::Result;
 use clap::Subcommand;
 use facet_json::from_str;
 use facet_value::{VArray, VObject, Value};
+use git_database::{ChangeKind, Database, TableStatus};
 use gix::ObjectId;
 use gix::objs::{CommitRef, Find as _};
-use gix_database::{ChangeKind, Database, TableStatus};
 
 use crate::{
     ExitClass, ListItem, OutputFormat, cli_error, emit_list, emit_single, oid_value, string_array,
@@ -43,20 +43,20 @@ fn row_symbol(kind: ChangeKind) -> &'static str {
 }
 
 /// The stable failure class of a database error, for the process exit code.
-pub(crate) fn db_exit_class(error: &gix_database::Error) -> ExitClass {
-    use gix_database::Error as E;
+pub(crate) fn db_exit_class(error: &git_database::Error) -> ExitClass {
+    use git_database::Error as E;
     match error {
         E::TableNotFound(_) | E::BranchNotFound(_) | E::TagNotFound(_) | E::KeyNotFound(_) => {
             ExitClass::NotFound
         }
         // A lost compare-and-swap race is always retryable, whatever wrote.
-        E::Write(gix_database::WriteStateError::Conflict(_))
-        | E::Merge(gix_database::MergeError::Write(gix_database::WriteStateError::Conflict(_)))
-        | E::Merge(gix_database::MergeError::Conflicts { .. }) => ExitClass::Cas,
-        E::Merge(gix_database::MergeError::BranchNotFound(_)) => ExitClass::NotFound,
+        E::Write(git_database::WriteStateError::Conflict(_))
+        | E::Merge(git_database::MergeError::Write(git_database::WriteStateError::Conflict(_)))
+        | E::Merge(git_database::MergeError::Conflicts { .. }) => ExitClass::Cas,
+        E::Merge(git_database::MergeError::BranchNotFound(_)) => ExitClass::NotFound,
         // Merging onto an unborn head is a caller mistake, not a storage
         // failure: there is nothing to merge into.
-        E::Merge(gix_database::MergeError::State(gix_database::ReadStateError::NoDatabase)) => {
+        E::Merge(git_database::MergeError::State(git_database::ReadStateError::NoDatabase)) => {
             ExitClass::Invalid
         }
         E::Prolly(git_prolly::Error::KeyNotFound(_)) => ExitClass::NotFound,
@@ -73,26 +73,26 @@ pub(crate) fn db_exit_class(error: &gix_database::Error) -> ExitClass {
         | E::Checkout(_)
         | E::BranchName(_)
         | E::EmptyDatabase
-        | E::Commit(gix_database::CommitError::Detached) => ExitClass::Invalid,
-        E::Snapshot(gix_database::SnapshotError::ConfigMismatch { .. })
-        | E::State(gix_database::ReadStateError::Snapshot(
-            gix_database::SnapshotError::ConfigMismatch { .. },
+        | E::Commit(git_database::CommitError::Detached) => ExitClass::Invalid,
+        E::Snapshot(git_database::SnapshotError::ConfigMismatch { .. })
+        | E::State(git_database::ReadStateError::Snapshot(
+            git_database::SnapshotError::ConfigMismatch { .. },
         )) => ExitClass::Schema,
         E::Snapshot(
-            gix_database::SnapshotError::MetadataMissing { .. }
-            | gix_database::SnapshotError::UnknownFormat(_),
+            git_database::SnapshotError::MetadataMissing { .. }
+            | git_database::SnapshotError::UnknownFormat(_),
         )
-        | E::State(gix_database::ReadStateError::Snapshot(
-            gix_database::SnapshotError::MetadataMissing { .. }
-            | gix_database::SnapshotError::UnknownFormat(_),
+        | E::State(git_database::ReadStateError::Snapshot(
+            git_database::SnapshotError::MetadataMissing { .. }
+            | git_database::SnapshotError::UnknownFormat(_),
         )) => ExitClass::Invalid,
         _ => ExitClass::Other,
     }
 }
 
 /// Wrap a database error with its stable exit class.
-fn db_error<E: Into<gix_database::Error>>(error: E) -> anyhow::Error {
-    let error: gix_database::Error = error.into();
+fn db_error<E: Into<git_database::Error>>(error: E) -> anyhow::Error {
+    let error: git_database::Error = error.into();
     let class = db_exit_class(&error);
     cli_error(class, error.to_string())
 }
@@ -370,7 +370,7 @@ pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputForm
         DbCommand::Merge { branch } => {
             let commit = match db.merge(&branch) {
                 Ok(commit) => commit,
-                Err(gix_database::MergeError::Conflicts { conflicts }) => {
+                Err(git_database::MergeError::Conflicts { conflicts }) => {
                     // Machine consumers get the conflict list on stdout in
                     // the requested format, not just prose on stderr.
                     let items = conflicts
@@ -447,8 +447,8 @@ pub(crate) fn run(repo: &gix::Repository, command: DbCommand, output: OutputForm
 
 fn db_fields_init() -> VObject {
     let mut fields = VObject::new();
-    fields.insert("head", gix_database::HEAD_REF);
-    fields.insert("branch", gix_database::DEFAULT_BRANCH);
+    fields.insert("head", git_database::HEAD_REF);
+    fields.insert("branch", git_database::DEFAULT_BRANCH);
     fields
 }
 
@@ -488,17 +488,17 @@ fn status(db: &Database, output: OutputFormat) -> Result<()> {
 /// The checked-out branch's short name, for headers.
 fn branch_name(db: &Database) -> Result<String> {
     match db.head().map_err(db_error)? {
-        gix_database::Head::Branch { branch, .. } | gix_database::Head::Unborn { branch } => {
+        git_database::Head::Branch { branch, .. } | git_database::Head::Unborn { branch } => {
             Ok(branch
                 .as_str()
-                .strip_prefix(gix_database::HEADS_PREFIX)
+                .strip_prefix(git_database::HEADS_PREFIX)
                 .and_then(|rest| rest.strip_prefix('/'))
                 .unwrap_or(branch.as_str())
                 .to_owned())
         }
-        gix_database::Head::Detached { commit } => Ok(format!("(detached at {commit})")),
-        gix_database::Head::Missing => Err(db_error(gix_database::Error::State(
-            gix_database::ReadStateError::NoDatabase,
+        git_database::Head::Detached { commit } => Ok(format!("(detached at {commit})")),
+        git_database::Head::Missing => Err(db_error(git_database::Error::State(
+            git_database::ReadStateError::NoDatabase,
         ))),
     }
 }
@@ -678,11 +678,11 @@ fn read_source(file: Option<&PathBuf>) -> Result<String> {
 fn schema(db: &Database, command: DbSchemaCommand, output: OutputFormat) -> Result<()> {
     let DbSchemaCommand::Show { table } = command;
     let snapshot = db.working_state().map_err(db_error)?.snapshot;
-    let config = gix_database::config_summary(snapshot.config());
+    let config = git_database::config_summary(snapshot.config());
     if let Some(table) = table {
         let Some(root) = snapshot.table(&table) else {
-            return Err(db_error(gix_database::Error::TableNotFound(
-                gix_database::TableName::new(&table).map_err(db_error)?,
+            return Err(db_error(git_database::Error::TableNotFound(
+                git_database::TableName::new(&table).map_err(db_error)?,
             )));
         };
         let mut fields = VObject::new();
@@ -805,11 +805,11 @@ fn resolve_base(repo: &gix::Repository, db: &Database, spec: &str) -> Result<Obj
             .head()
             .map_err(db_error)?
             .commit()
-            .ok_or_else(|| db_error(gix_database::Error::EmptyDatabase));
+            .ok_or_else(|| db_error(git_database::Error::EmptyDatabase));
     }
     for candidate in [
-        format!("{}/{spec}", gix_database::HEADS_PREFIX),
-        format!("{}/{spec}", gix_database::TAGS_PREFIX),
+        format!("{}/{spec}", git_database::HEADS_PREFIX),
+        format!("{}/{spec}", git_database::TAGS_PREFIX),
         spec.to_owned(),
     ] {
         if let Ok(id) = repo.rev_parse_single(candidate.as_str()) {
@@ -953,14 +953,14 @@ fn branch(
 /// The checked-out branch's short name, failing when there is none.
 fn current_branch(db: &Database) -> Result<String> {
     match db.head().map_err(db_error)? {
-        gix_database::Head::Branch { branch, .. } => Ok(strip_heads(branch.as_str()).to_owned()),
+        git_database::Head::Branch { branch, .. } => Ok(strip_heads(branch.as_str()).to_owned()),
         _ => Err(cli_error(ExitClass::Invalid, "no current branch")),
     }
 }
 
 /// Strip the `refs/db/heads/` prefix from a full branch ref.
 fn strip_heads(name: &str) -> &str {
-    name.strip_prefix(gix_database::HEADS_PREFIX)
+    name.strip_prefix(git_database::HEADS_PREFIX)
         .and_then(|rest| rest.strip_prefix('/'))
         .unwrap_or(name)
 }
@@ -1001,7 +1001,7 @@ fn checkout(
                     fields.insert("root", oid_value(root));
                     return emit_single(output, fields, || format!("restored {target} at {root}"));
                 }
-                Err(gix_database::Error::TableNotFound(_)) => {
+                Err(git_database::Error::TableNotFound(_)) => {
                     return Err(cli_error(
                         ExitClass::NotFound,
                         format!("{target:?} is neither a branch nor a table"),
