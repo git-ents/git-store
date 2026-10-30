@@ -5,13 +5,13 @@ edition = "2024"
 readme = "README.adoc"
 
 [dependencies]
-facet = { version = "0.50.0-rc.7", features = ["reflect"] }
-facet-git-tree = { version = "0.1.0-alpha.1", features = ["value"] }
-facet-value = "0.50.0-rc.7"
-gix = { version = "0.85.0", default-features = false, features = ["sha1", "zlib-rs"] }
-gix-refstore = { path = "../gix-refstore" }
-thiserror = "2"
+facet = { workspace = true }
+facet-git-tree = { workspace = true }
+facet-value = { workspace = true }
+gix = { workspace = true, features = ["sha1", "zlib-rs"] }
+gix-refstore = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-test-support = { path = "../test-support" }
+tempfile = { workspace = true }
+test-support = { workspace = true }
