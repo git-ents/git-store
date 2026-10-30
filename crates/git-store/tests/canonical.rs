@@ -5,10 +5,10 @@
 //! `git hash-object -t commit --stdin` over the hand-written bytes the test
 //! builds, so a pass proves byte-exact agreement with git's own framing.
 
+use git_store::{CanonicalCommit, Error, MemoryRefStore, ObjectId, SignatureBytes, Signer, Store};
 use gix::actor::Signature;
 use gix::bstr::ByteSlice;
 use gix::date::Time;
-use gix_store::{CanonicalCommit, Error, MemoryRefStore, ObjectId, SignatureBytes, Signer, Store};
 use std::cell::RefCell;
 use std::convert::Infallible;
 use std::rc::Rc;

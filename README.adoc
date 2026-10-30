@@ -144,8 +144,8 @@ not value conversion.
 
 * link:crates/facet-git-tree[`facet-git-tree`] — Git tree encoding for Facet types.
 * link:crates/gix-refstore[`gix-refstore`] — compare-and-swap storage for Git refs.
-* link:crates/gix-store[`gix-store`] — schema-aware storage for Rust programs.
-* link:crates/git-store[`git-store`] — the command-line interface.
+* link:crates/git-store[`git-store`] — schema-aware storage and its command-line interface.
+* link:crates/git-database[`git-database`] — a versioned database over ordinary Git objects.
 
 == Documentation
 

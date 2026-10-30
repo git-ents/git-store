@@ -17,24 +17,25 @@ the storage and history substrate.
 
 The database layer must not make `git-prolly` responsible for tables, schemas,
 workspaces, commits, or merge policy. It should compose `git-prolly` with
-`gix-store` and `gix-refstore`.
+`git-store` and `gix-refstore`.
 
 == Target crates
 
 Add a reusable library crate, tentatively `git-database`, to this workspace.
-It should depend on `git-prolly` and `gix-store`. Keep the existing `git-store`
+It should depend on `git-prolly` and `git-store`. Keep the existing `git-store`
 binary as the user-facing CLI and add database commands there only after the
 library contracts are stable.
 
 The intended dependency direction is:
 
 ....
-git-store (CLI) -> git-database -> git-prolly
-                              \-> gix-store -> facet-git-tree / gix-refstore
+git-store (library + CLI) -> git-database -> git-prolly
+                          \-> facet-git-tree
+                          \-> gix-refstore
 ....
 
 `git-prolly` may eventually expose an object-id-in/object-id-out API so the
-database layer can serialize schema-validated values through `gix-store` and
+database layer can serialize schema-validated values through `git-store` and
 then place their resulting object ids in Prolly maps without coupling the map
 to value serialization.
 
@@ -152,7 +153,7 @@ three-way behavior first, including delete/modify and add/add cases.
 
 === 8. Add schema and query features
 
-* Connect table schemas to the existing `gix-store` schema/document model.
+* Connect table schemas to the existing `git-store` schema/document model.
 * Pin the schema used by each table snapshot so historical commits remain
   readable after schema evolution.
 * Add query support only after snapshot and merge semantics are stable.

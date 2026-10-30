@@ -13,7 +13,7 @@ pub struct DoctorReport {
     pub object_format: &'static str,
 }
 
-/// Validate the repository-level invariants gix-store depends on, namely the
+/// Validate the repository-level invariants git-store depends on, namely the
 /// object format this build's schema codec assumes.
 ///
 /// `observed` is the repository's object hash algorithm and

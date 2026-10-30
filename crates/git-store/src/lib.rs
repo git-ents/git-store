@@ -47,7 +47,7 @@ pub use transaction::Transaction;
 
 pub use facet_git_tree::{ObjectId, Schema, schema_of};
 
-/// The tree and schema format used by `gix-store`.
+/// The tree and schema format used by `git-store`.
 pub use facet_git_tree as tree;
 pub use gix_refstore::{
     ApplyError, Committer, Expectation, GixRefStore, InvalidRefName, MemoryRefStore, RefEdit,

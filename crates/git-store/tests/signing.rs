@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 use facet::Facet;
 use facet_git_tree::ObjectStore;
-use gix_store::{MemoryRefStore, RefPath, RefSegment, SignatureBytes, Signer, Store, schema_of};
+use git_store::{MemoryRefStore, RefPath, RefSegment, SignatureBytes, Signer, Store, schema_of};
 
 #[derive(Facet, Debug, PartialEq)]
 struct Counter {

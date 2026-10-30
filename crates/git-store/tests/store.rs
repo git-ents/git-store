@@ -11,14 +11,14 @@ use std::convert::Infallible;
 use facet::Facet;
 use facet_git_tree::{GitObject, ObjectStore, TreeEntry, schema_of, serialize_into};
 use facet_value::value;
-use gix::bstr::ByteSlice;
-use gix_refstore::RefEdit;
-use gix_store::{
+use git_store::{
     ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
     DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore, ObjectId, RefName,
     RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree, entity_id_name,
     entity_name, entity_name_under,
 };
+use gix::bstr::ByteSlice;
+use gix_refstore::RefEdit;
 
 fn seg(s: &str) -> RefSegment {
     RefSegment::new(s).unwrap()
@@ -127,7 +127,7 @@ fn embedded_document_decodes_without_a_kind_or_publication_ref() {
     let tree = bound_document(&store, &expected, &doc);
 
     assert_eq!(store.decode(tree).unwrap(), expected);
-    assert_eq!(gix_store::decode(tree, store.objects()).unwrap(), expected);
+    assert_eq!(git_store::decode(tree, store.objects()).unwrap(), expected);
 }
 
 #[test]
@@ -488,7 +488,7 @@ fn custom_layout_roundtrips_store_retrieve_and_history() {
     let store = Store::with_layout(
         MemoryRefStore::new(),
         ObjectStore::default(),
-        gix_store::Layout {
+        git_store::Layout {
             data: RefPrefix::new("refs/meta/rules").unwrap(),
             schema: RefPrefix::new("refs/meta/rules-schema").unwrap(),
         },
@@ -610,7 +610,7 @@ fn legacy_schema_and_provenance_trailers_are_ignored() {
 }
 
 /// A commit whose tree is not the `{schema/, value/}` split — anything not
-/// written by [`gix_store::Kind::put`]/[`gix_store::kind::Put::anonymous`],
+/// written by [`git_store::Kind::put`]/[`git_store::kind::Put::anonymous`],
 /// including every commit predating subtree binding — is diagnosable instead
 /// of collapsing through the catch-all `Error::Backend`.
 #[test]
@@ -757,8 +757,8 @@ fn retrieve_at_reports_a_subtree_object_that_is_not_present() {
     );
 }
 
-/// [`gix_store::kind::Put::anonymous`] binds the schema by subtree exactly as
-/// [`gix_store::Kind::put`] does — its commit is written before any ref, so a
+/// [`git_store::kind::Put::anonymous`] binds the schema by subtree exactly as
+/// [`git_store::Kind::put`] does — its commit is written before any ref, so a
 /// regression there would be invisible to the ref-based tests.
 #[test]
 fn store_anonymous_binds_the_schema_by_subtree() {
@@ -1260,11 +1260,11 @@ fn put_message_rejects_reserved_schema_and_provenance_trailers() {
     }
 }
 
-/// [`gix_store::EntityState::present`]: the returned [`Entry`] names the exact
+/// [`git_store::EntityState::present`]: the returned [`Entry`] names the exact
 /// commit the value came from — the same
-/// one [`gix_store::Kind::history`] reports as the tip — and carries that
+/// one [`git_store::Kind::history`] reports as the tip — and carries that
 /// commit's summary, both for a default message and for one set through
-/// [`gix_store::kind::Put::message`].
+/// [`git_store::kind::Put::message`].
 #[test]
 fn a_read_entry_carries_the_commit_and_message_it_was_written_with() {
     let store = store();
@@ -1317,7 +1317,7 @@ fn a_read_entry_carries_the_commit_and_message_it_was_written_with() {
     assert_eq!(earlier.message, "store counter/c");
 }
 
-/// [`gix_store::kind::Put::anonymous`] derives the canonical entity ref from
+/// [`git_store::kind::Put::anonymous`] derives the canonical entity ref from
 /// the complete document tree, so writing identical content twice is
 /// idempotent even though it returns a commit id.
 /// Identity is derived from the bound frame, so the same content published
@@ -1456,7 +1456,7 @@ fn anonymous_names_an_entity_by_its_whole_commit_id() {
     assert_eq!(store.dynamic(seg("counter")).list().unwrap(), vec![name]);
 }
 
-/// [`gix_store::kind::Put::anonymous_under`] retains the old grouped
+/// [`git_store::kind::Put::anonymous_under`] retains the old grouped
 /// commit-named alias, so compatibility reads and `entity_name_under` continue
 /// to work while the canonical identity remains content-derived.
 #[test]
@@ -1666,12 +1666,12 @@ fn try_update_lets_rebuild_refuse_an_absent_entry() {
     enum Refusal {
         Absent,
         Store(
-            #[expect(dead_code, reason = "carried for Debug, never matched on")] gix_store::Error,
+            #[expect(dead_code, reason = "carried for Debug, never matched on")] git_store::Error,
         ),
     }
 
-    impl From<gix_store::Error> for Refusal {
-        fn from(err: gix_store::Error) -> Self {
+    impl From<git_store::Error> for Refusal {
+        fn from(err: git_store::Error) -> Self {
             Refusal::Store(err)
         }
     }

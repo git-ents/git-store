@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input, Select};
 use facet_git_tree::{Node, Schema, StructField, VariantKind};
 use facet_value::{VArray, VObject, Value};
-use gix_store::DocumentBuilder;
+use git_store::DocumentBuilder;
 
 use crate::{DynKind, is_scalar_schema, resolve};
 

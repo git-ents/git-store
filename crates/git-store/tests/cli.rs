@@ -1365,7 +1365,6 @@ fn every_command_the_docs_show_exists() {
     let docs = [
         "README.adoc",
         "crates/git-store/README.adoc",
-        "crates/gix-store/README.adoc",
         "docs/specification.adoc",
         "docs/design-alignment-plan.adoc",
     ];

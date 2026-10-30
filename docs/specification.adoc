@@ -543,8 +543,9 @@ If two data instances serialize to the same Git tree, they MUST be considered eq
 === `git-store` Plumbing Boundary
 
 The serialization layer is intentionally separate from the repository plumbing
-layer. `facet-git-tree` remains oid-in/oid-out; `gix-store` and `git-store`
-compose those objects with schemas, documents, refs, commits, and indexes.
+layer. `facet-git-tree` remains oid-in/oid-out; `git-store` and
+`git-database` compose those objects with schemas, documents, refs, commits,
+and indexes.
 
 [role="requirement", id="plumbing.schema.explicit"]
 .Explicit Schema Selection

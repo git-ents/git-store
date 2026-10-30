@@ -2,7 +2,7 @@
 
 use facet_git_tree::{GitObject, ObjectStore};
 use facet_value::value;
-use gix_store::{
+use git_store::{
     DocumentInspection, DocumentTree, Expectation, MemoryRefStore, RefPath, RefSegment, RefStore,
     Store, canonical_document_id,
 };
@@ -21,16 +21,16 @@ fn store() -> Store<MemoryRefStore, ObjectStore> {
 
 fn prepared(
     store: &Store<MemoryRefStore, ObjectStore>,
-    tree: gix_store::ObjectId,
-) -> gix_store::PreparedDocument {
+    tree: git_store::ObjectId,
+) -> git_store::PreparedDocument {
     match store.inspect_document(DocumentTree::from(tree)).unwrap() {
         DocumentInspection::Bound(document) => document,
         other => panic!("expected a bound document, got {other:?}"),
     }
 }
 
-fn options(alias: Option<RefPath>, expectation: Option<Expectation>) -> gix_store::PublishOptions {
-    gix_store::PublishOptions {
+fn options(alias: Option<RefPath>, expectation: Option<Expectation>) -> git_store::PublishOptions {
+    git_store::PublishOptions {
         alias,
         message: "prepared publication".to_owned(),
         parent: None,
@@ -96,7 +96,7 @@ fn explicit_parent_appends_above_legacy_tip_while_creating_absent_alias() {
     let publication = kind
         .publish_prepared(
             &prepared,
-            gix_store::PublishOptions::new("normalize legacy")
+            git_store::PublishOptions::new("normalize legacy")
                 .with_alias(path("imported"))
                 .with_parent(legacy_commit)
                 .with_expectation(Expectation::Absent),

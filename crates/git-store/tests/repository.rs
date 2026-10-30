@@ -2,7 +2,7 @@
 //! the on-disk ref layout, a real `git fetch` reachability repro,
 //! cross-thread concurrency against the on-disk backend, and the
 //! `git ls-tree`-shaped plumbing assertions against a committed tree.
-//! Everything that can run against [`gix_store::MemoryRefStore`] instead
+//! Everything that can run against [`git_store::MemoryRefStore`] instead
 //! lives in `tests/store.rs`.
 
 use std::collections::HashSet;
@@ -14,7 +14,7 @@ use std::sync::{Arc, Barrier};
 use facet::Facet;
 use facet_git_tree::schema_of;
 use facet_value::value;
-use gix_store::{
+use git_store::{
     DeleteResult, EntityState, Layout, RefPath, RefPrefix, RefSegment, RepoStore, SignatureBytes,
     Signer,
 };
@@ -373,7 +373,7 @@ fn concurrent_writers_land_a_linear_history() {
 }
 
 /// The claim subtree binding exists to make true: stock `git` plumbing —
-/// `git ls-tree`, not just [`gix_store`] — can read a data commit. The root
+/// `git ls-tree`, not just [`git_store`] — can read a data commit. The root
 /// tree has exactly `schema` and `value`, both trees; `value`'s own entries
 /// are the stored struct's field names; and newly written commits contain no
 /// schema or provenance trailers.

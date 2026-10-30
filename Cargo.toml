@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gix-refstore", "crates/gix-store", "crates/git-store", "crates/git-prolly", "crates/git-database", "crates/test-support"]
+members = ["crates/gix-refstore", "crates/git-store", "crates/git-prolly", "crates/git-database", "crates/test-support"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -16,7 +16,6 @@ gix = { version = "0.85.0", default-features = false }
 git-database = { path = "crates/git-database" }
 gix-hash = { version = "0.25.1", features = ["sha1"] }
 gix-refstore = { path = "crates/gix-refstore" }
-gix-store = { path = "crates/gix-store" }
 tempfile = "3"
 test-support = { path = "crates/test-support" }
 thiserror = "2"

@@ -3,7 +3,7 @@
 
 use facet::Facet;
 use facet_git_tree::{ObjectStore, UniverseError};
-use gix_store::{Error, MemoryRefStore, RefSegment, Store, schema_of};
+use git_store::{Error, MemoryRefStore, RefSegment, Store, schema_of};
 
 #[path = "../src/identity.rs"]
 mod identity;

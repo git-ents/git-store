@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use facet_git_tree::{Node, Schema, StructField};
 use facet_value::{Value, value};
-use gix_store::{DocumentBuilder, DocumentError};
+use git_store::{DocumentBuilder, DocumentError};
 
 fn schema() -> Schema {
     Schema {

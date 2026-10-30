@@ -1,7 +1,7 @@
 = git-database
 
 A versioned database experience on top of ordinary Git objects, refs, and
-commits, composed from `git-prolly` and `gix-store`-style ref plumbing.
+commits, composed from `git-prolly` and `git-store`-style ref plumbing.
 
 A database *snapshot* is a canonical Git tree: one reserved metadata blob
 (`!database`, naming the format and the Prolly configuration) plus one tree

@@ -73,18 +73,18 @@ APIs.
 
 The main remaining seams are:
 
-* `crates/gix-store/src/kind.rs`: kind lookup, put/remove behavior, commit
+* `crates/git-store/src/kind.rs`: kind lookup, put/remove behavior, commit
   construction, and schema publication.
-* `crates/gix-store/src/store.rs`: kind/dynamic handles and provenance access.
-* `crates/gix-store/src/provenance.rs`: trailer parsing and public provenance.
+* `crates/git-store/src/store.rs`: kind/dynamic handles and provenance access.
+* `crates/git-store/src/provenance.rs`: trailer parsing and public provenance.
 * `crates/facet-git-tree/src/schema/mod.rs`: the schema document shape.
 * `crates/facet-git-tree/src/schema/pin.rs` and `schema/codec.rs`: current
   generation/bootstrap machinery.
-* `crates/gix-store/tests/{document,identity,repository,store}.rs`: frame,
+* `crates/git-store/tests/{document,identity,repository,store}.rs`: frame,
   identity, repository, and API regression coverage.
 * `crates/git-store/src/main.rs`: CLI commands, including the future
   `doctor` command.
-* `README.adoc` and `crates/gix-store/README.adoc`: currently document named refs
+* `README.adoc` and `crates/git-store/README.adoc`: currently document named refs
   and the `Schema:` trailer and must be updated with the final contract.
 
 == Phase 0: freeze the contract and establish characterization tests
@@ -107,7 +107,7 @@ Run the focused baseline before implementation:
 
 [source,console]
 ----
-cargo test -p gix-store
+cargo test -p git-store
 cargo test -p facet-git-tree
 ----
 
@@ -119,13 +119,13 @@ Extend `facet_git_tree::Schema` with the settled field for the kind name and
 update all construction, serialization, deserialization, equality, and schema
 validation paths. Preserve deterministic field ordering and ensure the name is
 validated using the same identity/name normal-form rules already enforced in
-`gix-store`.
+`git-store`.
 
 Update:
 
 * `crates/facet-git-tree/src/schema/mod.rs`;
 * schema read/write and codec fixtures;
-* `crates/gix-store/src/kind.rs` schema registration and publication;
+* `crates/git-store/src/kind.rs` schema registration and publication;
 * schema tests and any `Schema` literals throughout the workspace.
 
 Add tests proving that two schema documents with different embedded kind names
@@ -251,7 +251,6 @@ suite before declaring completion:
 ----
 cargo fmt --all -- --check
 cargo test -p facet-git-tree
-cargo test -p gix-store
 cargo test -p git-store
 cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings

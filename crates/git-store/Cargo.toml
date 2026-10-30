@@ -7,19 +7,34 @@ readme = "README.adoc"
 [[bin]]
 name = "git-store"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = [
+    "dep:anyhow",
+    "dep:clap",
+    "dep:dialoguer",
+    "dep:facet-json",
+    "dep:git-database",
+    "dep:git-prolly",
+    "gix/interrupt",
+    "gix/revision",
+]
 
 [dependencies]
-git-database = { workspace = true }
-git-prolly = { workspace = true }
-gix-store = { workspace = true }
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+dialoguer = { workspace = true, optional = true }
 facet = { workspace = true }
 facet-git-tree = { workspace = true }
+facet-json = { workspace = true, optional = true }
 facet-value = { workspace = true }
-facet-json = { workspace = true }
-gix = { workspace = true, features = ["sha1", "zlib-rs", "interrupt", "revision"] }
-clap = { workspace = true }
-dialoguer = { workspace = true }
-anyhow = { workspace = true }
+git-database = { workspace = true, optional = true }
+git-prolly = { workspace = true, optional = true }
+gix = { workspace = true, features = ["sha1", "zlib-rs"] }
+gix-refstore = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 facet = { workspace = true }

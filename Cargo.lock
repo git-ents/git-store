@@ -831,9 +831,10 @@ dependencies = [
  "git-database",
  "git-prolly",
  "gix",
- "gix-store",
+ "gix-refstore",
  "tempfile",
  "test-support",
+ "thiserror",
 ]
 
 [[package]]
@@ -1379,20 +1380,6 @@ dependencies = [
  "gix-hash",
  "gix-lock",
  "nonempty",
- "thiserror",
-]
-
-[[package]]
-name = "gix-store"
-version = "0.1.0"
-dependencies = [
- "facet",
- "facet-git-tree",
- "facet-value",
- "gix",
- "gix-refstore",
- "tempfile",
- "test-support",
  "thiserror",
 ]
 

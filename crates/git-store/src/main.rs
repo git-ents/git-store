@@ -32,7 +32,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
-use gix_store::{
+use git_store::{
     ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId, EntityState,
     Expectation, GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions, RefName,
     RefPath, RefPrefix, RefSegment, RefStore, RepoStore, SchemaTree, ValueTree,
@@ -641,7 +641,7 @@ fn exit_class_of(error: &anyhow::Error) -> ExitClass {
         {
             class = class.prefer(ExitClass::Cas);
         }
-        if let Some(store_error) = cause.downcast_ref::<gix_store::Error>() {
+        if let Some(store_error) = cause.downcast_ref::<git_store::Error>() {
             class = class.prefer(store_error_exit_class(store_error));
         }
         if cause
@@ -673,33 +673,33 @@ fn error_exit_code(error: &anyhow::Error) -> i32 {
     exit_class_of(error).code()
 }
 
-fn store_error_exit_class(error: &gix_store::Error) -> ExitClass {
+fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
     match error {
-        gix_store::Error::NoSchema { .. }
-        | gix_store::Error::MissingObject { .. }
-        | gix_store::Error::SubtreeMissing { .. } => ExitClass::NotFound,
-        gix_store::Error::NotACommit { .. }
-        | gix_store::Error::NotATree { .. }
-        | gix_store::Error::InvalidTrailer { .. } => ExitClass::Invalid,
-        gix_store::Error::NotSubtreeBound { .. }
-        | gix_store::Error::MissingTrailer { .. }
-        | gix_store::Error::KindMismatch { .. }
-        | gix_store::Error::IdentityUniverse { .. }
-        | gix_store::Error::Schema(_)
-        | gix_store::Error::SchemaWrite(_)
-        | gix_store::Error::SchemaRead(_) => ExitClass::Schema,
-        gix_store::Error::ReservedTrailer { .. }
-        | gix_store::Error::NameTaken { .. }
-        | gix_store::Error::EntityIdCollision { .. }
-        | gix_store::Error::Deleted { .. }
-        | gix_store::Error::InvalidTombstone
-        | gix_store::Error::Signer(_)
-        | gix_store::Error::Fingerprint(_)
-        | gix_store::Error::Backend(_)
-        | gix_store::Error::Serialize(_)
-        | gix_store::Error::Deserialize(_)
-        | gix_store::Error::UnsupportedObjectFormat { .. } => ExitClass::Other,
-        gix_store::Error::DuplicateParent { .. } => ExitClass::Invalid,
+        git_store::Error::NoSchema { .. }
+        | git_store::Error::MissingObject { .. }
+        | git_store::Error::SubtreeMissing { .. } => ExitClass::NotFound,
+        git_store::Error::NotACommit { .. }
+        | git_store::Error::NotATree { .. }
+        | git_store::Error::InvalidTrailer { .. } => ExitClass::Invalid,
+        git_store::Error::NotSubtreeBound { .. }
+        | git_store::Error::MissingTrailer { .. }
+        | git_store::Error::KindMismatch { .. }
+        | git_store::Error::IdentityUniverse { .. }
+        | git_store::Error::Schema(_)
+        | git_store::Error::SchemaWrite(_)
+        | git_store::Error::SchemaRead(_) => ExitClass::Schema,
+        git_store::Error::ReservedTrailer { .. }
+        | git_store::Error::NameTaken { .. }
+        | git_store::Error::EntityIdCollision { .. }
+        | git_store::Error::Deleted { .. }
+        | git_store::Error::InvalidTombstone
+        | git_store::Error::Signer(_)
+        | git_store::Error::Fingerprint(_)
+        | git_store::Error::Backend(_)
+        | git_store::Error::Serialize(_)
+        | git_store::Error::Deserialize(_)
+        | git_store::Error::UnsupportedObjectFormat { .. } => ExitClass::Other,
+        git_store::Error::DuplicateParent { .. } => ExitClass::Invalid,
     }
 }
 
@@ -845,7 +845,7 @@ fn resolve_schema_tree(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
 
 /// The bare (no `status`/`code`) machine fields for one schema snapshot,
 /// shared by [`schema_show`]'s single-kind path.
-fn schema_fields(kind: &str, snapshot: &gix_store::SchemaSnapshot) -> Result<VObject> {
+fn schema_fields(kind: &str, snapshot: &git_store::SchemaSnapshot) -> Result<VObject> {
     let schema_json = facet_json::to_string(&snapshot.schema)
         .map_err(|e| anyhow::anyhow!("encoding schema JSON: {e}"))?;
     let schema: Value = facet_json::from_str(&schema_json)
@@ -1213,8 +1213,8 @@ fn document_publish(
         .dynamic(segment("kind", kind)?)
         .publish_prepared(&prepared, options)
         .map_err(|error| {
-            if matches!(error, gix_store::Error::Backend(_)) {
-                // `gix-store` intentionally erases backend error parameters at
+            if matches!(error, git_store::Error::Backend(_)) {
+                // `git-store` intentionally erases backend error parameters at
                 // its public boundary. This command supplies an explicit CAS,
                 // so classify that stable public variant without parsing text.
                 cli_error(ExitClass::Cas, error.to_string())
@@ -1228,7 +1228,7 @@ fn document_publish(
 /// `document publish --batch`: publish many prepared documents as one
 /// all-or-nothing compare-and-swap.
 ///
-/// [`gix_store::Transaction`] checks every staged expectation before writing
+/// [`git_store::Transaction`] checks every staged expectation before writing
 /// anything, so the batch either lands whole or leaves the store unchanged.
 /// Records are read as NDJSON so a caller can generate them a line at a time;
 /// a malformed line names its own line number and nothing is published.
@@ -1260,7 +1260,7 @@ fn document_publish_batch(
         kinds.push(record.kind.clone());
     }
     let publications = transaction.commit().map_err(|error| {
-        if matches!(error, gix_store::Error::Backend(_)) {
+        if matches!(error, git_store::Error::Backend(_)) {
             // As in `document_publish`: this command supplies explicit
             // expectations, so a backend failure here is a lost race.
             cli_error(ExitClass::Cas, error.to_string())
@@ -1486,7 +1486,7 @@ fn raw_git_dir(start: &Path) -> Option<PathBuf> {
 /// on a particular kind or ref namespace, and print the result.
 ///
 /// The check itself — object format — lives in
-/// [`gix_store::check_repository`]; this only gathers its inputs and formats
+/// [`git_store::check_repository`]; this only gathers its inputs and formats
 /// its outcome.
 fn doctor(repo: &gix::Repository, format: OutputFormat) -> Result<()> {
     let observed = repo.object_hash();
@@ -1498,14 +1498,14 @@ fn doctor(repo: &gix::Repository, format: OutputFormat) -> Result<()> {
         .string("extensions.objectformat")
         .is_some_and(|format| format.as_ref().eq_ignore_ascii_case(b"sha256"));
     doctor_with(
-        || gix_store::check_repository(observed, configured_sha256),
+        || git_store::check_repository(observed, configured_sha256),
         format,
     )
 }
 
 /// Format the outcome of one repository check.
 fn doctor_with(
-    check: impl FnOnce() -> Result<gix_store::DoctorReport, gix_store::Error>,
+    check: impl FnOnce() -> Result<git_store::DoctorReport, git_store::Error>,
     format: OutputFormat,
 ) -> Result<()> {
     let report = check().map_err(anyhow::Error::new)?;
@@ -2191,7 +2191,7 @@ mod tests {
     #[test]
     fn doctor_rejects_a_configured_sha256_repository() {
         let error = doctor_with(
-            || gix_store::check_repository(gix::hash::Kind::Sha1, true),
+            || git_store::check_repository(gix::hash::Kind::Sha1, true),
             OutputFormat::Text,
         )
         .unwrap_err();
