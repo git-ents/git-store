@@ -1,16 +1,41 @@
-= Specification for Git Tree Serialization Target
+= Specification for `git-store`
 Joey Carpinelli <joseph.carpinelli@icloud.com>
 
 [abstract]
 ****
-New reflection primitives, e.g. the `Facet` trait provided by https://facet.rs[`facet`], allow for simpler runtime inspection of deserialized data.
-This project uses `facet` to encode data of arbitrary shapes into Git trees.
-The invariants and functionality described here will be upheld (and expanded) while the project is developed.
+`git-store` is the repository-plumbing layer built on
+https://github.com/git-ents/facet-git-tree[`facet-git-tree`]. It composes
+`facet-git-tree`'s encoded Git objects into bound documents, published schemas,
+refs, commits, tombstones, and content-derived entity identities.
+
+The value and tree encoding itself — the leaves, containers, escaping,
+ordinals, the `Node`/`Schema` vocabulary, the `.schema` envelope entry, and the
+decode contract — is defined by `facet-git-tree`'s `docs/format.adoc`. That
+document is *normative* for this one: where the two disagree about that
+encoding, `format.adoc` wins, and any disagreement here is a defect in this
+document.
+
+This document specifies only the `git-store` layer layered over that encoding:
+the document envelope, schema publication, refs, commits, tombstones, and
+entity identity.
 ****
+
+[NOTE]
+====
+The earlier `git-store` layout is *gone*. A bound document no longer carries a
+`schema/` entry and a `value/` entry side by side, and there is no longer a
+`{schema/, value/}` frame anywhere. A document now names the value's own
+entries directly at its root, beside a single reserved `.schema` entry
+(link:#envelope). Any prose, code, fixture, or ref convention that still speaks
+of `{schema/, value/}` trees describes the removed layout and contradicts this
+document.
+====
 
 == Requirements
 
-The following requirements define the expected behavior of the Git tree serialization and deserialization targets.
+The following requirements define the expected behavior of the `git-store`
+layer. Normative statements about the value and tree encoding are deferred to
+`facet-git-tree`'s `docs/format.adoc`.
 
 [CAUTION]
 ====
@@ -31,7 +56,6 @@ The `facet-git-tree` crate MUST satisfy all requirements of general `facet` adap
 The `facet-git-tree` crate MUST strictly adhere to semantic versioning.
 --
 
-
 [role="requirement", id="compatibility.git"]
 .Compatibility with Git
 --
@@ -41,318 +65,65 @@ The `facet-git-tree` crate MUST be compatible with Git's v2 object format.
 [role="requirement", id="compatibility.git.hash"]
 .Object Identity Hash
 --
-Object identities MUST be computed as 20-byte SHA-1 digests over Git's canonical object encoding, matching Git's default (non-`objectFormat`) repositories.
+Object identities MUST be computed over Git's canonical object encoding under
+*either* of Git's repository object formats: 20-byte SHA-1 (Git's default,
+non-`objectFormat` repository) or 32-byte SHA-256.
 
-[NOTE]
-====
-SHA-256 repositories are currently out of scope, but support SHOULD be added in the future as the project matures.
-====
+An object id is meaningful only within the format that produced it: two ids are
+comparable only when both come from the same object format, and cross-format
+comparison MUST compare the underlying objects' content rather than their ids.
 --
 
-=== Serialization
+=== Document Envelope
 
-[role="requirement", id="serialization.mechanism"]
-.Serialization Mechanism
+[role="requirement", id="envelope"]
+.Document Envelope
 --
-The `facet-git-tree` crate MUST provide a struct which can be serialized into Git trees using only the `Facet` trait.
---
+A bound document is a Git tree whose entries are the entries of the value's own
+bare encoding, plus a single reserved entry named `.schema`:
 
-[role="requirement", id="serialization.design.leaves"]
-.Serialization Design
---
-A scalar value — one that is neither a composite nor a collection — MUST be stored in a UTF-8 encoded Git blob.
---
-
-[role="requirement", id="serialization.design.booleans"]
-.Boolean Serialization
---
-Booleans MUST be serialized as `true` or `false` strings.
---
-
-[role="requirement", id="serialization.design.schemaless"]
-.Schemaless Encoding
---
-A serialized tree MUST record values only.
-The encoding MUST NOT embed any representation of a type's `SHAPE` — no schema object, type identifier, or definition table.
-
-Both serialization and deserialization are driven entirely by the `Facet` type supplied at the call site, exactly as `facet-toml` and `facet-json` rely on the target type rather than embedding a schema in their output.
-The structure of every tree and blob is recovered from that type on read.
-
-[NOTE]
-====
-Because no schema is stored, type definitions cannot introduce cycles into the encoding; values are inherently cycle-free under Git's DAG data model.
-Self-describing reads — recovering a value without its `Facet` type — are therefore out of scope, with one sanctioned best-effort exception: the lossy dynamic-value read defined by link:#deserialization.dynamic.heuristic[the dynamic value read heuristic].
-====
---
-
-[role="requirement", id="serialization.design.trees.composites"]
-.Composite Encoding
---
-A composite value — a struct or tuple — MUST be encoded as a Git tree, with each field recorded as an entry whose value follows the leaf, composite, collection, and variant rules recursively.
-A struct's fields are named by their field name; a tuple's fields are named by their zero-based positional index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name].
---
-
-[role="requirement", id="serialization.design.trees.variants"]
-.Variant Encoding
---
-An enum value MUST be encoded as follows, externally tagged by the active variant's name.
-
-. A unit variant (no payload) MUST be encoded as a single Git blob holding the variant name's bytes verbatim, followed by the mandatory trailing newline defined by link:#serialization.design.leaves.encoding[leaf byte encoding] — this blob is a leaf blob like any other — with no wrapping tree. The variant name is the *entire* information content of a unit variant, and a blob is what makes it visible to blob-oriented tooling: a tree entry whose target is a tree with no blob underneath it does not appear at all in `git ls-tree -r`'s recursive blob listing and contributes nothing to `git diff`, so a unit variant written as an (empty) tree is indistinguishable, to that tooling, from the field never having existed. Encoding it as a blob instead means a field changing between two unit variants (or between a unit variant and any other payload shape) shows as an ordinary content change.
-. Every other variant MUST be encoded as a Git tree holding exactly one entry, named after the active variant, whose value encodes the variant's payload as follows.
-.. A newtype variant (one field) resolves directly to the encoding of that field.
-.. A struct variant resolves to a tree whose entries are named by field name.
-.. A tuple variant resolves to a tree whose entries are named by zero-based positional index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name].
-
-The variant name is a value, not schema: it records which variant is live, information not present in the type's `SHAPE`.
-
-[NOTE]
-====
-A unit variant and every other variant therefore have *different* tree shapes at the same field position — a blob for the former, a tree for the latter. This diverges from a uniform externally-tagged-tree scheme (every variant, unit included, as a single-entry tree); a reader MUST branch on the fetched object's kind (blob vs. tree) to tell them apart, rather than assuming one shape ahead of fetching. See link:#serialization.design.trees.empty-marker[the empty-tree marker] for the parallel treatment of `None`, dynamic `Null`, and an empty collection, which keep their tree shape and instead gain a marker entry — a deliberately different choice from the unit-variant blob collapse, justified there.
-====
---
-
-[role="requirement", id="serialization.design.trees.empty-marker"]
-.Presence Marker for an Otherwise-Empty Tree
---
-`None`, a dynamic `Null`, and an empty collection (`Array`, `Vec`, slice, or `Map`, per link:#serialization.design.trees.collections[collection encoding]; likewise an empty dynamic `Array` or `Object`, per link:#serialization.design.dynamic[dynamic value encoding]) MUST be encoded as a Git tree holding exactly one entry, rather than a literal empty tree: a blob entry named `_` (the *presence marker*) whose content is the empty byte sequence.
-The marker blob MUST remain the literal empty blob unconditionally: it is a structural presence sentinel, not a value leaf, and is therefore exempt from link:#serialization.design.leaves.encoding[the leaf trailing-newline requirement] that applies to every other blob this encoding writes.
-
-A literal empty tree — the encoding these cases used before this marker was introduced — contributes nothing to `git ls-tree -r` (which lists only reachable blobs, recursively, and an empty tree recurses to zero lines) and nothing to `git diff` (which compares blob content by path). A field that becomes empty, or that was always empty, is therefore indistinguishable, to that tooling, from a field that never existed. Writing the single marker entry instead keeps the path visible — `git ls-tree -r` shows (for example) `tags/_` — and keeps it participating in blob-level diffs when a collection transitions to or from empty.
-
-A single shared marker (one reserved name, one empty-content blob) covers every one of these cases; no case gets a distinct marker. The marker's only role is presence-signaling for git tooling, not disambiguation: every reader decodes a possibly-marked tree against a known target (a `Facet` type or a link:#schema.representation[schema] node) that already determines, independent of the tree's content, whether `None`/`Null`/an empty `List`/an empty `Map`/etc. is expected at that path. The one reader without such a target — link:#deserialization.dynamic.heuristic[the dynamic value read heuristic] — already documented `Null` and an empty `Array`/`Object` as collapsing to the same lossy empty-`Object` reading before this marker existed; a shared marker preserves that reading exactly, rather than introducing a new distinction the heuristic has no way to use.
-
-Because every leaf blob (link:#serialization.design.leaves.encoding[leaf byte encoding]) now carries a mandatory trailing `\n` while the marker blob never does, an empty `String` — which serializes to the one-byte blob `\n` — can no longer collide with the marker's blob: the two are always distinguishable, on disk, from a byte length alone (`1` versus `0`). This is a deliberate side effect of the trailing-newline requirement, not a separate rule.
-
-The marker name `_` is reserved: link:#serialization.design.trees.collections[a dynamic (map or dynamic-object) key] MUST NOT equal it, and MUST be rejected if it does, for the same reason a key MUST NOT contain `/` — a real entry named exactly `_` would otherwise be indistinguishable, on read, from the marker. A schema-declared struct field name MUST be rejected on the same terms: a link:#schema.representation[schema document] is data, and one authored by hand rather than derived from a Rust type can name a field anything at all. An link:#serialization.design.trees.ordering[ordinal name], being always decimal digits, can never collide and needs no such check.
-
-[NOTE]
-====
-A unit enum variant (link:#serialization.design.trees.variants[variant encoding]) is deliberately handled differently: it collapses its *entire* entry to a bare blob rather than keeping a tree with a marker. The two cases differ in what information the "empty" state carries: `None`/`Null`/an empty collection genuinely carry no further information beyond their own presence, so a content-free marker is enough; a unit variant's *name* (`Low` vs. `High`) is itself the payload, so it is written as the blob content directly rather than as a tree-entry name a marker would leave just as invisible as before.
-====
---
-
-[role="requirement", id="serialization.design.trees.collections"]
-.Collection Encoding
---
-The following standard Rust collections MUST be supported, each encoded as a Git tree — an empty one per link:#serialization.design.trees.empty-marker[the presence-marker requirement] rather than as a literal empty tree.
-
-. `Array`, `Vec`, and slices — sequence elements are recorded as entries named by their zero-based index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name]. A sequence whose element type is `u8` is the sole exception: it is stored as a single blob rather than a tree, per link:#serialization.design.bytes[byte-sequence encoding].
-. `Map` — the entry layout is selected by the shape of the key type *after* the same transparency collapse defined by link:#serialization.design.pointers[smart-pointer encoding] and transparent-newtype encoding is applied (a smart pointer collapses to its pointee, repeatedly, and a transparent newtype to its inner shape), with no on-disk marker for which layout was chosen, since that collapsed shape is known to both writer and reader:
-+
-.. *Scalar keys* (those whose collapsed `Def` is `Scalar` — integers, floats, `bool`, `char`, `String`, and other types stored as a single leaf, including a smart pointer or transparent newtype wrapping one of these, such as `Arc<str>`): each entry is named by the textual form of its key and resolves to the encoded value, exactly as a leaf would be encoded. This is the readable, JSON-like form. A key MUST NOT equal the reserved presence-marker name (`_`, link:#serialization.design.trees.empty-marker[presence marker]).
-.. *Composite keys* (structs, tuples, enums, sequences, and any other key whose collapsed shape does not encode to a single leaf): the textual-name form cannot faithfully represent them, so each pair is recorded as a two-entry sub-tree with children named `k` and `v` holding the independently-encoded key and value. The map's entries point at these pair sub-trees and are named by a link:#serialization.design.trees.ordering[zero-padded ordinal name]; the ordinals are assigned in ascending order of each pair sub-tree's object id so that the map remains content-addressed independent of iteration order.
-
-No type marker is recorded; element and key types are recovered from the target `Facet` type on read.
---
-
-[role="requirement", id="serialization.design.bytes"]
-.Byte-Sequence Encoding
---
-A sequence of `u8` — `Vec<u8>`, `[u8; N]`, or a `[u8]` slice — MUST be stored as a single Git blob whose content is the bytes verbatim, followed by the mandatory trailing newline defined by link:#serialization.design.leaves.encoding[leaf byte encoding] (this blob is a leaf blob, and the rule applies uniformly regardless of the byte sequence's own content), rather than as a tree with one entry per byte.
-
-This is the Git-native representation of a byte buffer: it lets identical buffers deduplicate to one object and avoids the cost of a per-byte tree. The distinction is recovered from the element type on read; no marker is stored.
---
-
-[role="requirement", id="serialization.design.pointers"]
-.Smart-Pointer Encoding
---
-A smart pointer — `Box<T>`, `Arc<T>`, `Rc<T>`, including the unsized slice forms `Arc<[T]>` and friends — MUST be encoded as the encoding of its pointee `T`, with no wrapping tree or marker.
-
-The indirection carries no information Git needs to record, so it is transparent: `Box<Issue>` encodes exactly as `Issue`, and `Arc<[u8]>` encodes exactly as `[u8]` (a single blob). On read the pointer is reconstructed around the decoded pointee.
---
-
-[role="requirement", id="serialization.design.raw-tree"]
-.Raw-Tree Passthrough
---
-`RawTree`, a type provided by this crate wrapping an `ObjectId`, MUST be encoded as a tree entry pointing at that object id directly, with no re-encoding of the referenced tree's contents.
-
-`RawTree` embeds a subtree that was written independently of the `Facet` encoding this crate performs — an arbitrarily-shaped directory with no fixed layout, alongside ordinarily-encoded fields in the same struct. The wrapped object MUST already exist in the store being serialized into; writing a `RawTree` value performs no object-store write of its own. On read, the entry's object id is captured as the `RawTree` value without decoding what it points to, but is verified to be a tree, not a blob, since that is the only shape a `RawTree` may hold.
---
-
-[role="requirement", id="serialization.design.trees.ordering"]
-.Entry Name Ordering
---
-Entries addressed by a positional index — tuple fields, tuple-variant fields, and the elements of sequence collections (`Array`, `Vec`) — MUST be named by their zero-based index encoded as zero-padded decimal at least four digits wide (`0000`, `0001`, …, `0010`, …).
-
-[NOTE]
-====
-The zero-padding aligns Git's  tree-entry ordering with numeric index ordering, which keeps sequentially-accessed entries adjacent for better cache-line locality during tree iteration.
-This is purely a performance optimization: correctness MUST NOT depend on tree-entry ordering, and indices MUST be parsed numerically on read.
-A collection with more than `9999` elements simply loses the locality benefit beyond that point; it remains correct.
-
-Two entries whose names parse to the same numeric index (e.g. `"0"` and `"0000"`) leave the element they'd jointly occupy ambiguous, and can only arise from a foreign tree — this crate's own encoder never produces them. Such a tree MUST be rejected rather than resolved by insertion order, lexical order, or any other implicit tie-break; this applies equally to positionally-addressed entries and to the all-ordinal classification of link:#deserialization.dynamic.heuristic[the dynamic value read heuristic].
-====
---
-
-[role="requirement", id="serialization.design.leaves.encoding"]
-.Leaf Byte Encoding
---
-A *leaf blob* — a scalar, a byte sequence (link:#serialization.design.bytes[byte-sequence encoding]), or a unit enum variant's name blob (link:#serialization.design.trees.variants[variant encoding]) — MUST be encoded as the value's raw representation, with no delimiters or quoting, followed by exactly one trailing `\n` byte.
-A `String` is stored as its UTF-8 bytes verbatim plus that one byte; a scalar is stored as the bytes of its textual form plus that one byte; a byte sequence is stored as its bytes verbatim plus that one byte.
-
-The trailing byte MUST be unconditional: it MUST be appended whether or not the value's raw representation already ends in `\n`, and MUST be present exactly once, never zero times and never more than once. On read, exactly one trailing `\n` MUST be stripped to recover the value; a leaf blob whose final byte is not `\n` MUST be treated as malformed — necessarily a foreign or corrupt object — and rejected with an error, never accepted leniently as though the byte were merely optional.
-
-The link:#serialization.design.trees.empty-marker[presence marker] blob is *not* a leaf blob and is exempt from this requirement: it is a structural presence sentinel, not a value's own representation, and remains the literal empty blob.
-
-[NOTE]
-====
-The rule is "exactly one, always present" — not "at most one, if present". Only the unconditional form is exactly invertible: under an "at most one" reading, the `String` values `"x"` and `"x\n"` would both decode from the blob `x\n`, which is not a lossless round-trip. Under the rule actually specified here they diverge: `"x"` writes `x\n`; `"x\n"` writes `x\n\n`; and an empty `String` writes the single byte `\n` — no longer the empty blob, which is now reserved for the presence marker alone (see the note there).
-
-The purpose is cosmetic but real: without a trailing newline, every leaf blob is a file "without a final newline" to Git, and `git diff` annotates *both* sides of every changed leaf with `\ No newline at end of file` — noise that scales one-to-one with every changed field. A leaf blob is never read by a human as a working-tree file; it exists to be diffed. The trailing byte costs nothing semantically and removes that noise from every leaf-level change.
-
-This is the representation that link:#serialization.design.normalization.leaves[leaf normalization] operates on (before the trailing byte is appended), and the content — trailing byte included — that Git wraps in its canonical `blob <len>\0…` encoding to compute link:#compatibility.git.hash[the object identity], just as the `git` CLI would.
-====
---
-
-[role="requirement", id="serialization.design.normalization.leaves"]
-.Normalizing Leaves
---
-The following leaf representations MUST be normalized on-write.
-
-. Negative zero MUST be normalized to positive zero.
-. The _not a number_ (`nan`) value MUST be normalized to the unquoted string `nan`.
-
-[NOTE]
-====
-Normalization operates on the value's raw representation, before link:#serialization.design.leaves.encoding[the mandatory trailing newline] is appended; it has no bearing on that byte, which is appended unconditionally regardless of what normalization did or did not change.
-====
---
-
-[role="requirement", id="serialization.design.dynamic"]
-.Dynamic Value Encoding
---
-A dynamic value — one whose shape is dynamic (`Def::DynamicValue`, e.g. `facet_value::Value`), carrying its kind at runtime rather than in a static shape — MUST be encoded according to the kind held at write time, as follows. Every kind below that is stored as a blob (`Bool`, `Number`, `Char`, `String`, `Bytes`, `DateTime`, `Uuid`, `QName`) writes a leaf blob and is therefore subject to link:#serialization.design.leaves.encoding[the mandatory trailing-newline requirement] like any other leaf, in addition to the rules given here.
-
-. `Null` MUST be encoded as the presence-marker tree, per link:#serialization.design.trees.empty-marker[the presence-marker requirement], rather than a literal empty tree.
-. `Bool` MUST be encoded as a `true` or `false` blob, per link:#serialization.design.booleans[boolean serialization].
-. `Number` MUST be encoded as a blob holding its textual form, normalized identically to scalar leaves per link:#serialization.design.normalization.leaves[leaf normalization]: `nan` for _not a number_, and negative zero normalized to positive zero. An integer outside the `i64`/`u64` range MUST be rendered exactly, or the write MUST fail; it MUST NOT be rendered lossily through a floating-point conversion. A value that is itself floating-point-backed MUST be rendered per the same float normalization rules regardless of magnitude — including a magnitude beyond what a 64-bit or 128-bit integer could hold — since it is not an integer being approximated. An implementation whose runtime interface cannot distinguish an out-of-range whole value's exact representation (integer vs. floating-point) MUST fail rather than guess.
-. `Char` MUST be encoded as a blob holding the character's UTF-8 encoding.
-. `String` MUST be encoded as a blob holding its UTF-8 bytes verbatim, and `Bytes` as a blob holding its bytes verbatim, exactly per link:#serialization.design.leaves.encoding[leaf byte encoding] and link:#serialization.design.bytes[byte-sequence encoding].
-. `DateTime` MUST be encoded as a blob holding RFC 3339-style text conforming to the following normative grammar. An offset datetime MUST carry its offset (`Z` or `±HH:MM`); a local datetime, local date, or local time MUST use the corresponding bare form. A negative (BCE, proleptic Gregorian) year MUST render as `"-"` followed by its magnitude zero-padded to four digits (year `-5` → `-0005`); a year at or beyond `10000` MUST print all of its digits rather than being truncated to four.
-+
-[listing]
+[source]
 ----
-year            = ["-"] 4*DIGIT
-date            = year "-" MM "-" DD
-time            = HH ":" MM ":" SS ["." 1*9DIGIT]
-offset          = "Z" / ("+" / "-") HH ":" MM
-offset-datetime = date "T" time offset
-local-datetime  = date "T" time
-local-date      = date
-local-time      = time
+{ <value's own entries>..., .schema -> <unbound schema> }
 ----
-. `Uuid` and `QName` MUST be encoded as blobs holding their defined textual forms: a `Uuid` as its canonical hyphenated lowercase form; a `QName` with a non-empty namespace as Clark notation (`{namespace}local`), and a `QName` with no namespace — including one whose namespace is present but the empty string — as the bare local name.
-. `Array` MUST be encoded as a Git tree whose entries are named by link:#serialization.design.trees.ordering[zero-padded ordinal names], one per element.
-. `Object` MUST be encoded as a Git tree whose entries are named by their member keys, each key subject to the same entry-name validity rule enforced for scalar map keys and struct field names.
 
-[NOTE]
-====
-No on-disk marker distinguishes a dynamic value from the same data written through a typed `Facet` shape — consistent with link:#serialization.design.schemaless[schemaless encoding], the tree records values only.
-A dynamic `String` therefore produces the same blob, and the same object id, as a typed `String`.
-====
+Because the document's schema root resolves to a struct
+(link:#envelope.schema-root[document schema root]), the value's fields sit
+directly at the root: there is no `value/` subtree and no `schema/` subtree and
+no wrapper around the value. `.value` is reserved by the encoding and is never
+written — there is no `.value` entry in a document.
+
+`.schema` MUST be found by *name*, never by position: the entry sorts wherever
+its byte order places it among the value's own entries, and no implementation
+may rely on where it appears. `.schema` MUST hold an *unbound* `Schema` value —
+a `Schema` with no nested `.schema` of its own
+(link:#schema.representation[schema representation]).
+
+The reserved name is meaningful only at the root. A struct field genuinely
+named `.schema` is escaped by the encoding (to `%.schema`) and can never
+collide with the envelope entry; a `.schema` entry appearing below the root is
+an error.
 --
 
-=== Deserialization
-
-[role="requirement", id="deserialization.roundtrip"]
-.Support for Serialization and Deserialization
+[role="requirement", id="envelope.schema-root"]
+.Document Schema Root
 --
-Deserialization of data serialized via `facet-git-tree` into its original typed `Facet` target MUST result in the original data. Typed `Facet` round trips are expected to be faithful. This requirement does not apply to a schemaless dynamic-value target; its read behavior is defined by link:#deserialization.dynamic.heuristic[the dynamic value read heuristic].
---
-
-[role="requirement", id="deserialization.dynamic.heuristic"]
-.Dynamic Value Read Heuristic
---
-When the deserialization target is a dynamic value, no schema is available on disk and none is supplied by the target type, so the reader MUST apply the following heuristic.
-
-. A blob MUST end with the mandatory trailing `\n` byte required of every leaf blob (link:#serialization.design.leaves.encoding[leaf byte encoding]); its absence MUST be an error, not a lenient accept. That byte MUST be stripped first; the remaining content, if valid UTF-8, MUST be read as a `String`, otherwise as `Bytes`.
-. A non-empty tree in which every entry name parses as a decimal ordinal MUST be read as an `Array`, with elements ordered by numeric index per link:#serialization.design.trees.ordering[entry name ordering].
-. Any other tree — including the presence-marker tree (link:#serialization.design.trees.empty-marker[presence marker]), which MUST be stripped before this classification so it is not misread as a one-member `Object` — MUST be read as an `Object`, with one member per entry.
-
-This mapping is best-effort and lossy: it recovers structure, not the writer's dynamic kind. In particular, scalar numeric text does not retain the original numeric width, signedness, or scalar type, so that information cannot be recovered without a schema or typed target. `Null` and empty dynamic `Array`/`Object` values share the same marker and are all read with the empty-`Object` interpretation; the heuristic cannot distinguish those empty states.
-The following writes do not survive a dynamic round-trip.
-
-[cols="1,1", options="header"]
-|===
-| Written | Read back as
-
-| `Null`
-| empty `Object` (`{}`)
-
-| `Bool`, `Number`, `Char`, `DateTime`, `Uuid`, `QName`
-| `String` holding the textual form
-
-| `Bytes` whose content is valid UTF-8
-| `String`
-
-| empty `Array`
-| empty `Object` (`{}`)
-
-| `Object` whose keys are all decimal ordinals
-| `Array`
-|===
-
-Recovering full fidelity requires either a typed read — supplying the original `Facet` type — or a schema-driven read per link:#deserialization.schema-driven[schema-driven deserialization].
+A document's schema root MUST resolve — following `ref` nodes through the
+document's `defs` — to a `struct` node. A schema whose resolved root is any
+other node — a scalar or `unit`, a sequence (`list`/`array`/`tuple`), a `map`,
+an `optional`, an `enum`, or an opaque leaf such as `cbor`, `rawtree`, or
+`dynamic` — describes a bare value, not a document, and MUST be refused as a
+document root. There is no wrapper variant that would let such a value become a
+document; a top-level scalar or sequence is stored inside a struct field.
 --
 
-[role="requirement", id="deserialization.schema-driven"]
-.Schema-Driven Deserialization
+[role="requirement", id="envelope.empty"]
+.Empty Struct Document
 --
-Given a link:#schema.representation[schema document], the schema-driven reader (`deserialize_value_with_schema`) MUST recover a faithful dynamic value from a tree written by this crate's encoding, without the original `Facet` type, according to the following mapping from schema node to value.
-
-Every blob referenced in the table below is a leaf blob per link:#serialization.design.leaves.encoding[leaf byte encoding]: "the blob's textual form" or "the blob's content" means that blob's bytes with the mandatory trailing `\n` already stripped, and a blob missing that byte MUST fail the read rather than be accepted with the byte folded into the value.
-
-[cols="1,2", options="header"]
-|===
-| Schema node | Value produced
-
-| `Unit`
-| `Null`; the encoded object MUST be verified to be an empty tree.
-
-| `I8` … `I128`, `ISize`, `U8` … `U128`, `USize`
-| an exact `Number` parsed from the blob's textual form; `i128`/`u128`-range values MUST be preserved exactly, never routed through a floating-point conversion.
-
-| `F32`, `F64`
-| a `Number` parsed from the blob's textual form, accepting `nan`.
-
-| `Bool`, `Char`, `String`
-| the corresponding dynamic kind parsed from the blob.
-
-| `Bytes`
-| `Bytes` holding the blob's content verbatim.
-
-| `Struct`
-| an `Object` with one member per non-omitted field; every field the schema names MUST have a tree entry, `Optional` included, otherwise the read MUST fail — unless the field's `has_default` is set, in which case a missing entry MUST be left out of the `Object` rather than failing or inventing a value.
-
-| `Tuple`, `List`
-| an `Array` of the elements, ordered by numeric index per link:#serialization.design.trees.ordering[entry name ordering].
-
-| `Array { elem, len }`
-| an `Array` of the elements; the entry count MUST equal `len`, otherwise the read MUST fail.
-
-| `Map` with a scalar key schema
-| an `Object` keyed by the textual keys.
-
-| `Map` with a composite key schema
-| an `Array` of two-member `Object` values (`{"k": …, "v": …}`), one per pair sub-tree.
-
-| `Optional`
-| `Null` for the presence-marker tree; otherwise the inner value, read from the `some` entry.
-
-| `Enum`
-| a single-member `Object` whose key is the live variant's name and whose value encodes the payload per link:#serialization.design.trees.variants[variant encoding]; a variant name not present in the schema MUST be an error.
-
-| `RawTree`
-| a `String` holding the referenced object id as 40-character lowercase hexadecimal.
-
-| `Dynamic`
-| the result of link:#deserialization.dynamic.heuristic[the dynamic value read heuristic] applied at that point.
-
-| `Ref(name)`
-| the value read via the definition named `name` in the document's `defs` table; an unknown name MUST be an error.
-|===
-
-Recursion depth MUST be bounded by the same maximum-depth limit that bounds ordinary deserialization, and every hop MUST count against that limit — including `Ref` resolution — so that `Ref`-to-`Ref` chains cannot recurse unboundedly.
+An empty struct's document is `{ none -> <empty blob>, .schema -> <schema tree> }`:
+the value contributes the encoding's `none` presence marker, and the `.schema`
+entry sits beside it. No empty tree is ever written; the marker and its target
+are defined by `facet-git-tree`'s `docs/format.adoc`.
 --
 
 === Schemas
@@ -360,9 +131,13 @@ Recursion depth MUST be bounded by the same maximum-depth limit that bounds ordi
 [role="requirement", id="schema.representation"]
 .Schema Representation
 --
-`Node` and `Schema` MUST be ordinary `Facet` values, self-hosted: a schema document is stored as a Git tree via this crate's own encoding, with no special-cased representation.
+`Node` and `Schema` MUST be ordinary `Facet` values, self-hosted: a schema
+document is stored as a Git tree via this crate's own encoding, with no
+special-cased representation.
 
-Their on-disk form is a public contract: any change to the encoded shape of the schema types is a breaking change and MUST be released as a semver-major version, per link:#compatibility.update[compatibility with prior releases].
+Their on-disk form is a public contract: any change to the encoded shape of the
+schema types is a breaking change and MUST be released as a semver-major
+version, per link:#compatibility.update[compatibility with prior releases].
 
 A schema document also carries its embedded `kind` name. The name is part of
 the schema document and is validated as a Git ref-name segment; it MUST NOT be
@@ -374,9 +149,9 @@ The schema types are defined as follows.
 [source,rust]
 ----
 pub struct Schema {
-    pub kind: String,
+    pub kind: String,                 // opaque entity-kind label, e.g. "Book"
     pub root: Node,
-    pub defs: BTreeMap<String, Node>,
+    pub defs: BTreeMap<String, Node>, // named types, keyed by Node::Ref name
 }
 
 #[repr(u8)]
@@ -386,158 +161,134 @@ pub enum Node {
     U8, U16, U32, U64, U128, USize,
     F32, F64,
     Bytes,
-    Struct(BTreeMap<String, StructField>),
-    Tuple(Vec<Node>),
+    Cbor,      // opaque canonical-CBOR payload
+    RawTree,   // verbatim subtree reference
+    Dynamic,   // runtime-shaped value
+
     List(Box<Node>),
     Array { elem: Box<Node>, len: usize },
-    Map { key: Box<Node>, value: Box<Node> },
+    Map { key: Box<Node>, value: Box<Node> },   // key MUST be String
     Optional(Box<Node>),
+    Tuple(Vec<Node>),
+    Struct(BTreeMap<String, Node>),
     Enum(BTreeMap<String, VariantKind>),
-    RawTree,
-    Dynamic,
     Ref(String),
-}
-
-pub struct StructField {
-    pub node: Node,
-    pub has_default: bool,
 }
 
 #[repr(u8)]
 pub enum VariantKind {
     Unit,
-    Newtype(Box<Node>),
     Tuple(Vec<Node>),
     Struct(BTreeMap<String, Node>),
 }
 ----
 
-A struct node's fields and an enum node's variants MUST be keyed by name, so the name IS the tree entry name under link:#serialization.design.trees.collections[the scalar-key map layout] — no ordinal indirection, and no special case in the encoder: the schema types are ordinary `Facet` values walked by the same generic encoding, which is what this requirement's self-hosting claim already demands.
+A `Node` leaf variant is a bare blob holding its keyword (`unit`, `bool`,
+`char`, `string`, `i8` … `u128`, `isize`, `usize`, `f32`, `f64`, `bytes`,
+`cbor`, `rawtree`, `dynamic`); a composite variant is a single-entry tree
+`{ keyword -> payload }` (`list`, `array`, `map`, `optional`, `tuple`,
+`struct`, `enum`, `ref`). Node tags are exactly the *lowercase* variant names.
 
-A `Node::Struct` field is a `StructField`, not a bare `Node`: `has_default` marks a field a write MAY leave without a tree entry, per link:#serialization.schema-directed[schema-directed serialization]'s `Struct` row, and a read finds such an omitted entry simply absent rather than failing, per link:#deserialization.schema-driven[schema-driven deserialization]'s. A struct enum variant's fields (`VariantKind::Struct`) carry no such marker and stay bare `Node`s.
+* `Node::Struct` maps *field name -> `Node`* directly. There is no
+  `StructField` wrapper, no `has_default` flag, and no `newtype` variant: a
+  one-field tuple variant is `Tuple([n])`.
+* `cbor`, `rawtree`, and `dynamic` are node kinds. `cbor` is an opaque
+  canonical-CBOR payload; `rawtree` points at an existing tree oid without
+  re-encoding it (an opaque, arbitrarily-shaped subtree exempt from the
+  no-empty-tree and mode rules); `dynamic` is a value shaped at runtime.
+* `Map.key` MUST be `String`. A schema whose `Map.key` node is anything else is
+  rejected; non-string-keyed data is modeled as `cbor`.
+* Named types are `ref` nodes into the document's `defs` table. A `ref` whose
+  target is absent is *dangling* and MUST be rejected; a cycle of refs not
+  guarded by `Optional`/`List`/`Array`/`Map`/`Enum` is *non-productive* and MUST
+  be rejected.
+* Every struct field is always emitted. On read, a missing field is an error
+  and an unknown entry is an error. The format therefore has no optional or
+  defaulted fields at the schema level; emptiness is expressed only by
+  `Optional` and by the encoding's containers.
 
-Field and variant declaration order is consequently NOT recorded and MUST NOT be relied upon.
-It is not load-bearing anywhere in the encoding — struct values encode name-keyed and enum variants tag by name — so nothing a reader does depends on it.
+A struct node's fields and an enum node's variants MUST be keyed by name, so the
+name IS the tree entry name — no ordinal indirection: the schema types are
+ordinary `Facet` values walked by the same generic encoding, which is what this
+requirement's self-hosting claim already demands.
 
-A field or variant name MUST be a legal tree entry name — the same constraint link:#serialization.design.trees.empty-marker[a dynamic map key] is under — and MUST be rejected otherwise.
+Field and variant declaration order is consequently NOT recorded and MUST NOT
+be relied upon. It is not load-bearing anywhere in the encoding — struct values
+encode name-keyed and enum variants tag by name — so nothing a reader does
+depends on it.
 
-A schema tree therefore reads like a type declaration, as `git ls-tree -r` of a published `Issue` schema shows (trimmed to the relevant entries):
+A field or variant name MUST be a legal tree entry name under the encoding's
+escaping rules, and MUST be rejected otherwise.
+
+A schema tree therefore reads like a type declaration. `git ls-tree -r` of a
+published `Issue` schema — here `id: String`, `labels: List(String)`, and
+`parent: Optional(Issue)`, with `root` a `ref` to the `Issue` definition —
+shows (trimmed to the relevant entries):
 
 [source]
 ----
-defs/Issue/Struct/id/has_default              -> "false\n"
-defs/Issue/Struct/id/node                     -> "String\n"
-defs/Issue/Struct/labels/has_default          -> "false\n"
-defs/Issue/Struct/labels/node/List            -> "String\n"
-defs/Issue/Struct/parent/has_default          -> "false\n"
-defs/Issue/Struct/parent/node/Optional        -> "String\n"
-root/Ref                                      -> "Issue\n"
+kind                                  -> "Issue\n"
+root/ref                              -> "Issue\n"
+defs/Issue/struct/id                  -> "string\n"
+defs/Issue/struct/labels/list         -> "string\n"
+defs/Issue/struct/parent/optional/ref -> "Issue\n"
 ----
---
-
-[role="requirement", id="schema.generation"]
-.Schema Generation
---
-The converter from a `Facet` shape to a schema document — `schema_of::<T>()` / `Schema::from_shape` — MUST mirror the encoder's dispatch order exactly: transparency collapse first (smart pointers and transparent newtypes resolve to their pointee or inner shape), then `RawTree`, then dynamic values, then the scalar table, then byte sequences, then composites (structs, sequences, maps, options, enums).
-A shape and its transparent wrappers therefore always produce the same schema, just as they produce the same encoding.
-This is the same collapse link:#serialization.design.trees.collections[map-key layout selection] applies, so both agree on what a given shape actually encodes to.
-
-The scalar table MUST refuse `()` (the unit type) exactly as the encoder's scalar leaf encoding does: `()` has no textual (`Display`/`FromStr`) rendering, so it cannot reach a leaf blob and cannot be described by a schema either.
-This does not remove `Node::Unit` from the format — a unit struct still resolves to it, describing the (always, statically) empty tree its *composite* encoding writes; only the scalar table's direct mapping from `()` is refused.
-
-[IMPORTANT]
-====
-A unit *enum variant* does NOT resolve to `Node::Unit`, despite the name similarity: it is described by `VariantKind::Unit` (link:#schema.representation[schema representation]), whose payload write is the bare name-blob collapse defined by link:#serialization.design.trees.variants[variant encoding], not an empty tree. A unit struct *field*'s emptiness is static (that type's encoding is *always* the empty tree, regardless of value, so at a fixed path there is never anything to diff); a unit enum variant's emptiness is one of several live possibilities for that field (the value legitimately varies between `Low`, `Medium`, `High`, …), which is exactly why it needs a shape that shows up in a diff and the unit struct field does not.
-
-That reasoning is about a *fixed path*, and does not extend to a unit struct reached through a varying one. A `Vec` of unit structs encodes every element as an empty tree, so its length — a genuine, varying property of the value — contributes no blob to `git ls-tree -r` and no line to `git diff`; likewise `Option<UnitStruct>` renders `Some` as an empty tree, visible only as the disappearance of the `None` marker. These remain unmarked, and so remain invisible to blob-oriented tooling, which is the same defect this marker exists to remove — narrowed, not eliminated.
-====
-
-A plain (non-variant) named struct's fields MUST carry `StructField::has_default` set from the underlying `facet_core::Field::has_default()` — true exactly when the field's declaration carries `#[facet(default)]` or `#[facet(default = expr)]`. The marker records only that a default exists, never the default value itself: the value may be computed at write time (a current timestamp, for instance), so baking a snapshot into a published schema would let a stale schema silently misrepresent what a fresh write actually produces. A struct enum variant's fields carry no such marker.
-
-Named user types — structs and enums — MUST be deduplicated into the document's `defs` table and referenced by `Node::Ref(name)`.
-Names MUST be assigned deterministically: the key is the type's `type_identifier`, and when distinct types share an identifier, later occurrences in pre-order traversal of the shape are disambiguated with `_2`, `_3`, … suffixes.
-Recursive types are representable because a type's name is registered before its body is computed; the cycle is broken by the `Ref`.
-
-Generation MUST be deterministic: the same input shape always yields an identical `Schema`, so a generated schema serializes to a stable object id.
-
-Shape recursion MUST be bounded by the same maximum nesting depth that bounds ordinary deserialization (link:#deserialization.schema-driven[schema-driven deserialization] already applies this bound to reads); a shape nested deeper than that limit MUST fail generation rather than recurse unboundedly, since data written that deep could never be read back regardless of what schema described it.
---
-
-[role="requirement", id="serialization.schema-directed"]
-.Schema-Directed Serialization
---
-Given a link:#schema.representation[schema document], the schema-directed writer (`serialize_value_with_schema`) MUST encode a dynamic value as the Git objects the schema describes, producing byte-for-byte — and therefore object-id — identical output to link:#serialization.design.dynamic[dynamic encoding] of the equivalent typed value, according to the following mapping from schema node to accepted value.
-
-Every blob produced in the table below is a leaf blob per link:#serialization.design.leaves.encoding[leaf byte encoding]: the mandatory trailing `\n` is appended automatically by the encoding described and is not itself part of the "textual form" named in the table.
-
-Encoding and conformance are one operation: a value that does not conform MUST fail — naming the path within the value at which the mismatch occurred — rather than be encoded lossily or ambiguously.
-The accepted set MUST be exactly the image of link:#deserialization.schema-driven[schema-driven deserialization] — every value that read can produce MUST re-encode — together with the two deterministic bridges a value authored without type information (for example, parsed from JSON) requires: a lossless integer supplied for a floating-point node, and a `String` supplied for a `Bytes` node.
-
-[cols="1,2", options="header"]
-|===
-| Schema node | Accepted value and encoding
-
-| `Unit`
-| `Null`; encoded as an empty tree.
-
-| `I8` … `I128`, `ISize`, `U8` … `U128`, `USize`
-| an integer `Number` within the node's range, encoded as its decimal text. A floating-point-backed `Number` MUST be refused (float-to-integer is not a bridge), as MUST a value outside the range.
-
-| `F32`, `F64`
-| a `Number`, encoded as its textual form under link:#serialization.design.normalization.leaves[leaf normalization]. A floating-point-backed value MUST be rendered at the node's width regardless of magnitude; an integer-backed value MUST be exactly representable at that width, otherwise the write MUST fail rather than round.
-
-| `Bool`, `Char`, `String`
-| the corresponding kind, encoded as the matching leaf blob. `Char` also accepts a single-character `String`; `String` accepts a `String`.
-
-| `Bytes`
-| `Bytes`, encoded verbatim; or a `String`, encoded as its UTF-8 bytes.
-
-| `Struct`
-| an `Object` whose keys are all defined fields; every field the schema names MUST be present in the object and its entry written, unless the field's `has_default` is set, in which case the writer MAY omit both the key and the entry; a key the schema does not define MUST be an error.
-
-| `Tuple`, `Array { elem, len }`
-| an `Array` of the exact required length, encoded as an link:#serialization.design.trees.ordering[ordinal-named] tree; a length mismatch MUST be an error.
-
-| `List`
-| an `Array` of any length, encoded as an ordinal-named tree.
-
-| `Map` with a scalar key schema
-| an `Object`, encoded as a tree keyed by the member names, each subject to the entry-name validity rule.
-
-| `Map` with a composite key schema
-| an `Array` of two-member `{"k": …, "v": …}` objects, encoded as ordinal-named `{ k, v }` pair sub-trees, the pairs ordered by object id exactly as the typed encoder orders them.
-
-| `Optional`
-| `Null`, encoded as the presence-marker tree; otherwise the inner value, encoded and wrapped in a single `some` entry.
-
-| `Enum`
-| a single-member `Object` whose key names the variant and whose value encodes the payload per link:#serialization.design.trees.variants[variant encoding]; a name not present in the schema, or an object that is not a single member, MUST be an error.
-
-| `RawTree`
-| a `String` holding a 40-character lowercase-hex object id, referenced verbatim as a tree with no object written.
-
-| `Dynamic`
-| any value, encoded by link:#serialization.design.dynamic[dynamic encoding].
-
-| `Ref(name)`
-| the value encoded via the definition named `name`; an unknown name MUST be an error.
-|===
-
-Recursion depth MUST be bounded by the same maximum-depth limit that bounds deserialization, and every hop MUST count against that limit — including `Ref` resolution — so that a `Ref`-to-`Ref` cycle in the schema fails rather than recursing unboundedly.
 --
 
 [NOTE]
 ====
-Publishing a schema under a ref — e.g. `refs/schema/issue` — is a convention owned by higher layers such as `git-store`; `facet-git-tree` itself remains oid-in/oid-out and performs no ref operations.
-A schema is published by serializing its `Schema` through this crate and pointing the ref at the resulting tree, or at a commit wrapping that tree for history and signing — the higher layer's choice.
+Publishing a schema under a ref — e.g. `refs/schema/issue` — is a convention
+owned by higher layers such as `git-store`; `facet-git-tree` itself remains
+oid-in/oid-out and performs no ref operations. A schema is published by
+serializing its `Schema` through this crate and pointing the ref at the
+resulting tree, or at a commit wrapping that tree for history and signing — the
+higher layer's choice. Published schema trees are the bare `Schema` value
+(entries `kind`, `root`, `defs`); a schema embedded as a document's `.schema`
+entry is the same unbound value.
 ====
 
-=== Structural Comparison
+=== Value and Tree Encoding
 
-[role="requirement", id="structural.comparison.equality"]
-.Structural Equality
+[role="requirement", id="encoding.summary"]
+.Encoding Summary (normative: `facet-git-tree` `docs/format.adoc`)
 --
-If two data instances serialize to the same Git tree, they MUST be considered equal for purposes of data retention.
+The value and tree encoding is not redefined here; it is specified by
+`facet-git-tree`'s `docs/format.adoc`, which is normative for this document.
+The following summary is informative and MUST NOT be read as independent of
+that document.
+
+* *Leaves.* A text leaf is its raw representation followed by exactly one
+  trailing `\n` byte, appended unconditionally; on read exactly one trailing
+  `\n` is stripped, and a text leaf whose final byte is not `\n` is malformed.
+  The binary leaves `bytes` and `cbor` carry no trailing byte. Integers are
+  canonical decimal — no `+`, no leading zeros, no `-0`. Floats use the `ryu`
+  crate's shortest round-tripping text; the non-finite values are the fixed
+  lowercase spellings `nan`, `inf`, and `-inf`; zero is written `0.0` and
+  `-0.0` is normalized (and rejected on read). The codec round-trips a value
+  exactly, except for a NaN's payload/sign.
+* *Containers.* Positional entries (tuple fields, tuple-variant fields,
+  sequence elements) are named by fixed-width *lowercase hex* ordinals, width
+  three, `000`–`fff`; every tree is capped at 4096 entries. Larger payloads are
+  modeled as a `cbor` field, never silently repacked.
+* *Markers.* `None`, a dynamic `Null`, an empty collection, an empty struct,
+  and `unit` share one presence marker: the non-empty tree
+  `{ none -> <empty blob> }`. `Some(x)` is `{ some -> x }`. `none` and `some`
+  are reserved structural names. No empty tree is ever written anywhere (except
+  inside a `rawtree`), and the empty blob is always written explicitly.
+* *Names.* A user name is stored verbatim only when it is non-empty, every byte
+  is in `[A-Za-z0-9._-]`, its first byte is neither `.` nor `%`, and it is not
+  literally `none` or `some`; otherwise it is `%` followed by uppercase-hex
+  percent-encoding. A name's *encoded* length MUST NOT exceed 255 bytes.
+* *Decode.* A reader is strict: it rejects unknown structural keywords,
+  malformed or non-canonical escapes, wrong-width/uppercase/gapped/duplicate
+  ordinals, object-kind or mode mismatches, unsorted or duplicate entries, and
+  non-canonical leaves. Invariant: for every accepted tree `t`,
+  `encode(decode(t)) == t`. Limits, counted on the encoded tree: max name
+  length 255 bytes, max nesting depth 32, and max `2^20` (1048576) node visits
+  per decode, counting visits rather than unique oids.
+* *Object formats.* The codec supports both Git object formats, SHA-1 and
+  SHA-256 (link:#compatibility.git.hash[object identity hash]), with oids
+  comparable only within one format.
 --
 
 === `git-store` Plumbing Boundary
@@ -558,9 +309,10 @@ revision that resolves to one. The CLI spellings are
 use that same explicit schema to construct the bound document root.
 
 These operations MUST NOT infer a schema from a kind ref, schema history,
-commit trailers, or a caller-selected entity name. A bound document MUST carry
-exactly `schema/` and `value/` at its root, with the schema subtree being the
-one used to validate the value subtree.
+commit trailers, or a caller-selected entity name. A bound document is the
+value's own entries plus the single reserved `.schema` entry
+(link:#envelope), and the `.schema` subtree MUST be the exact schema used to
+validate the value.
 --
 
 [role="requirement", id="plumbing.schema.history"]
@@ -571,6 +323,69 @@ publication commit directly. Omitting `--at` selects the current publication.
 Historical inspection MUST report the publication commit OID and the
 schema-tree OID; it MUST NOT replace the historical selection with the current
 schema.
+--
+
+[role="requirement", id="plumbing.identity"]
+.Content-Derived Entity Identity
+--
+The `EntityId` of a bound document MUST be the object ID of its complete bound
+document tree — the tree holding the value's own entries and the reserved
+`.schema` entry (link:#envelope). Both the encoded value and the embedded
+schema therefore contribute to identity, and an implementation MUST make that
+ID available for any document it can compile.
+
+Identity is a derived value, not a ref layout. Ref names under
+`refs/store/<kind>/` are application policy: the store MUST publish an entity
+at whatever name the caller selects and MUST NOT attach meaning to that name.
+An application that wants content-addressed storage MUST be able to select
+`<entity-id>` as the name, and the store MUST treat that name like any other.
+
+The per-kind index is a materialized cache of the entity refs; entity refs
+remain authoritative and a reader MUST be able to fall back when the index is
+missing, malformed, or stale.
+--
+
+[role="requirement", id="identity.commit-trailers"]
+.Advisory Schema Trailers
+--
+A commit wrapping a document MAY carry the advisory trailers `Schema-Version:`
+(the meta-schema major version defined by `facet-git-tree`'s `docs/format.adoc`)
+and `Schema-commit:` (a pointer to a schema publication commit). These trailers
+are advisory only: trailers are not traversed by `gc` or `push`, and the
+normative, reachable schema is always the embedded `.schema` entry. No read may
+require a trailer to resolve a schema, and a reader ignores trailers entirely:
+the legacy names `Schema:` and `Ents-Ref:` are ignored on read exactly as the
+two advisory names are.
+
+The reserved-trailer set (`RESERVED_TRAILERS`) keeps user commits free of all
+four names — the two advisory trailers plus the legacy `Schema:` and
+`Ents-Ref:` — because accepting a legacy name would let a caller make a newly
+written commit look like a schema or provenance binding that the embedded
+`.schema` entry, not a trailer, actually carries. A user-supplied commit message
+MUST NOT contain a line beginning with a reserved trailer name, and a write MUST
+reject such a message rather than emit it.
+--
+
+[role="requirement", id="identity.doctor"]
+.Schema-of-Schemas Fixed Point
+--
+`git store doctor` MUST pin the object id of `S0` — the schema describing
+`Schema` itself, the schema-of-schemas — as a golden constant *per object
+format*, and MUST verify the codec's fixed point for both formats: that the
+compiled-in `S0` decodes and re-encodes to itself at that pinned id, for SHA-1
+and for SHA-256 (link:#compatibility.git.hash[object identity hash]).
+--
+
+[role="requirement", id="plumbing.tombstone"]
+.Typed Entity Deletion
+--
+`git store entity delete <kind> <entity-id>` MUST publish a typed tombstone at
+the entity's canonical ref rather than prune it, so the ref's history stays
+reachable; `git store rm <kind> <name>` does the same after resolving the
+caller-chosen name to its content-derived id. The tombstone MUST use the bound
+document frame (link:#envelope) and carry an explicit deleted state, kind, and
+the `EntityId` the ref addressed when it was deleted. A repeated deletion MUST
+be distinguishable from an absent entity.
 --
 
 [role="requirement", id="plumbing.inspect"]
@@ -612,31 +427,10 @@ unreachable. Traversal, batching, retry, resume, and conflict policy belong to
 the calling script or program.
 --
 
-[role="requirement", id="plumbing.identity"]
-.Content-Derived Entity Identity
---
-The `EntityId` of a bound document MUST be the object ID of its complete root
-`{schema/, value/}` tree. Both the encoded value and the embedded schema
-therefore contribute to identity, and an implementation MUST make that ID
-available for any document it can compile.
+=== Structural Comparison
 
-Identity is a derived value, not a ref layout. Ref names under
-`refs/store/<kind>/` are application policy: the store MUST publish an entity
-at whatever name the caller selects and MUST NOT attach meaning to that name.
-An application that wants content-addressed storage MUST be able to select
-`<entity-id>` as the name, and the store MUST treat that name like any other.
-
-The per-kind index is a materialized cache of the entity refs; entity refs
-remain authoritative and a reader MUST be able to fall back when the index is
-missing, malformed, or stale.
+[role="requirement", id="structural.comparison.equality"]
+.Structural Equality
 --
-
-[role="requirement", id="plumbing.tombstone"]
-.Typed Entity Deletion
---
-`git store entity delete <kind> <name>` MUST publish a typed tombstone over
-the named ref rather than prune it, so the name's history stays reachable. The
-tombstone MUST use the bound `{schema/, value/}` frame and carry an explicit
-deleted state, kind, and the `EntityId` the name addressed when it was
-deleted. A repeated deletion MUST be distinguishable from an absent entity.
+If two data instances serialize to the same Git tree, they MUST be considered equal for purposes of data retention.
 --
