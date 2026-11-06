@@ -40,18 +40,18 @@ fn bound_document(
     let schema_tree = serialize_into(doc, store.objects()).expect("write schema");
     let value_tree = facet_git_tree::serialize_value_with_schema(value, doc, store.objects())
         .expect("write value");
-    let mut entries = vec![
-        TreeEntry {
-            mode: gix::objs::tree::EntryKind::Tree.into(),
-            filename: "schema".into(),
-            oid: schema_tree,
-        },
-        TreeEntry {
-            mode: gix::objs::tree::EntryKind::Tree.into(),
-            filename: "value".into(),
-            oid: value_tree,
-        },
-    ];
+    // A bound document is the value's own entries beside the reserved
+    // `.schema` entry.
+    let mut entries = store
+        .objects()
+        .get_tree(&value_tree)
+        .expect("read value tree")
+        .expect("value tree is present");
+    entries.push(TreeEntry {
+        mode: gix::objs::tree::EntryKind::Tree.into(),
+        filename: ".schema".into(),
+        oid: schema_tree,
+    });
     entries.sort();
     gix::objs::Write::write(store.objects(), &gix::objs::Tree { entries }).expect("write document")
 }
@@ -110,9 +110,9 @@ struct CounterWithLabel {
     label: String,
 }
 
-/// A kind whose own top-level field names collide with the two the
-/// `{schema/, value/}` split uses, so the split cannot be confused with the
-/// value it wraps.
+/// A kind whose own top-level field names are `value` and `schema` — ordinary
+/// names, since only the dotted `.schema`/`.value` are reserved — so an unbound
+/// value tree cannot be confused with a bound document.
 #[derive(Facet)]
 struct Colliding {
     value: String,
@@ -181,37 +181,86 @@ fn binding_and_inspection_describe_a_prepared_document() {
 #[test]
 fn inspection_reports_malformed_envelopes_without_guessing() {
     let store = store();
+    let doc = schema_of::<Counter>().unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
     let value_tree = store
-        .encode_value(
-            &value!({ "n": 7 }),
-            SchemaTree::from(
-                serialize_into(&schema_of::<Counter>().unwrap(), store.objects()).unwrap(),
-            ),
-        )
+        .encode_value(&value!({ "n": 7 }), SchemaTree::from(schema_tree))
         .unwrap();
-    let malformed = gix::objs::Write::write(
+
+    // No `.schema` entry: a legacy, unbound value root rather than malformed.
+    assert_eq!(
+        store
+            .inspect_document(DocumentTree::from(value_tree.object_id()))
+            .unwrap()
+            .kind(),
+        DocumentKind::LegacyValueRoot
+    );
+
+    // A `.schema` entry that is a blob, not a tree, is a shape error.
+    let blob_schema = gix::objs::Write::write(
         store.objects(),
         &gix::objs::Tree {
             entries: vec![TreeEntry {
-                mode: gix::objs::tree::EntryKind::Tree.into(),
-                filename: "value".into(),
+                mode: gix::objs::tree::EntryKind::Blob.into(),
+                filename: ".schema".into(),
                 oid: value_tree.object_id(),
             }],
         },
     )
     .unwrap();
-
     let DocumentInspection::Malformed { found, reason, .. } = store
-        .inspect_document(DocumentTree::from(malformed))
+        .inspect_document(DocumentTree::from(blob_schema))
         .unwrap()
     else {
         panic!("expected malformed document metadata");
     };
-    assert_eq!(found, vec!["value"]);
-    assert!(matches!(
-        reason,
-        DocumentShapeError::UnexpectedEntries { found } if found == vec!["value"]
-    ));
+    assert_eq!(found, vec![".schema"]);
+    assert_eq!(reason, DocumentShapeError::SchemaNotTree);
+
+    // A `.schema`-only root has no value entries beside it. A struct root
+    // always contributes at least one entry — the `none` marker when it is
+    // empty — so this envelope cannot have been written by this format.
+    let schema_only = gix::objs::Write::write(
+        store.objects(),
+        &gix::objs::Tree {
+            entries: vec![TreeEntry {
+                mode: gix::objs::tree::EntryKind::Tree.into(),
+                filename: ".schema".into(),
+                oid: schema_tree,
+            }],
+        },
+    )
+    .unwrap();
+    let DocumentInspection::Malformed { found, reason, .. } = store
+        .inspect_document(DocumentTree::from(schema_only))
+        .unwrap()
+    else {
+        panic!("expected malformed document metadata");
+    };
+    assert_eq!(found, vec![".schema"]);
+    assert_eq!(reason, DocumentShapeError::NoValueEntries);
+
+    // A `.schema` entry naming an object the database lacks is malformed too,
+    // and names the object it could not find.
+    let absent = ObjectId::from_hex(b"0123456789012345678901234567890123456789").unwrap();
+    let missing_schema = gix::objs::Write::write(
+        store.objects(),
+        &gix::objs::Tree {
+            entries: vec![TreeEntry {
+                mode: gix::objs::tree::EntryKind::Tree.into(),
+                filename: ".schema".into(),
+                oid: absent,
+            }],
+        },
+    )
+    .unwrap();
+    let DocumentInspection::Malformed { reason, .. } = store
+        .inspect_document(DocumentTree::from(missing_schema))
+        .unwrap()
+    else {
+        panic!("expected malformed document metadata");
+    };
+    assert_eq!(reason, DocumentShapeError::SchemaMissing { oid: absent });
 }
 
 #[test]
@@ -396,8 +445,8 @@ fn old_versions_stay_readable_after_schema_evolves() {
         })
         .unwrap();
 
-    // The old commit reads back through its own `schema/` subtree, even when
-    // the current schema publication ref is unavailable.
+    // The old commit reads back through its own embedded `.schema` entry, even
+    // when the current schema publication ref is unavailable.
     assert_eq!(store.dynamic(seg("thing")).schema().get().unwrap(), None);
     assert_eq!(
         store
@@ -581,6 +630,7 @@ fn new_schema_and_data_commits_have_no_schema_or_provenance_trailers() {
                 .all(|line| {
                     !line.starts_with(b"Schema:")
                         && !line.starts_with(b"Schema-Version:")
+                        && !line.starts_with(b"Schema-commit:")
                         && !line.starts_with(b"Ents-Ref:")
                 })
         );
@@ -609,7 +659,7 @@ fn legacy_schema_and_provenance_trailers_are_ignored() {
     assert_eq!(kind.read(legacy).unwrap().value().unwrap(), value);
 }
 
-/// A commit whose tree is not the `{schema/, value/}` split — anything not
+/// A commit whose tree is not a `.schema`-bound document — anything not
 /// written by [`git_store::Kind::put`]/[`git_store::kind::Put::anonymous`],
 /// including every commit predating subtree binding — is diagnosable instead
 /// of collapsing through the catch-all `Error::Backend`.
@@ -645,13 +695,14 @@ fn retrieve_at_reports_a_commit_that_is_not_subtree_bound() {
 /// The pre-binding shape specifically: a commit whose tree *is* the value, as
 /// every commit written before this change looks. It must report
 /// `NotSubtreeBound` — naming re-storing as the remedy — and not be mistaken
-/// for a subtree-bound commit just because the value happens to carry
-/// top-level fields called `value` and `schema`.
+/// for a bound commit just because the value happens to carry top-level fields
+/// called `value` and `schema` (either of which would need a leading dot to be
+/// the reserved envelope entry).
 #[test]
 fn a_pre_binding_commit_whose_value_has_value_and_schema_fields_is_not_mistaken_for_bound() {
     let store = store();
 
-    // A kind whose own fields collide with the two names the split uses.
+    // A kind whose own fields are named `value` and `schema`.
     let doc = facet_git_tree::schema_of::<Colliding>().unwrap();
     store.dynamic(seg("colliding")).schema().put(&doc).unwrap();
     let colliding = value!({ "value": "v", "schema": "s" });
@@ -691,7 +742,7 @@ fn a_pre_binding_commit_whose_value_has_value_and_schema_fields_is_not_mistaken_
     );
 }
 
-/// An incomplete transfer — the subtree entry is present but the object it
+/// An incomplete transfer — the `.schema` entry is present but the object it
 /// names is not — reports which half is absent and on which commit, rather
 /// than a bare object-not-found. This is the failure class the whole binding
 /// exists to make diagnosable, so it must stay diagnosable even when the
@@ -700,42 +751,25 @@ fn a_pre_binding_commit_whose_value_has_value_and_schema_fields_is_not_mistaken_
 fn retrieve_at_reports_a_subtree_object_that_is_not_present() {
     let store = store();
 
-    store
-        .dynamic(seg("counter"))
-        .schema()
-        .put(&schema_of::<Counter>().unwrap())
-        .unwrap();
+    let doc = schema_of::<Counter>().unwrap();
+    store.dynamic(seg("counter")).schema().put(&doc).unwrap();
     let commit = store
         .dynamic(seg("counter"))
         .put(&entity("c"), &value!({ "n": 1 }))
         .unwrap();
 
-    // The schema entry names a tree that was never written to this store.
+    // Take the just-written document root and point its `.schema` entry at a
+    // tree that was never written to this store.
     let absent = ObjectId::from_hex(b"0123456789012345678901234567890123456789").unwrap();
     let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap().unwrap() else {
         panic!("expected a commit");
     };
-    let value_tree = store
-        .objects()
-        .get_tree(&commit_obj.tree)
-        .unwrap()
-        .unwrap()
-        .into_iter()
-        .find(|e| e.filename == "value")
-        .unwrap()
-        .oid;
-    let mut entries = vec![
-        TreeEntry {
-            mode: gix::objs::tree::EntryKind::Tree.into(),
-            filename: "value".into(),
-            oid: value_tree,
-        },
-        TreeEntry {
-            mode: gix::objs::tree::EntryKind::Tree.into(),
-            filename: "schema".into(),
-            oid: absent,
-        },
-    ];
+    let mut entries = store.objects().get_tree(&commit_obj.tree).unwrap().unwrap();
+    for entry in &mut entries {
+        if entry.filename == ".schema" {
+            entry.oid = absent;
+        }
+    }
     entries.sort();
     let root = gix::objs::Write::write(store.objects(), &gix::objs::Tree { entries }).unwrap();
     let severed = commit_ref(
@@ -790,7 +824,7 @@ fn store_anonymous_binds_the_schema_by_subtree() {
         panic!("expected a commit");
     };
     let root = store.objects().get_tree(&commit_obj.tree).unwrap().unwrap();
-    let bound_schema = root.iter().find(|e| e.filename == "schema").unwrap().oid;
+    let bound_schema = root.iter().find(|e| e.filename == ".schema").unwrap().oid;
     assert_eq!(
         bound_schema, schema_tree,
         "store_anonymous must share the schema tree, not duplicate it"
@@ -1238,8 +1272,13 @@ fn put_message_rejects_reserved_schema_and_provenance_trailers() {
     let kind = store.dynamic(seg("counter"));
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
 
-    let values = [value!({ "n": 0 }), value!({ "n": 1 }), value!({ "n": 2 })];
-    for (index, trailer) in ["Schema:", "Schema-Version:", "Ents-Ref:"]
+    let values = [
+        value!({ "n": 0 }),
+        value!({ "n": 1 }),
+        value!({ "n": 2 }),
+        value!({ "n": 3 }),
+    ];
+    for (index, trailer) in ["Schema:", "Schema-Version:", "Schema-commit:", "Ents-Ref:"]
         .into_iter()
         .enumerate()
     {
@@ -1320,8 +1359,8 @@ fn a_read_entry_carries_the_commit_and_message_it_was_written_with() {
 /// [`git_store::kind::Put::anonymous`] derives the canonical entity ref from
 /// the complete document tree, so writing identical content twice is
 /// idempotent even though it returns a commit id.
-/// Identity is derived from the bound frame, so the same content published
-/// under two names has one id and two independent refs.
+/// Identity is derived from the complete bound document, so the same content
+/// published under two names has one id and two independent refs.
 #[test]
 fn content_identity_is_shared_across_names() {
     let store = store();
@@ -1340,7 +1379,7 @@ fn content_identity_is_shared_across_names() {
         .with_alias(&entity("second"))
         .unwrap();
 
-    assert_eq!(first, second, "the bound frame is the identity input");
+    assert_eq!(first, second, "the bound document is the identity input");
     assert_eq!(
         kind.list().unwrap(),
         vec![entity("first"), entity("second")]
@@ -1367,7 +1406,7 @@ fn schema_changes_change_the_entity_id_even_for_the_same_value() {
 
     assert_ne!(
         first, second,
-        "the complete bound frame includes the schema"
+        "the complete bound document includes the schema"
     );
     assert!(
         kind.list_entries()

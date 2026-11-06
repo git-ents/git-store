@@ -198,17 +198,19 @@ fn fetched_tombstone_is_deleted_without_schema_ref_or_index() {
         other => panic!("expected a new tombstone, got {other:?}"),
     };
 
-    // The tombstone is a normal bound frame, not an empty tree.
+    // The tombstone is a normal bound document, not an empty tree: the
+    // tombstone's own fields beside `.schema`.
     let root = origin
         .find_commit(tombstone_commit)
         .unwrap()
         .tree()
         .unwrap();
-    let names: Vec<_> = root
+    let mut names: Vec<_> = root
         .iter()
         .map(|entry| entry.unwrap().inner.filename.to_string())
         .collect();
-    assert_eq!(names, vec!["schema", "value"]);
+    names.sort();
+    assert_eq!(names, vec![".schema", "entity", "kind", "state"]);
 
     let consumer_dir = tempfile::tempdir().unwrap();
     init_repo(consumer_dir.path());
@@ -374,9 +376,9 @@ fn concurrent_writers_land_a_linear_history() {
 
 /// The claim subtree binding exists to make true: stock `git` plumbing —
 /// `git ls-tree`, not just [`git_store`] — can read a data commit. The root
-/// tree has exactly `schema` and `value`, both trees; `value`'s own entries
-/// are the stored struct's field names; and newly written commits contain no
-/// schema or provenance trailers.
+/// holds the stored struct's field names directly, beside the single reserved
+/// `.schema` tree entry; and newly written commits contain no schema or
+/// provenance trailers.
 #[test]
 fn committed_tree_has_the_plumbing_shape_stock_git_expects() {
     let dir = tempfile::tempdir().unwrap();
@@ -398,17 +400,27 @@ fn committed_tree_has_the_plumbing_shape_stock_git_expects() {
     let commit_obj = repo.find_commit(commit).unwrap();
     let root = commit_obj.tree().unwrap();
 
+    // The document root holds Recipe's own fields directly, beside the single
+    // reserved `.schema` entry — there is no `value/` wrapper.
     let mut top_level: Vec<String> = root
         .iter()
         .map(|e| e.unwrap().inner.filename.to_string())
         .collect();
     top_level.sort();
-    assert_eq!(top_level, vec!["schema".to_owned(), "value".to_owned()]);
+    assert_eq!(
+        top_level,
+        vec![
+            ".schema".to_owned(),
+            "serves".to_owned(),
+            "steps".to_owned(),
+            "title".to_owned()
+        ]
+    );
 
-    let schema_entry = root.find_entry("schema").unwrap();
+    let schema_entry = root.find_entry(".schema").unwrap();
     assert!(
         schema_entry.inner.mode.is_tree(),
-        "schema entry must be a tree"
+        ".schema entry must be a tree"
     );
     let schema_commit_obj = repo.find_commit(schema_commit).unwrap();
     assert_eq!(
@@ -416,21 +428,18 @@ fn committed_tree_has_the_plumbing_shape_stock_git_expects() {
         schema_commit_obj.tree().unwrap().id().detach(),
         "the document must embed the exact schema tree used to publish the schema"
     );
-    let value_entry = root.find_entry("value").unwrap();
-    assert!(
-        value_entry.inner.mode.is_tree(),
-        "value entry must be a tree: Recipe is struct-shaped"
-    );
 
-    let value_tree = repo.find_tree(value_entry.object_id()).unwrap();
-    let mut fields: Vec<String> = value_tree
-        .iter()
-        .map(|e| e.unwrap().inner.filename.to_string())
-        .collect();
-    fields.sort();
-    assert_eq!(
-        fields,
-        vec!["serves".to_owned(), "steps".to_owned(), "title".to_owned()]
+    // `title` is a text leaf sitting directly at the root; `steps` is the one
+    // tree-valued field.
+    let title_entry = root.find_entry("title").unwrap();
+    assert!(
+        title_entry.inner.mode.is_blob(),
+        "a string field is a leaf, not a subtree"
+    );
+    let steps_entry = root.find_entry("steps").unwrap();
+    assert!(
+        steps_entry.inner.mode.is_tree(),
+        "a list field is a tree: Recipe's steps are sequence elements"
     );
 
     let schema_message = repo
@@ -444,6 +453,7 @@ fn committed_tree_has_the_plumbing_shape_stock_git_expects() {
             !message.lines().any(|line| {
                 line.starts_with("Schema:")
                     || line.starts_with("Schema-Version:")
+                    || line.starts_with("Schema-commit:")
                     || line.starts_with("Ents-Ref:")
             }),
             "{kind} commit should contain no schema/provenance trailers, got {message:?}"

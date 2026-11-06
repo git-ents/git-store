@@ -243,10 +243,10 @@ fn interactive_schema_builds_kind_from_prompts() {
     let path = dir.path();
 
     // Root struct with a string, a u64 (default width), and a bool field.
-    // Each field is gated by an "add a field?" confirm, followed by its type
-    // and then a "does this field have a default?" confirm (`n` for all
-    // three here); a final `n` ends the field loop.
-    let answers = "struct\ny\ntitle\nstring\nn\ny\nserves\nuint\nu64\nn\ny\ndone\nbool\nn\nn\n";
+    // Each field is gated by an "add a field?" confirm followed by its name
+    // and type; a final `n` ends the field loop. The format has no defaulted
+    // fields, so there is nothing else to answer.
+    let answers = "struct\ny\ntitle\nstring\ny\nserves\nuint\nu64\ny\ndone\nbool\nn\n";
     let (_, err, ok) = run(path, Some(answers), &["schema", "put", "task", "-i"]);
     assert!(ok, "interactive schema put failed: {err}");
 
@@ -330,12 +330,13 @@ fn hand_authored_schema_json_publishes_with_no_version_key() {
     let path = dir.path();
 
     let book_schema = r#"{
-        "root": { "Ref": "Book" },
+        "kind": "book",
+        "root": { "ref": "Book" },
         "defs": {
             "Book": {
-                "Struct": {
-                    "title": { "node": "String", "has_default": false },
-                    "year": { "node": "U16", "has_default": false }
+                "struct": {
+                    "title": "string",
+                    "year": "u16"
                 }
             }
         }
@@ -698,7 +699,7 @@ fn doctor_rejects_a_sha256_repository() {
     assert!(!ok, "doctor unexpectedly accepted SHA-256: {out}{err}");
     assert!(out.is_empty(), "unexpected stdout: {out}");
     assert!(
-        err.contains("unsupported Git object format") && err.contains("sha256"),
+        err.contains("not supported by this build") && err.contains("sha256"),
         "unexpected diagnostic: {err}"
     );
 }
@@ -815,9 +816,9 @@ fn embedded_document_reads_without_schema_ref_and_ignores_legacy_trailers() {
 }
 
 /// `cat` decodes through any commit/ref whose tree has the compiled
-/// `{value/, schema/}` shape — the same shape a named, ref-addressed entity
-/// (written through `put <kind> <name>`) has — since it is content-addressed
-/// rather than resolving a name through a kind.
+/// `{ fields..., .schema }` shape — the same shape a named, ref-addressed
+/// entity (written through `put <kind> <name>`) has — since it is
+/// content-addressed rather than resolving a name through a kind.
 #[test]
 fn cat_decodes_through_a_ref_naming_a_bound_commit() {
     let dir = tempfile::tempdir().unwrap();
@@ -838,9 +839,9 @@ fn cat_decodes_through_a_ref_naming_a_bound_commit() {
 }
 
 /// `check <tree-ish> <schema>` validates a bare value tree against a schema
-/// without decoding it: it succeeds for the `value` subtree a matching
-/// document compiled to, and refuses the bound `{value/, schema/}` root
-/// itself, which is not a value tree.
+/// without decoding it: it succeeds for the bare value tree a matching
+/// document compiled from, and refuses the bound `{ fields..., .schema }` root
+/// itself, whose own entries are not a bare value.
 fn refs_snapshot(path: &Path) -> String {
     let output = Command::new("git")
         .current_dir(path)
@@ -950,8 +951,8 @@ fn composable_plumbing_supports_json_ndjson_and_explicit_cas() {
         &["object", "tree", &document_tree, "--format", "ndjson"],
     );
     assert!(ok, "object tree failed: {err}");
-    assert!(tree.contains("schema"), "tree record: {tree}");
-    assert!(tree.contains("value"), "tree record: {tree}");
+    assert!(tree.contains(".schema"), "tree record: {tree}");
+    assert!(tree.contains("title"), "tree record: {tree}");
 
     let (historical, err, ok) = run(
         path,
@@ -1085,19 +1086,36 @@ fn check_validates_a_value_tree_against_a_schema() {
     assert!(ok, "schema put failed: {err}");
 
     let recipe = r#"{"title":"Carbonara","serves":4,"steps":["boil"]}"#;
-    let (out, err, ok) = run(path, None, &["compile", "recipe", recipe]);
-    assert!(ok, "compile failed: {err}");
-    let hash = out.trim();
+    let (schema_out, err, ok) = run(
+        path,
+        None,
+        &["--format", "json", "schema", "show", "recipe"],
+    );
+    assert!(ok, "schema show failed: {err}");
+    let schema_tree = json_string_field(&schema_out, "schema_tree");
 
+    // `value encode` yields the bare value tree `check` validates.
+    let (encoded, err, ok) = run(
+        path,
+        Some(recipe),
+        &["value", "encode", "--schema", &schema_tree],
+    );
+    assert!(ok, "value encode failed: {err}");
+    let value_tree = encoded.trim();
+
+    let (_, err, ok) = run(path, None, &["check", value_tree, "--schema", "recipe"]);
+    assert!(ok, "check of a conforming value tree failed: {err}");
+
+    // A bound document's entries sit beside `.schema` and are not a bare
+    // value, so `check` refuses the whole root.
+    let (document, err, ok) = run(path, None, &["compile", "recipe", recipe]);
+    assert!(ok, "compile failed: {err}");
     let (_, err, ok) = run(
         path,
         None,
-        &["check", &format!("{hash}:value"), "--schema", "recipe"],
+        &["check", document.trim(), "--schema", "recipe"],
     );
-    assert!(ok, "check of a conforming value tree failed: {err}");
-
-    let (_, err, ok) = run(path, None, &["check", hash, "--schema", "recipe"]);
-    assert!(!ok, "check should refuse a non-value tree: {err}");
+    assert!(!ok, "check should refuse a bound document root: {err}");
 }
 
 /// Parse `json` as a generic value, panicking with the offending text on
