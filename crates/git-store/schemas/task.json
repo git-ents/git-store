@@ -1,26 +1,25 @@
 {
+  "kind": "task",
   "root": {
-    "Ref": "Task"
+    "ref": "Task"
   },
   "defs": {
     "Priority": {
-      "Enum": {
-        "Low": "Unit",
-        "Medium": "Unit",
-        "High": "Unit"
+      "enum": {
+        "High": "unit",
+        "Low": "unit",
+        "Medium": "unit"
       }
     },
     "Task": {
-      "Struct": {
-        "summary": { "node": "String", "has_default": false },
-        "done": { "node": "Bool", "has_default": false },
+      "struct": {
+        "done": "bool",
         "priority": {
-          "node": { "Ref": "Priority" },
-          "has_default": false
+          "ref": "Priority"
         },
+        "summary": "string",
         "tags": {
-          "node": { "List": "String" },
-          "has_default": false
+          "list": "string"
         }
       }
     }

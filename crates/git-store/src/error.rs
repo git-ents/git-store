@@ -5,21 +5,27 @@ use std::fmt;
 use facet_git_tree::ObjectId;
 use gix_refstore::{RefName, RefSegment};
 
-/// Which half of a data commit's `{schema/, value/}` split.
+/// One of a document's two logical halves: the schema entry or the value it
+/// describes.
+///
+/// A document root stores the value's own entries directly, so the value half
+/// has no entry of its own to name; [`Subtree::Value`] carries that half's
+/// reserved name, which this format never writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subtree {
-    /// The `value/` entry: the encoded entity.
+    /// The value half: the entries beside `.schema`.
     Value,
-    /// The `schema/` entry: the schema it was validated against.
+    /// The `.schema` entry: the unbound schema the value conforms to.
     Schema,
 }
 
 impl Subtree {
-    /// The tree entry name: `"value"` or `"schema"`.
+    /// The reserved tree entry name: `".schema"`, or `".value"` for the value
+    /// half, which this format reserves but never writes.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Subtree::Value => "value",
-            Subtree::Schema => "schema",
+            Subtree::Value => ".value",
+            Subtree::Schema => ".schema",
         }
     }
 }
@@ -39,8 +45,8 @@ pub enum Error {
         /// The kind with no published schema.
         kind: RefSegment,
     },
-    /// A data commit does not contain the bound value and schema required for reading.
-    #[error("commit {commit} does not contain a readable bound value (found [{found}])")]
+    /// A data commit's tree is not a bound document.
+    #[error("commit {commit} has no `.schema` entry beside its value entries (found [{found}])")]
     NotSubtreeBound {
         /// The data commit whose tree was not the expected split.
         commit: ObjectId,
@@ -75,24 +81,14 @@ pub enum Error {
         /// The object of the wrong kind.
         oid: ObjectId,
     },
-    /// A data commit has no schema binding.
-    #[error("commit {commit} is missing its schema binding")]
-    MissingTrailer {
-        /// The commit that lacked the trailer.
-        commit: ObjectId,
-    },
-    /// A data commit's schema binding is not a valid object id.
-    #[error("commit {commit} has an invalid schema binding {text:?}")]
-    InvalidTrailer {
-        /// The commit carrying the malformed trailer.
-        commit: ObjectId,
-        /// The trailer text that failed to parse.
-        text: String,
-    },
-    /// A caller-supplied commit message contains a trailer reserved by the
-    /// store's historical metadata format.
+    /// A caller-supplied commit message contains a line that would recreate a
+    /// reserved schema or provenance trailer.
+    ///
+    /// Trailers bind nothing: the normative schema is the document's embedded
+    /// `.schema` entry, so a trailer line in a message is rejected rather than
+    /// read as metadata.
     #[error(
-        "commit message contains reserved trailer line {trailer:?}; gix-store does not write schema or provenance trailers"
+        "commit message contains reserved trailer line {trailer:?}; git-store writes no schema or provenance trailers"
     )]
     ReservedTrailer {
         /// The reserved trailer name found at the start of a message line.
@@ -174,15 +170,35 @@ pub enum Error {
     /// collision detection rejected the digest.
     #[error("could not compute kind fingerprint")]
     Fingerprint(#[source] gix::hash::hasher::Error),
-    /// The repository's object format is not the SHA-1 this build's schema
-    /// codec is written for.
-    #[error(
-        "unsupported Git object format: expected sha1, observed {observed}; this build's schema codec is SHA-1-only"
-    )]
+    /// The repository uses an object format this build's plumbing cannot
+    /// write.
+    ///
+    /// This build's `gix` is compiled without its `sha256` feature, so it
+    /// writes SHA-1 only: a SHA-256 repository is refused, whether `gix`
+    /// reports that format or silently reports it as SHA-1. The codec itself,
+    /// and the `doctor` fixed point, cover both formats.
+    #[error("repository object format {observed} is not supported by this build")]
     UnsupportedObjectFormat {
         /// The object hash algorithm actually observed, e.g. `"sha256"`.
         observed: String,
     },
+    /// A document's schema root does not resolve to a struct.
+    ///
+    /// Only a struct root has named entries that can sit beside `.schema`, so
+    /// any other resolved root describes a bare value and cannot be bound as
+    /// a document.
+    #[error(
+        "schema root for kind \"{kind}\" is {node}, not a struct; only struct schemas form documents"
+    )]
+    DocumentRootNotStruct {
+        /// The kind whose schema was rejected.
+        kind: String,
+        /// The keyword of the node the schema root resolved to, e.g. `list`.
+        node: &'static str,
+    },
+    /// The schema-of-schemas fixed-point check failed.
+    #[error(transparent)]
+    Doctor(#[from] facet_git_tree::doctor::DoctorError),
     /// A canonical commit named the same parent more than once; `git fsck`
     /// rejects the result as a duplicateParent.
     #[error("commit names parent {parent} more than once")]

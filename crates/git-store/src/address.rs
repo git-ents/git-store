@@ -14,7 +14,8 @@ use crate::identity::EntityId;
 pub enum At {
     /// A caller-chosen alias under the data prefix.
     Name(RefPath),
-    /// The content-derived identity: the `{schema/, value/}` tree id.
+    /// The content-derived identity: the bound document tree id, the value's
+    /// entries beside `.schema`.
     Entity(EntityId),
     /// A specific publication commit.
     Commit(ObjectId),

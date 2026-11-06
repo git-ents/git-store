@@ -1,14 +1,15 @@
 {
+  "kind": "book",
   "root": {
-    "Ref": "Book"
+    "ref": "Book"
   },
   "defs": {
     "Book": {
-      "Struct": {
-        "title": { "node": "String", "has_default": false },
-        "author": { "node": "String", "has_default": false },
-        "year": { "node": "U16", "has_default": false },
-        "read": { "node": "Bool", "has_default": false }
+      "struct": {
+        "author": "string",
+        "read": "bool",
+        "title": "string",
+        "year": "u16"
       }
     }
   }

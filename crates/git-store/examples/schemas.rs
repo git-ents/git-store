@@ -64,7 +64,7 @@ fn main() {
 }
 
 fn schema_for(kind: &str) -> Result<Schema, SchemaError> {
-    match kind {
+    let mut doc = match kind {
         "recipe" => schema_of::<Recipe>(),
         "book" => schema_of::<Book>(),
         "task" => schema_of::<Task>(),
@@ -72,5 +72,10 @@ fn schema_for(kind: &str) -> Result<Schema, SchemaError> {
             eprintln!("unknown kind {other:?}; try recipe, book, or task");
             std::process::exit(2);
         }
-    }
+    }?;
+    // `schema_of` labels the schema with its Rust type name; the schema
+    // document carries the kind it is published under, so name it for the ref
+    // the caller will use.
+    doc.kind = kind.to_owned();
+    Ok(doc)
 }

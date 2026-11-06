@@ -1,7 +1,9 @@
 //! Typed deletion documents and stateful entity reads.
 //!
-//! Tombstones use the same two-subtree document frame as ordinary values. The
-//! value subtree is a typed [`Tombstone`] rather than an empty tree, so a
+//! A tombstone is an ordinary bound document, so it uses the same envelope as
+//! every other value: its fields sit at the document root beside the reserved
+//! `.schema` entry. The root is never empty — a typed [`Tombstone`] carries an
+//! explicit deletion state, kind, and the entity id the name addressed — so a
 //! fetched tombstone remains self-describing and cannot be confused with an
 //! absent or pruned ref.
 
@@ -14,6 +16,7 @@ use facet_git_tree::{
 use gix::objs::{Find, Write};
 use gix_refstore::{RefSegment, RefStore};
 
+use crate::envelope::UnboundValue;
 use crate::{EntityId, Entry, Error, Store};
 
 /// The explicit deletion state carried by a tombstone value.
@@ -24,7 +27,8 @@ pub enum TombstoneState {
     Deleted,
 }
 
-/// A typed deletion marker stored in a document's `value/` subtree.
+/// A typed deletion marker: a document whose fields are the entries beside the
+/// reserved `.schema` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Tombstone {
     /// The explicit state tag. This is intentionally not represented by an
@@ -155,7 +159,7 @@ where
 /// compiles in. Any other schema names an ordinary value.
 pub(crate) fn read<R, O>(
     store: &Store<R, O>,
-    value: &ObjectId,
+    root: &ObjectId,
     doc: &Schema,
 ) -> Result<Option<Tombstone>, Error>
 where
@@ -166,7 +170,10 @@ where
     if *doc != expected {
         return Ok(None);
     }
-    let tombstone: Tombstone = deserialize(value, store.objects())?;
+    // `root` is a bound document root: its own entries are the tombstone's
+    // fields, beside the reserved `.schema` entry.
+    let value = UnboundValue::new(*root, store.objects())?;
+    let tombstone: Tombstone = deserialize(root, &value)?;
     if tombstone.state != TombstoneState::Deleted
         || tombstone.entity_id().is_none()
         || tombstone.kind.is_empty()

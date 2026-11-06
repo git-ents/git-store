@@ -1,20 +1,19 @@
 {
+  "kind": "recipe",
   "root": {
-    "Ref": "Recipe"
+    "ref": "Recipe"
   },
   "defs": {
     "Recipe": {
-      "Struct": {
-        "title": { "node": "String", "has_default": false },
-        "serves": { "node": "U32", "has_default": false },
+      "struct": {
         "ingredients": {
-          "node": { "List": "String" },
-          "has_default": false
+          "list": "string"
         },
+        "serves": "u32",
         "steps": {
-          "node": { "List": "String" },
-          "has_default": false
-        }
+          "list": "string"
+        },
+        "title": "string"
       }
     }
   }

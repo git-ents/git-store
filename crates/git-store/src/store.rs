@@ -4,7 +4,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use facet::Facet;
 use facet_git_tree::ObjectId;
-use facet_git_tree::{Schema, deserialize};
+use facet_git_tree::{Schema, deserialize, validate_with_schema};
 use facet_value::Value;
 use gix::objs::{Find, Write, WriteTo};
 use gix_refstore::{
@@ -14,7 +14,8 @@ use gix_refstore::{
 
 use crate::document::{DocumentInspection, DocumentShapeError, PreparedDocument};
 use crate::encoding::{Dynamic, Encoding, Typed};
-use crate::error::{Error, Subtree};
+use crate::envelope::{self, SCHEMA_ENTRY, ensure_struct_root};
+use crate::error::Error;
 use crate::identity::{DocumentTree, EntityId, SchemaTree, ValueTree};
 use crate::kind::Kind;
 use crate::transaction::Transaction;
@@ -135,12 +136,18 @@ pub struct Store<R, O> {
 /// reads back exactly the bytes the [`Signer`] produced and asks nothing else
 /// of them.
 const SIGNATURE_HEADER: &str = "gpgsig";
-const RESERVED_TRAILERS: [&str; 3] = ["Schema:", "Schema-Version:", "Ents-Ref:"];
 
-/// Reject message lines that would recreate the legacy schema/provenance
-/// trailers. They are reserved even though readers ignore them: accepting
-/// them would let a caller make a newly written commit look like the old
-/// metadata format.
+/// Trailer names a caller's commit message may not begin a line with.
+///
+/// [`Schema-Version:`](crate) and [`Schema-commit:`](crate) are the advisory
+/// schema trailers this crate's specification defines; `Schema:` and
+/// `Ents-Ref:` are the legacy schema/provenance names it replaced. All four are
+/// reserved even though readers ignore trailers entirely: accepting one would
+/// let a caller make a newly written commit look like a schema binding that
+/// the embedded `.schema` entry, not a trailer, actually carries.
+const RESERVED_TRAILERS: [&str; 4] = ["Schema:", "Schema-Version:", "Schema-commit:", "Ents-Ref:"];
+
+/// Reject message lines that would recreate a schema/provenance trailer.
 pub(crate) fn validate_commit_message(message: &str) -> Result<(), Error> {
     for line in message.lines() {
         let line = line.trim_start();
@@ -245,7 +252,7 @@ where
         self.kind_with(name)
     }
 
-    /// Decode a bound `{value/, schema/}` tree using only its embedded schema.
+    /// Decode a bound document root using only its embedded `.schema` entry.
     ///
     /// No kind name, schema ref, or schema history is consulted. This is the
     /// dynamic counterpart to [`Kind::decode`](crate::Kind::decode) for callers
@@ -284,11 +291,14 @@ where
         )?))
     }
 
-    /// Bind already-written value and schema subtrees into a prepared document.
+    /// Bind an already-written value tree into a prepared document over an
+    /// explicitly supplied schema tree.
     ///
-    /// This writes only the root tree containing `schema/` and `value/`; it
-    /// creates no commit and advances no ref. Call [`encode_value`](Self::encode_value)
-    /// first when the value still needs schema-directed validation.
+    /// This writes only the document root — the value's own entries beside the
+    /// reserved `.schema` entry — and creates no commit and advances no ref.
+    /// The value is validated against the schema first, so a value that does
+    /// not conform, or a schema whose resolved root is not a struct, is
+    /// rejected before any tree is written.
     pub fn bind_document(
         &self,
         value_tree: ValueTree,
@@ -308,20 +318,25 @@ where
             Some(_) => return Err(Error::NotATree { oid: schema_oid }),
             None => return Err(Error::MissingObject { oid: schema_oid }),
         }
+        let doc = self.schema(schema_oid)?;
+        ensure_struct_root(&doc)?;
+        validate_with_schema(&value_oid, &doc, self.objects())?;
         let document_tree = self.bind_schema(value_oid, schema_oid)?;
         Ok(PreparedDocument {
             document_tree: DocumentTree::from(document_tree),
-            value_tree,
             schema_tree,
         })
     }
 
     /// Inspect a document boundary without consulting a kind or schema ref.
     ///
-    /// Exact `{schema/, value/}` roots are returned as [`DocumentInspection::Bound`].
-    /// Trees without either envelope entry are reported as legacy unbound value
-    /// roots; envelope-like but invalid trees are reported as structured
-    /// [`DocumentInspection::Malformed`] metadata instead of being guessed.
+    /// A root carrying a readable `.schema` entry beside at least one entry of
+    /// the value's own is returned as [`DocumentInspection::Bound`]. A tree with
+    /// no `.schema` entry is reported as a legacy unbound value root, and
+    /// envelope-like but invalid trees — a `.schema` that is not a tree or is
+    /// missing, or one with no value entries beside it — are reported as
+    /// structured [`DocumentInspection::Malformed`] metadata instead of being
+    /// guessed.
     pub fn inspect_document(
         &self,
         document_tree: DocumentTree,
@@ -342,66 +357,42 @@ where
         })?;
         entries.sort_by(|left, right| left.0.cmp(&right.0));
         let found: Vec<String> = entries.iter().map(|entry| entry.0.clone()).collect();
-        let value = entries
-            .iter()
-            .find(|entry| entry.0 == Subtree::Value.as_str());
-        let schema = entries
-            .iter()
-            .find(|entry| entry.0 == Subtree::Schema.as_str());
+        let schema = entries.iter().find(|entry| entry.0 == SCHEMA_ENTRY);
 
-        if entries.len() == 2
-            && let (Some(value), Some(schema)) = (value, schema)
-        {
-            if !schema.2 {
-                return Ok(DocumentInspection::Malformed {
-                    document_tree,
-                    found,
-                    reason: DocumentShapeError::SchemaNotTree,
-                });
-            }
-            if self.kind_of(value.1)?.is_none() {
-                return Ok(DocumentInspection::Malformed {
-                    document_tree,
-                    found,
-                    reason: DocumentShapeError::ValueMissing { oid: value.1 },
-                });
-            }
-            match self.kind_of(schema.1)? {
-                Some(gix::objs::Kind::Tree) => {
-                    return Ok(DocumentInspection::Bound(PreparedDocument {
-                        document_tree: DocumentTree::from(document_tree),
-                        value_tree: ValueTree::from(value.1),
-                        schema_tree: SchemaTree::from(schema.1),
-                    }));
-                }
-                Some(_) => {
-                    return Ok(DocumentInspection::Malformed {
-                        document_tree,
-                        found,
-                        reason: DocumentShapeError::SchemaNotTree,
-                    });
-                }
-                None => {
-                    return Ok(DocumentInspection::Malformed {
-                        document_tree,
-                        found,
-                        reason: DocumentShapeError::SchemaMissing { oid: schema.1 },
-                    });
-                }
-            }
-        }
-
-        if value.is_none() && schema.is_none() {
+        let Some(schema) = schema else {
             return Ok(DocumentInspection::LegacyValueRoot {
                 value_tree: document_tree,
             });
+        };
+        if !schema.2 {
+            return Ok(DocumentInspection::Malformed {
+                document_tree,
+                found,
+                reason: DocumentShapeError::SchemaNotTree,
+            });
         }
-
-        Ok(DocumentInspection::Malformed {
-            document_tree,
-            found: found.clone(),
-            reason: DocumentShapeError::UnexpectedEntries { found },
-        })
+        let no_value_entries = entries.len() < 2;
+        match self.kind_of(schema.1)? {
+            Some(gix::objs::Kind::Tree) if no_value_entries => Ok(DocumentInspection::Malformed {
+                document_tree,
+                found,
+                reason: DocumentShapeError::NoValueEntries,
+            }),
+            Some(gix::objs::Kind::Tree) => Ok(DocumentInspection::Bound(PreparedDocument {
+                document_tree: DocumentTree::from(document_tree),
+                schema_tree: SchemaTree::from(schema.1),
+            })),
+            Some(_) => Ok(DocumentInspection::Malformed {
+                document_tree,
+                found,
+                reason: DocumentShapeError::SchemaNotTree,
+            }),
+            None => Ok(DocumentInspection::Malformed {
+                document_tree,
+                found,
+                reason: DocumentShapeError::SchemaMissing { oid: schema.1 },
+            }),
+        }
     }
 
     pub(crate) fn decode_with<E: Encoding>(&self, tree: ObjectId) -> Result<E::Value, Error> {
@@ -450,44 +441,41 @@ where
         })
     }
 
-    /// Splice an already-written value tree and schema tree into the
-    /// two-entry root a data commit's own tree becomes.
+    /// Splice an already-written value tree into the document root its own
+    /// tree becomes: the value's entries beside the reserved `.schema` entry.
     pub(crate) fn bind_schema(&self, value: ObjectId, schema: ObjectId) -> Result<ObjectId, Error>
     where
         O: Write,
     {
-        let mut entries = vec![
-            gix::objs::tree::Entry {
-                mode: self.entry_mode(value)?,
-                filename: Subtree::Value.as_str().into(),
-                oid: value,
-            },
-            gix::objs::tree::Entry {
-                mode: self.entry_mode(schema)?,
-                filename: Subtree::Schema.as_str().into(),
-                oid: schema,
-            },
-        ];
+        let mut entries = self.tree_entries(value)?;
+        entries.push(gix::objs::tree::Entry {
+            mode: self.entry_mode(schema)?,
+            filename: SCHEMA_ENTRY.into(),
+            oid: schema,
+        });
         entries.sort();
         self.objects
             .write(&gix::objs::Tree { entries })
             .map_err(Error::backend)
     }
 
-    /// Split a data commit's root tree into `(value, schema)`, the two-way
-    /// split [`bind_schema`](Self::bind_schema) writes.
+    /// Split a document root into the root itself and its embedded schema.
     ///
-    /// The root must hold *exactly* `schema` and `value`, with `schema` a
-    /// tree — requiring the whole shape, rather than looking up each name in
-    /// isolation, is what makes a pre-binding commit (whose tree *was* the
-    /// value) fail as one diagnosable [`Error::NotSubtreeBound`] rather than
-    /// being half-matched and misreported.
+    /// The root must carry a `.schema` entry holding a tree, and at least one
+    /// entry of the value's own. Requiring the whole shape, rather than looking
+    /// up `.schema` in isolation, is what makes a bare value tree — or a
+    /// pre-binding commit, whose tree *was* the value — fail as one diagnosable
+    /// [`Error::NotSubtreeBound`] rather than being half-matched and
+    /// misreported.
+    ///
+    /// The first element is the *document* root, not a bare value tree: reading
+    /// its value goes through [`UnboundValue`](crate::envelope::UnboundValue).
     pub(crate) fn split(
         &self,
         root: ObjectId,
         commit: ObjectId,
     ) -> Result<(ObjectId, ObjectId), Error> {
-        split_document(root, commit, self.objects())
+        envelope::split(root, commit, self.objects())
     }
 
     /// Build and commit a tree forward over the current tip of `name`,
@@ -641,8 +629,8 @@ where
     }
 }
 
-/// Decode a bound `{value/, schema/}` tree using only the schema embedded in
-/// that tree and the supplied object database.
+/// Decode a bound document root using only the schema embedded as its
+/// `.schema` entry and the supplied object database.
 ///
 /// The object database is the only source consulted. In particular, this
 /// function does not need a [`Store`], a kind name, a schema ref, or schema
@@ -656,84 +644,9 @@ fn decode_with<E: Encoding, S: Find + ?Sized>(
     tree: ObjectId,
     objects: &S,
 ) -> Result<E::Value, Error> {
-    let (value_tree, schema_tree) = split_document(tree, tree, objects)?;
+    let (root, schema_tree) = envelope::split(tree, tree, objects)?;
     let doc = deserialize::<Schema>(&schema_tree, objects)?;
-    E::read(&value_tree, &doc, objects)
-}
-
-fn split_document<S: Find + ?Sized>(
-    root: ObjectId,
-    commit: ObjectId,
-    objects: &S,
-) -> Result<(ObjectId, ObjectId), Error> {
-    let mut buf = Vec::new();
-    let data = objects
-        .try_find(&root, &mut buf)
-        .map_err(Error::backend)?
-        .ok_or(Error::MissingObject { oid: root })?;
-    if data.kind != gix::objs::Kind::Tree {
-        return Err(Error::NotATree { oid: root });
-    }
-    let tree =
-        gix::objs::TreeRef::from_bytes(data.data, data.object_hash).map_err(Error::backend)?;
-    let not_bound = || Error::NotSubtreeBound {
-        commit,
-        found: tree
-            .entries
-            .iter()
-            .map(|e| String::from_utf8_lossy(e.filename).into_owned())
-            .collect::<Vec<_>>()
-            .join(", "),
-    };
-    let entry = |subtree: Subtree| {
-        tree.entries
-            .iter()
-            .find(|e| e.filename == subtree.as_str())
-            .ok_or_else(not_bound)
-    };
-    if tree.entries.len() != 2 {
-        return Err(not_bound());
-    }
-    let value = entry(Subtree::Value)?;
-    let schema = entry(Subtree::Schema)?;
-    if !schema.mode.is_tree() {
-        return Err(not_bound());
-    }
-    let value = value.oid.to_owned();
-    let schema = schema.oid.to_owned();
-    match object_kind(objects, value)? {
-        Some(_) => {}
-        None => {
-            return Err(Error::SubtreeMissing {
-                subtree: Subtree::Value,
-                oid: value,
-                commit,
-            });
-        }
-    }
-    match object_kind(objects, schema)? {
-        Some(gix::objs::Kind::Tree) => {}
-        Some(_) => return Err(Error::NotATree { oid: schema }),
-        None => {
-            return Err(Error::SubtreeMissing {
-                subtree: Subtree::Schema,
-                oid: schema,
-                commit,
-            });
-        }
-    }
-    Ok((value, schema))
-}
-
-fn object_kind<S: Find + ?Sized>(
-    objects: &S,
-    oid: ObjectId,
-) -> Result<Option<gix::objs::Kind>, Error> {
-    let mut buf = Vec::new();
-    Ok(objects
-        .try_find(&oid, &mut buf)
-        .map_err(Error::backend)?
-        .map(|data| data.kind))
+    envelope::read_value::<E, _>(root, &doc, objects)
 }
 
 /// Every ref name directly under `prefix` that is a single valid

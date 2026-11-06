@@ -232,9 +232,9 @@ impl<'s, R: RefStore + Committer, O: Find + Write> Transaction<'s, R, O> {
         };
 
         let root = self.store.commit_tree(current)?;
-        let (value_tree, schema_tree) = self.store.split(root, current)?;
+        let (root, schema_tree) = self.store.split(root, current)?;
         let doc = self.store.schema(schema_tree)?;
-        if let Some(existing) = tombstone::read(self.store, &value_tree, &doc)? {
+        if let Some(existing) = tombstone::read(self.store, &root, &doc)? {
             if existing.kind != delete.kind.as_str() {
                 return Err(Error::KindMismatch {
                     expected: delete.kind.clone(),

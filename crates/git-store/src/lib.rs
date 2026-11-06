@@ -14,6 +14,7 @@ mod canonical;
 mod doctor;
 mod document;
 mod encoding;
+mod envelope;
 mod error;
 mod identity;
 mod index;

@@ -3,24 +3,23 @@
 
 use std::collections::BTreeMap;
 
-use facet_git_tree::{Node, ObjectId, Schema, StructField};
+use facet_git_tree::{Node, ObjectId, Schema};
 use facet_value::{VObject, Value};
 
-use crate::identity::{DocumentTree, SchemaTree, ValueTree};
+use crate::identity::{DocumentTree, SchemaTree};
 
-/// A self-contained document tree with its two constituent subtrees.
+/// A self-contained document tree and the schema it embeds.
 ///
-/// The `document_tree` is the root containing exactly `schema/` and `value/`;
-/// `schema_tree` is the schema used to validate `value_tree`. Instances are
-/// produced by [`Store::bind_document`](crate::Store::bind_document), which
-/// writes no commit and advances no ref.
+/// The `document_tree` holds the value's own entries beside the reserved
+/// `.schema` entry, which names `schema_tree` — the exact schema the value was
+/// validated against. Instances are produced by
+/// [`Store::bind_document`](crate::Store::bind_document), which writes no commit
+/// and advances no ref.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreparedDocument {
-    /// The root tree containing the `schema/` and `value/` entries.
+    /// The bound root: the value's own entries plus `.schema`.
     pub document_tree: DocumentTree,
-    /// The encoded value subtree.
-    pub value_tree: ValueTree,
-    /// The pinned schema subtree used for the value.
+    /// The pinned schema tree embedded as `.schema`.
     pub schema_tree: SchemaTree,
 }
 
@@ -30,12 +29,7 @@ impl PreparedDocument {
         self.document_tree
     }
 
-    /// Return the encoded value subtree.
-    pub const fn value_tree(&self) -> ValueTree {
-        self.value_tree
-    }
-
-    /// Return the schema subtree used for the value.
+    /// Return the schema tree used for the value.
     pub const fn schema_tree(&self) -> SchemaTree {
         self.schema_tree
     }
@@ -44,10 +38,11 @@ impl PreparedDocument {
 /// The kind of tree found by [`Store::inspect_document`](crate::Store::inspect_document).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentKind {
-    /// An exact, readable `{schema/, value/}` document envelope.
+    /// An exact, readable document envelope: a `.schema` entry and the value's
+    /// own entries beside it.
     Bound,
-    /// A tree that does not use the envelope entries and can be treated as a
-    /// historical value-root candidate, but has no schema binding.
+    /// A tree with no `.schema` entry, so it can be treated as a historical
+    /// value-root candidate, but has no schema binding.
     LegacyValueRoot,
     /// A tree that looks like a document envelope but has an invalid shape.
     Malformed,
@@ -56,23 +51,18 @@ pub enum DocumentKind {
 /// Why a tree was classified as a malformed document envelope.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DocumentShapeError {
-    /// The root has an envelope-like entry set other than exactly `schema` and
-    /// `value`.
-    #[error("document envelope has entries {found:?}, expected exactly [\"schema\", \"value\"]")]
-    UnexpectedEntries {
-        /// The entry names found in the root tree.
-        found: Vec<String>,
-    },
-    /// The `schema` entry exists but is not a tree object.
+    /// The `.schema` entry exists but is not a tree object.
     #[error("document schema entry is not a tree")]
     SchemaNotTree,
-    /// The `value` entry names an object that is not present in the database.
-    #[error("document value object {oid} is missing")]
-    ValueMissing {
-        /// The missing value object.
-        oid: ObjectId,
-    },
-    /// The `schema` entry names an object that is not present in the database.
+    /// The `.schema` entry is the root's only entry, so no value entries sit
+    /// beside it.
+    ///
+    /// A struct root always contributes at least one entry — the `none` marker
+    /// when it is empty — so a `.schema`-only root is not an envelope this
+    /// format can have written.
+    #[error("document envelope has no value entries beside `.schema`")]
+    NoValueEntries,
+    /// The `.schema` entry names an object that is not present in the database.
     #[error("document schema object {oid} is missing")]
     SchemaMissing {
         /// The missing schema object.
@@ -85,7 +75,7 @@ pub enum DocumentShapeError {
 pub enum DocumentInspection {
     /// A complete, structurally readable bound document.
     Bound(PreparedDocument),
-    /// A historical value-root tree with no `{schema/, value/}` envelope.
+    /// A historical value-root tree with no `.schema` envelope.
     LegacyValueRoot {
         /// The tree that contains the unbound value.
         value_tree: ObjectId,
@@ -157,8 +147,8 @@ pub enum DocumentError {
         /// The offending name.
         name: String,
     },
-    /// [`DocumentBuilder::build`] found required fields — no supplied value,
-    /// no schema default — still unset.
+    /// [`DocumentBuilder::build`] found fields — the format emits every field —
+    /// still unset.
     #[error("missing required field(s): {names:?}")]
     MissingFields {
         /// The unset fields' names.
@@ -167,10 +157,12 @@ pub enum DocumentError {
 }
 
 /// A struct document under construction: [`set`](Self::set) accepts defined
-/// field names, and [`build`](Self::build) refuses if any required field is
-/// unset. Unset defaultable fields are omitted from the resulting [`Value`].
+/// field names, and [`build`](Self::build) refuses unless every field is set.
+///
+/// The format emits every struct field and has no defaulted fields, so a
+/// document omits nothing.
 pub struct DocumentBuilder<'s> {
-    fields: &'s BTreeMap<String, StructField>,
+    fields: &'s BTreeMap<String, Node>,
     values: VObject,
 }
 
@@ -194,12 +186,11 @@ impl<'s> DocumentBuilder<'s> {
         }
     }
 
-    /// The fields this document accepts: name, shape, and whether
-    /// [`build`](Self::build) may leave it unset.
-    pub fn fields(&self) -> impl Iterator<Item = (&str, &Node, bool)> {
+    /// The fields this document accepts: name and shape, in name order.
+    pub fn fields(&self) -> impl Iterator<Item = (&str, &Node)> {
         self.fields
             .iter()
-            .map(|(name, field)| (name.as_str(), &field.node, field.has_default))
+            .map(|(name, field)| (name.as_str(), field))
     }
 
     /// Supply `name`'s value, overwriting any previous one. The field name is
@@ -214,15 +205,14 @@ impl<'s> DocumentBuilder<'s> {
         Ok(())
     }
 
-    /// Finish the document. Refuses, naming every offender, if a field with
-    /// no schema default was never [`set`](Self::set). Unset defaultable
-    /// fields are omitted.
+    /// Finish the document. Refuses, naming every offender, if any field was
+    /// never [`set`](Self::set).
     pub fn build(self) -> Result<Value, DocumentError> {
         let names: Vec<String> = self
             .fields
-            .iter()
-            .filter(|(name, field)| !field.has_default && !self.values.contains_key(name.as_str()))
-            .map(|(name, _)| name.clone())
+            .keys()
+            .filter(|name| !self.values.contains_key(name.as_str()))
+            .cloned()
             .collect();
         if !names.is_empty() {
             return Err(DocumentError::MissingFields { names });

@@ -14,6 +14,7 @@ use gix_refstore::{
 use crate::address::At;
 use crate::document::PreparedDocument;
 use crate::encoding::{Encoding, Typed};
+use crate::envelope;
 use crate::error::Error;
 use crate::identity::{EntityId, canonical_document_id};
 use crate::index;
@@ -194,24 +195,26 @@ where
     }
 
     fn read_commit(&self, commit: ObjectId) -> Result<EntityState<E::Value>, Error> {
-        let (value_tree, _schema_tree, doc, message) = self.read_bound(commit)?;
-        self.bound_state(value_tree, doc, commit, message)
+        let (root, _schema_tree, doc, message) = self.read_bound(commit)?;
+        self.bound_state(root, doc, commit, message)
     }
 
     fn read_tree(&self, tree: ObjectId) -> Result<EntityState<E::Value>, Error> {
-        let (value_tree, schema_tree) = self.store.split(tree, tree)?;
+        let (root, schema_tree) = self.store.split(tree, tree)?;
         let doc = self.store.schema(schema_tree)?;
-        self.bound_state(value_tree, doc, tree, String::new())
+        self.bound_state(root, doc, tree, String::new())
     }
 
+    /// Classify one bound document root: a typed tombstone, else the value the
+    /// root's own entries encode under `doc`.
     fn bound_state(
         &self,
-        value_tree: ObjectId,
+        root: ObjectId,
         doc: Rc<Schema>,
         commit: ObjectId,
         message: String,
     ) -> Result<EntityState<E::Value>, Error> {
-        if let Some(tombstone) = tombstone::read(self.store, &value_tree, &doc)? {
+        if let Some(tombstone) = tombstone::read(self.store, &root, &doc)? {
             self.ensure_kind(&tombstone.kind)?;
             return Ok(EntityState::Deleted(TombstoneEntry {
                 tombstone,
@@ -219,7 +222,7 @@ where
                 message,
             }));
         }
-        let value = E::read(&value_tree, &doc, self.store.objects())?;
+        let value = envelope::read_value::<E, _>(root, &doc, self.store.objects())?;
         Ok(EntityState::Present(Entry {
             value,
             commit,
@@ -227,7 +230,7 @@ where
         }))
     }
 
-    /// Decode a `{value/, schema/}` tree directly — the read-side mirror of
+    /// Decode a bound document root directly — the read-side mirror of
     /// [`compile`](Self::compile). Unlike [`read`](Self::read), `tree`
     /// need not be a commit's tree, and no ref is consulted: any tree of that
     /// shape decodes, however it was reached.
@@ -235,10 +238,10 @@ where
         self.store.decode_with::<E>(tree)
     }
 
-    /// Compile `value` under this kind's current schema into the same
-    /// `{value/, schema/}` tree a write commits — but writes no commit and
-    /// advances no ref. The returned tree hash is the document's identity: a
-    /// pure function of the value and the schema it is checked against.
+    /// Compile `value` under this kind's current schema into the same bound
+    /// document root a write commits — but writes no commit and advances no
+    /// ref. The returned tree hash is the document's identity: a pure function
+    /// of the value and the schema it is checked against.
     pub fn compile(&self, value: &E::Value) -> Result<ObjectId, Error>
     where
         O: Write,
@@ -264,6 +267,7 @@ where
         O: Write,
     {
         let (schema_commit, doc) = self.current_schema()?;
+        envelope::ensure_struct_root(&doc)?;
         let value_tree = E::write(value, &doc, self.store.objects())?;
         let schema_tree = self.store.commit_tree(schema_commit)?;
         Ok((
@@ -277,9 +281,9 @@ where
         commit: ObjectId,
     ) -> Result<(ObjectId, ObjectId, Rc<Schema>, String), Error> {
         let (root, message) = self.store.commit_tree_and_summary(commit)?;
-        let (value_tree, schema_tree) = self.store.split(root, commit)?;
+        let (root, schema_tree) = self.store.split(root, commit)?;
         let doc = self.store.schema(schema_tree)?;
-        Ok((value_tree, schema_tree, doc, message))
+        Ok((root, schema_tree, doc, message))
     }
 
     fn ensure_kind(&self, found: &str) -> Result<(), Error> {
@@ -368,8 +372,8 @@ where
     /// Decode only enough of a bound document to recognize a tombstone. This
     /// is deliberately independent of the current schema ref/history.
     fn tombstone_for(&self, commit: ObjectId) -> Option<EntityId> {
-        let (value, _schema, doc, _message) = self.read_bound(commit).ok()?;
-        tombstone::read(self.store, &value, &doc)
+        let (root, _schema, doc, _message) = self.read_bound(commit).ok()?;
+        tombstone::read(self.store, &root, &doc)
             .ok()?
             .filter(|marker| marker.kind == self.name.as_str())
             .and_then(|marker| marker.entity_id())
@@ -379,10 +383,10 @@ where
     /// to the content-derived name when none is given.
     ///
     /// The document tree is validated before any ref is read or commit is
-    /// written. Its identity is the object id of the complete `{schema/,
-    /// value/}` tree, and the schema embedded in that tree must name this
-    /// kind. The name ref and the materialized index advance in one ref-store
-    /// batch.
+    /// written. Its identity is the object id of the complete bound document
+    /// tree — the value's own entries beside the reserved `.schema` entry —
+    /// and the schema embedded in that tree must name this kind. The name ref
+    /// and the materialized index advance in one ref-store batch.
     ///
     /// An explicit [`Expectation`](gix_refstore::Expectation) is a one-shot
     /// compare-and-swap on that ref: a stale expectation is returned as an
@@ -1090,9 +1094,10 @@ where
 {
     /// Use `summary` as the commit message instead of the default.
     ///
-    /// The final write rejects lines beginning with the reserved legacy
-    /// trailers `Schema:`, `Schema-Version:`, or `Ents-Ref:`. This keeps new
-    /// commits free of schema/provenance trailers without silently changing a
+    /// The final write rejects lines beginning with a reserved trailer name —
+    /// `Schema:`, `Schema-Version:`, `Schema-commit:`, or `Ents-Ref:` — so a
+    /// caller's message cannot look like a schema or provenance binding. This
+    /// keeps new commits free of such lines without silently changing a
     /// caller's message; see [`Error::ReservedTrailer`].
     pub fn message(mut self, summary: impl Into<String>) -> Self {
         self.message = Some(summary.into());

@@ -13,11 +13,11 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input, Select};
-use facet_git_tree::{Node, Schema, StructField, VariantKind};
-use facet_value::{VArray, VObject, Value};
+use facet_git_tree::{Node, Schema, VariantKind};
+use facet_value::{VArray, VBytes, VObject, Value};
 use git_store::DocumentBuilder;
 
-use crate::{DynKind, is_scalar_schema, resolve};
+use crate::{DynKind, resolve};
 
 /// Build the entity value for `kind`, prompting for each leaf its schema names.
 pub fn value_for_kind(kind: &DynKind<'_, '_>) -> Result<Value> {
@@ -29,11 +29,13 @@ pub fn value_for_kind(kind: &DynKind<'_, '_>) -> Result<Value> {
     build_value(&doc.root, &doc, name, prompter().as_mut())
 }
 
-/// Build a schema document by prompting for the root type. `defs` stays empty:
-/// nested user types are inlined, a form the encoder accepts directly.
-pub fn build_schema() -> Result<Schema> {
+/// Build a schema document for `kind` by prompting for the root type. `defs`
+/// stays empty: nested user types are inlined, a form the encoder accepts
+/// directly.
+pub fn build_schema(kind: &str) -> Result<Schema> {
     let root = build_schema_node(prompter().as_mut(), "root type")?;
     Ok(Schema {
+        kind: kind.to_owned(),
         root,
         defs: Default::default(),
     })
@@ -166,6 +168,16 @@ fn build_value(schema: &Node, doc: &Schema, label: &str, ask: &mut dyn Ask) -> R
         Node::Char => return ask_scalar::<char>(ask, label, "char"),
         Node::String => Value::from(ask.text(&format!("{label} (string)"))?.as_str()),
         Node::Bytes => Value::from(ask.text(&format!("{label} (bytes, as text)"))?.as_str()),
+        // A cbor leaf is an opaque blob holding exactly one canonical CBOR
+        // item; take it as hex and hand the writer the raw bytes, which it
+        // validates.
+        Node::Cbor => loop {
+            let raw = ask.text(&format!("{label} (canonical CBOR, hex)"))?;
+            match decode_hex(&raw) {
+                Some(bytes) => break Value::from(VBytes::new(&bytes)),
+                None => eprintln!("expected an even-length hex string"),
+            }
+        },
         Node::I8 => return ask_scalar::<i8>(ask, label, "i8"),
         Node::I16 => return ask_scalar::<i16>(ask, label, "i16"),
         Node::I32 => return ask_scalar::<i32>(ask, label, "i32"),
@@ -203,7 +215,7 @@ fn build_value(schema: &Node, doc: &Schema, label: &str, ask: &mut dyn Ask) -> R
             }
             arr.into()
         }
-        Node::Map { key, value } => build_map(key, value, doc, label, ask)?,
+        Node::Map { value, .. } => build_map(value, doc, label, ask)?,
         Node::Optional(inner) => {
             if ask.confirm(&format!("set {label}?"), false)? {
                 build_value(inner, doc, label, ask)?
@@ -242,29 +254,25 @@ where
 /// Prompt for a [`Node::Struct`]'s field values, via the library's
 /// [`DocumentBuilder`].
 ///
-/// A field whose `has_default` is set is skipped, and therefore left out of
-/// the built object, if the user declines to set it — the interactive
-/// counterpart of the schema-directed writer's own omission of such a field.
+/// The format emits every field and has no defaulted fields, so every field the
+/// schema names is asked for; [`DocumentBuilder`] refuses to build until each
+/// one is set.
 fn build_struct(schema: &Node, doc: &Schema, label: &str, ask: &mut dyn Ask) -> Result<Value> {
     let mut builder = DocumentBuilder::for_node(schema, doc)?;
-    let fields: Vec<(String, Node, bool)> = builder
+    let fields: Vec<(String, Node)> = builder
         .fields()
-        .map(|(name, node, has_default)| (name.to_owned(), node.clone(), has_default))
+        .map(|(name, node)| (name.to_owned(), node.clone()))
         .collect();
-    for (name, node, has_default) in fields {
+    for (name, node) in fields {
         let flabel = field(label, &name);
-        if has_default && !ask.confirm(&format!("set {flabel}? (default otherwise)"), false)? {
-            continue;
-        }
         let value = build_value(&node, doc, &flabel, ask)?;
         builder.set(&name, value)?;
     }
     Ok(builder.build()?)
 }
 
-/// Prompt for a struct enum variant's payload fields. Unlike [`Node::Struct`]
-/// these carry no [`StructField::has_default`] marker, so every field is
-/// asked for and inserted unconditionally.
+/// Prompt for a struct enum variant's payload fields, name-keyed exactly like a
+/// [`Node::Struct`]'s.
 fn build_variant_fields(
     fields: &BTreeMap<String, Node>,
     doc: &Schema,
@@ -279,35 +287,16 @@ fn build_variant_fields(
     Ok(obj.into())
 }
 
-/// A map's value: a name-keyed object for scalar keys, else an array of
-/// `{ k, v }` pairs — the two layouts the encoder distinguishes.
-fn build_map(
-    key: &Node,
-    value: &Node,
-    doc: &Schema,
-    label: &str,
-    ask: &mut dyn Ask,
-) -> Result<Value> {
-    if is_scalar_schema(resolve(key, doc)) {
-        let mut obj = VObject::new();
-        while ask.confirm(&format!("add an entry to {label}?"), false)? {
-            let k = nonempty(ask, &format!("{label} key"))?;
-            let v = build_value(value, doc, &field(label, &k), ask)?;
-            obj.insert(k.as_str(), v);
-        }
-        return Ok(obj.into());
-    }
-    let mut arr = VArray::new();
+/// A map's value: a name-keyed object. The format's map keys are always
+/// [`Node::String`], so there is no pair-array layout to choose between.
+fn build_map(value: &Node, doc: &Schema, label: &str, ask: &mut dyn Ask) -> Result<Value> {
+    let mut obj = VObject::new();
     while ask.confirm(&format!("add an entry to {label}?"), false)? {
-        let base = index(label, arr.len());
-        let k = build_value(key, doc, &field(&base, "k"), ask)?;
-        let v = build_value(value, doc, &field(&base, "v"), ask)?;
-        let mut pair = VObject::new();
-        pair.insert("k", k);
-        pair.insert("v", v);
-        arr.push(Value::from(pair));
+        let k = nonempty(ask, &format!("{label} key"))?;
+        let v = build_value(value, doc, &field(label, &k), ask)?;
+        obj.insert(k.as_str(), v);
     }
-    Ok(arr.into())
+    Ok(obj.into())
 }
 
 fn build_enum(
@@ -322,14 +311,18 @@ fn build_enum(
     let vlabel = field(label, name);
     let payload = match kind {
         VariantKind::Unit => Value::NULL,
-        VariantKind::Newtype(inner) => build_value(inner, doc, &vlabel, ask)?,
-        VariantKind::Tuple(elems) => {
-            let mut arr = VArray::new();
-            for (i, elem) in elems.iter().enumerate() {
-                arr.push(build_value(elem, doc, &index(&vlabel, i), ask)?);
+        // A single-field tuple variant is the payload itself; a longer one is
+        // an ordinal-named sequence. Mirrors the writer and reader.
+        VariantKind::Tuple(elems) => match elems.as_slice() {
+            [inner] => build_value(inner, doc, &vlabel, ask)?,
+            _ => {
+                let mut arr = VArray::new();
+                for (i, elem) in elems.iter().enumerate() {
+                    arr.push(build_value(elem, doc, &index(&vlabel, i), ask)?);
+                }
+                arr.into()
             }
-            arr.into()
-        }
+        },
         VariantKind::Struct(fields) => build_variant_fields(fields, doc, &vlabel, ask)?,
     };
     let mut obj = VObject::new();
@@ -373,7 +366,7 @@ fn build_schema_node(ask: &mut dyn Ask, what: &str) -> Result<Node> {
         "float" => width(ask, &["f64", "f32"], &[Node::F64, Node::F32])?,
         "char" => Node::Char,
         "bytes" => Node::Bytes,
-        "struct" => Node::Struct(collect_struct_fields(ask)?),
+        "struct" => Node::Struct(collect_fields(ask)?),
         "enum" => enum_schema(ask)?,
         "list" => Node::List(Box::new(build_schema_node(ask, "element type")?)),
         "optional" => Node::Optional(Box::new(build_schema_node(ask, "inner type")?)),
@@ -391,28 +384,15 @@ fn width(ask: &mut dyn Ask, names: &[&str], schemas: &[Node]) -> Result<Node> {
     Ok(schemas[ask.select("width", names, 0)?].clone())
 }
 
-/// Named fields for a struct enum variant, gathered until the user declines
-/// to add another (an empty set is a valid unit-like variant).
+/// Named fields for a [`Node::Struct`] or a struct enum variant, gathered until
+/// the user declines to add another (an empty set is a valid unit-like
+/// variant).
 fn collect_fields(ask: &mut dyn Ask) -> Result<BTreeMap<String, Node>> {
     let mut fields = BTreeMap::new();
     while ask.confirm("add a field?", fields.is_empty())? {
         let name = nonempty(ask, "field name")?;
         let schema = build_schema_node(ask, "field type")?;
         fields.insert(name, schema);
-    }
-    Ok(fields)
-}
-
-/// Named fields for a [`Node::Struct`], gathered the same way as
-/// [`collect_fields`] but additionally asking whether each carries a default
-/// (`StructField::has_default`).
-fn collect_struct_fields(ask: &mut dyn Ask) -> Result<BTreeMap<String, StructField>> {
-    let mut fields = BTreeMap::new();
-    while ask.confirm("add a field?", fields.is_empty())? {
-        let name = nonempty(ask, "field name")?;
-        let node = build_schema_node(ask, "field type")?;
-        let has_default = ask.confirm("does this field have a default?", false)?;
-        fields.insert(name, StructField { node, has_default });
     }
     Ok(fields)
 }
@@ -440,10 +420,11 @@ fn enum_schema(ask: &mut dyn Ask) -> Result<Node> {
 
 fn variant_kind(ask: &mut dyn Ask) -> Result<VariantKind> {
     Ok(
-        match ask.select("variant kind", &["unit", "newtype", "tuple", "struct"], 0)? {
+        match ask.select("variant kind", &["unit", "tuple", "struct"], 0)? {
             0 => VariantKind::Unit,
-            1 => VariantKind::Newtype(Box::new(build_schema_node(ask, "payload type")?)),
-            2 => {
+            1 => {
+                // One element is the payload itself (a newtype); more is an
+                // ordinal-named sequence.
                 let mut elems = vec![build_schema_node(ask, "element type")?];
                 while ask.confirm("add another tuple element?", false)? {
                     elems.push(build_schema_node(ask, "element type")?);
@@ -478,4 +459,29 @@ fn field(label: &str, name: &str) -> String {
 
 fn index(label: &str, i: usize) -> String {
     format!("{label}[{i}]")
+}
+
+/// Decode a hexadecimal string into bytes, rejecting an odd length or a
+/// non-hex digit.
+///
+/// Works on bytes: slicing a `str` at every second position would split a
+/// multi-byte character and panic on input that is merely mistyped.
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = text.trim().as_bytes();
+    let (pairs, rest) = bytes.as_chunks::<2>();
+    if !rest.is_empty() {
+        return None;
+    }
+    pairs
+        .iter()
+        .map(|pair| Some(nibble(pair[0])? << 4 | nibble(pair[1])?))
+        .collect()
 }

@@ -10,7 +10,7 @@ use gix_refstore::RefSegment;
 /// The stable identity of a stored entity.
 ///
 /// An entity id is the Git object id of the complete bound document tree: the
-/// root containing exactly the `schema` and `value` subtrees. It is therefore
+/// value's own entries beside the reserved `.schema` entry. It is therefore
 /// independent of commit parents, messages, signatures, and timestamps, while
 /// still changing when either the schema or value changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -64,9 +64,9 @@ pub fn canonical_document_id(tree: ObjectId) -> EntityId {
     EntityId::from_document_tree(tree)
 }
 
-/// A written `value/` subtree: an entity's encoded content, distinct from
-/// the [`SchemaTree`] it was validated against even though both are Git
-/// tree ids.
+/// A written bare value tree: an entity's encoded content before it is bound
+/// into a document, distinct from the [`SchemaTree`] it was validated against
+/// even though both are Git tree ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueTree(ObjectId);
 
@@ -126,8 +126,8 @@ impl From<SchemaTree> for ObjectId {
     }
 }
 
-/// A complete bound document tree: the root containing exactly `schema/`
-/// and `value/`. Its object id is the entity's [`EntityId`]; convert with
+/// A complete bound document tree: the value's own entries beside the reserved
+/// `.schema` entry. Its object id is the entity's [`EntityId`]; convert with
 /// `EntityId::from`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocumentTree(ObjectId);

@@ -588,13 +588,15 @@ dependencies = [
 [[package]]
 name = "facet-git-tree"
 version = "0.1.0-alpha.3"
-source = "git+https://github.com/git-ents/facet-git-tree#c4286e935d208361c584725ab63f8ebbfc1381b9"
+source = "git+https://github.com/git-ents/facet-git-tree#0d07456dfdc3e470f2c05953ae476927cf8abe4f"
 dependencies = [
  "facet",
  "facet-value",
  "gix-hash",
  "gix-object",
  "gix-odb",
+ "half",
+ "ryu",
  "thiserror",
 ]
 
@@ -1986,6 +1988,12 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "same-file"

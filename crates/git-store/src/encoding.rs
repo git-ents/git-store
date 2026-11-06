@@ -1,5 +1,5 @@
-//! Codecs for values stored in the `value/` subtree. Two implementations ship:
-//! [`Typed`] and [`Dynamic`].
+//! Codecs for bare values stored as trees. Two implementations ship: [`Typed`]
+//! and [`Dynamic`].
 
 use std::marker::PhantomData;
 
@@ -53,8 +53,8 @@ impl<T: for<'a> Facet<'a>> Encoding for Typed<T> {
     ) -> Result<ObjectId, Error> {
         let root = serialize_into(value, objects)?;
         // The native encoding is byte-identical to the schema-directed one,
-        // so validating here keeps the invariant that `value/` conforms to
-        // the `schema/` the same commit binds.
+        // so validating here keeps the invariant that a document's value
+        // conforms to the `.schema` it binds.
         validate_with_schema(&root, doc, objects)?;
         Ok(root)
     }

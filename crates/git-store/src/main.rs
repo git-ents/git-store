@@ -4,8 +4,9 @@
 //!
 //! Bare `git store` prints help, like any clap app; `git store list` (alias
 //! `ls`) lists kinds. `git store compile <kind> [<value>]` compiles `<value>`
-//! under `<kind>`'s schema into the `{value/, schema/}` tree and prints its
-//! hash — the document's identity — without advancing any ref. `git store put
+//! under `<kind>`'s schema into a bound document — the value's own entries
+//! beside the reserved `.schema` entry — and prints its hash, the document's
+//! identity, without advancing any ref. `git store put
 //! <kind> <name> [<value>]` does the same, then publishes it under `<name>`,
 //! advancing that name's ref. Reading mirrors writing: `git store cat
 //! <tree-ish>` decodes any tree of that shape back to JSON, content-addressed
@@ -130,7 +131,7 @@ enum Command {
     /// Store a value under a name, advancing that name's ref.
     Put(PutArgs),
     /// Decode any document tree, ref, or commit — a bare tree hash, or any
-    /// commit/ref whose tree has the `{value/, schema/}` shape `put`
+    /// commit/ref whose tree has the `{ fields..., .schema }` shape `put`
     /// compiles. Content-addressed, like `git cat-file`; use `get` to
     /// resolve a name first.
     Cat {
@@ -423,7 +424,7 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
                 .is_some_and(|format| format.eq_ignore_ascii_case("sha256"))
             {
                 bail!(
-                    "unsupported Git object format: expected sha1, observed sha256; this build's schema codec is SHA-1-only"
+                    "unsupported Git object format: observed sha256; this build's plumbing is SHA-1-only"
                 );
             }
             return Err(error).context("not inside a git repository");
@@ -451,7 +452,7 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
             } => {
                 let handle = store.dynamic(segment("kind", &kind)?);
                 let doc = if interactive {
-                    interactive::build_schema()?
+                    interactive::build_schema(&kind)?
                 } else {
                     schema_doc_from_json(&read_source(file.as_ref())?)?
                 };
@@ -586,11 +587,10 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         git_store::Error::NoSchema { .. }
         | git_store::Error::MissingObject { .. }
         | git_store::Error::SubtreeMissing { .. } => ExitClass::NotFound,
-        git_store::Error::NotACommit { .. }
-        | git_store::Error::NotATree { .. }
-        | git_store::Error::InvalidTrailer { .. } => ExitClass::Invalid,
+        git_store::Error::NotACommit { .. } | git_store::Error::NotATree { .. } => {
+            ExitClass::Invalid
+        }
         git_store::Error::NotSubtreeBound { .. }
-        | git_store::Error::MissingTrailer { .. }
         | git_store::Error::KindMismatch { .. }
         | git_store::Error::IdentityUniverse { .. }
         | git_store::Error::Schema(_)
@@ -607,7 +607,9 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         | git_store::Error::Serialize(_)
         | git_store::Error::Deserialize(_)
         | git_store::Error::UnsupportedObjectFormat { .. } => ExitClass::Other,
-        git_store::Error::DuplicateParent { .. } => ExitClass::Invalid,
+        git_store::Error::DuplicateParent { .. }
+        | git_store::Error::DocumentRootNotStruct { .. } => ExitClass::Invalid,
+        git_store::Error::Doctor(_) => ExitClass::Other,
     }
 }
 
@@ -897,7 +899,6 @@ fn document_inspect(
         match inspection {
             DocumentInspection::Bound(prepared) => {
                 record.insert("kind", "bound");
-                record.insert("value_tree", oid_value(prepared.value_tree()));
                 record.insert("schema_tree", oid_value(prepared.schema_tree()));
             }
             DocumentInspection::LegacyValueRoot { value_tree } => {
@@ -915,7 +916,6 @@ fn document_inspect(
         match inspection {
             DocumentInspection::Bound(prepared) => {
                 println!("bound document {document_tree}");
-                println!("  value: {}", prepared.value_tree());
                 println!("  schema: {}", prepared.schema_tree());
             }
             DocumentInspection::LegacyValueRoot { value_tree } => {
@@ -944,7 +944,6 @@ fn document_bind(
     if format.machine() {
         let mut record = json_record();
         record.insert("document_tree", oid_value(prepared.document_tree()));
-        record.insert("value_tree", oid_value(prepared.value_tree()));
         record.insert("schema_tree", oid_value(prepared.schema_tree()));
         emit_record(format, record)
     } else {
@@ -1290,7 +1289,8 @@ fn raw_git_dir(start: &Path) -> Option<PathBuf> {
 /// Check invariants that depend on the repository object database rather than
 /// on a particular kind or ref namespace, and print the result.
 ///
-/// The check itself — object format — lives in
+/// The checks themselves — the repository's object format and the
+/// schema-of-schemas fixed point — live in
 /// [`git_store::check_repository`]; this only gathers its inputs and formats
 /// its outcome.
 fn doctor(repo: &gix::Repository, format: OutputFormat) -> Result<()> {
@@ -1316,6 +1316,8 @@ fn doctor_with(
     let report = check().map_err(anyhow::Error::new)?;
     let mut fields = VObject::new();
     fields.insert("object_format", report.object_format.to_string());
+    fields.insert("s0_sha1", oid_value(report.s0_sha1));
+    fields.insert("s0_sha256", oid_value(report.s0_sha256));
     emit_single(format, fields, || {
         format!(
             "git-store doctor: ok (object format: {})",
@@ -1435,7 +1437,7 @@ fn gather_value(
         .map_err(|e| cli_error(ExitClass::Invalid, format!("invalid JSON: {e}")))
 }
 
-/// `cat <tree-ish>`: decode any tree of the `{value/, schema/}` shape
+/// `cat <tree-ish>`: decode any tree of the `{ fields..., .schema }` shape
 /// directly, whatever it was reached through — content-addressed, like `git
 /// cat-file`.
 fn cat(
@@ -1845,9 +1847,9 @@ fn pretty_skeleton(doc: &Schema) -> String {
     }
 }
 
-/// A compact placeholder JSON object snippet for a struct's fields, shared by
-/// [`Node::Struct`] (fields carry [`StructField`]) and a struct enum
-/// variant's payload (bare [`Node`] fields).
+/// A compact placeholder JSON object snippet for a struct's named fields,
+/// shared by [`Node::Struct`] and a struct enum variant's payload; both hold
+/// bare [`Node`] fields.
 fn skeleton_fields<'a>(
     fields: impl Iterator<Item = (&'a String, &'a Node)>,
     doc: &Schema,
@@ -1862,11 +1864,11 @@ fn skeleton_fields<'a>(
 fn skeleton(schema: &Node, doc: &Schema) -> String {
     match resolve(schema, doc) {
         Node::Bool => "false".into(),
-        Node::Char | Node::String | Node::Bytes => "\"\"".into(),
+        Node::Char | Node::String | Node::Bytes | Node::Cbor => "\"\"".into(),
         Node::F32 | Node::F64 => "0.0".into(),
         Node::I8 | Node::I16 | Node::I32 | Node::I64 | Node::I128 | Node::ISize => "0".into(),
         Node::U8 | Node::U16 | Node::U32 | Node::U64 | Node::U128 | Node::USize => "0".into(),
-        Node::Struct(fields) => skeleton_fields(fields.iter().map(|(n, f)| (n, &f.node)), doc),
+        Node::Struct(fields) => skeleton_fields(fields.iter(), doc),
         Node::Tuple(elems) => {
             let body: Vec<_> = elems.iter().map(|s| skeleton(s, doc)).collect();
             format!("[{}]", body.join(","))
@@ -1875,20 +1877,23 @@ fn skeleton(schema: &Node, doc: &Schema) -> String {
             let body: Vec<_> = (0..*len).map(|_| skeleton(elem, doc)).collect();
             format!("[{}]", body.join(","))
         }
-        // A scalar-keyed map reads back as a JSON object; a composite-keyed one
-        // as an array of `{ k, v }` pairs — mirror that in the seed.
-        Node::Map { key, .. } if is_scalar_schema(resolve(key, doc)) => "{}".into(),
-        Node::List(_) | Node::Map { .. } => "[]".into(),
+        // A map is always string-keyed and reads back as a JSON object.
+        Node::Map { .. } => "{}".into(),
+        Node::List(_) => "[]".into(),
         Node::Optional(_) | Node::Unit | Node::RawTree | Node::Dynamic => "null".into(),
         Node::Enum(variants) => match variants.first_key_value() {
             Some((name, kind)) => {
                 let payload = match kind {
                     VariantKind::Unit => "null".to_owned(),
-                    VariantKind::Newtype(inner) => skeleton(inner, doc),
-                    VariantKind::Tuple(elems) => {
-                        let body: Vec<_> = elems.iter().map(|s| skeleton(s, doc)).collect();
-                        format!("[{}]", body.join(","))
-                    }
+                    // A single-field tuple variant encodes its payload
+                    // directly; a longer one is an ordinal-named sequence.
+                    VariantKind::Tuple(elems) => match elems.as_slice() {
+                        [inner] => skeleton(inner, doc),
+                        _ => {
+                            let body: Vec<_> = elems.iter().map(|s| skeleton(s, doc)).collect();
+                            format!("[{}]", body.join(","))
+                        }
+                    },
                     VariantKind::Struct(fields) => skeleton_fields(fields.iter(), doc),
                 };
                 format!("{{{name:?}:{payload}}}")
@@ -1911,39 +1916,12 @@ fn type_layout(kind: &str, doc: &Schema) -> String {
     match resolve(&doc.root, doc) {
         Node::Struct(fields) => {
             for (name, field) in fields {
-                let default = if field.has_default { " = default" } else { "" };
-                out.push_str(&format!("\n  {name}: {}{default}", label(&field.node)));
+                out.push_str(&format!("\n  {name}: {}", label(field)));
             }
         }
         other => out.push_str(&format!("\n  {}", label(other))),
     }
     out
-}
-
-/// Whether a schema node is a scalar — the same classification that decides
-/// map layout (name-keyed object vs. `{ k, v }` pair array) in
-/// `serialize_value_with_schema`.
-pub(crate) fn is_scalar_schema(schema: &Node) -> bool {
-    matches!(
-        schema,
-        Node::Bool
-            | Node::Char
-            | Node::String
-            | Node::I8
-            | Node::I16
-            | Node::I32
-            | Node::I64
-            | Node::I128
-            | Node::ISize
-            | Node::U8
-            | Node::U16
-            | Node::U32
-            | Node::U64
-            | Node::U128
-            | Node::USize
-            | Node::F32
-            | Node::F64
-    )
 }
 
 /// Follow a `Ref` to the definition it names; any other node is returned as-is.
@@ -1962,6 +1940,7 @@ fn label(schema: &Node) -> String {
         Node::Char => "char".into(),
         Node::String => "string".into(),
         Node::Bytes => "bytes".into(),
+        Node::Cbor => "cbor".into(),
         Node::I8 | Node::I16 | Node::I32 | Node::I64 | Node::I128 | Node::ISize => "int".into(),
         Node::U8 | Node::U16 | Node::U32 | Node::U64 | Node::U128 | Node::USize => "uint".into(),
         Node::F32 | Node::F64 => "float".into(),
@@ -2001,7 +1980,7 @@ mod tests {
         )
         .unwrap_err();
         let message = format!("{error:#}");
-        assert!(message.contains("unsupported Git object format"));
+        assert!(message.contains("not supported by this build"));
         assert!(message.contains("sha256"));
     }
 
