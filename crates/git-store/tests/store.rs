@@ -15,8 +15,8 @@ use facet_value::value;
 use git_store::{
     ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
     DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore, ObjectId, PublishOptions,
-    RefName, RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree, entity_id_name,
-    entity_name, entity_name_under,
+    RefName, RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree,
+    canonical_document_id, entity_id_name, entity_name, entity_name_under,
 };
 use gix::bstr::ByteSlice;
 use gix_refstore::RefEdit;
@@ -1109,6 +1109,209 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
         }
         other => panic!("expected restored value, got {other:?}"),
     }
+}
+
+/// A pre-binding ("legacy") tip — a commit whose tree is a bare value tree with
+/// no `.schema` envelope — has no bound-document id, so `delete_name` must
+/// refuse with a typed error rather than record a tombstone. The value-tree oid
+/// the tip *does* have is a phantom: no bound document occupies it, so a
+/// tombstone that carried it would point at nothing.
+#[test]
+fn delete_name_refuses_a_legacy_tip_without_recording_a_phantom_id() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    let doc = schema_of::<Counter>().unwrap();
+    kind.schema().put(&doc).unwrap();
+    let value = value!({ "n": 1 });
+    let value_tree = facet_git_tree::serialize_value_with_schema(&value, &doc, store.objects())
+        .expect("write value tree");
+
+    // The pre-binding shape: the commit's tree *is* the value, with no
+    // envelope around it.
+    let name = entity("legacy");
+    let tip = commit_ref(
+        &store,
+        "refs/store/counter/legacy",
+        "pre-binding value\n",
+        value_tree,
+        None,
+    );
+
+    let err = kind.delete_name(&name).unwrap_err();
+    let Error::NotDeletable { commit, source } = err else {
+        panic!("a legacy tip must refuse deletion, got {err:?}");
+    };
+    assert_eq!(commit, tip);
+    assert!(
+        matches!(*source, Error::NotSubtreeBound { commit, .. } if commit == tip),
+        "the refusal must name the pre-binding shape: {source:?}"
+    );
+
+    // No tombstone was written and the tip is untouched: the ref still points
+    // at the legacy commit, so its history is intact and a later read still
+    // reports the pre-binding shape rather than a `Deleted` state.
+    assert_eq!(
+        store.refs().read(&kind.reference(&name)).unwrap(),
+        Some(tip)
+    );
+    assert_eq!(kind.history(&name).unwrap(), vec![tip]);
+    assert!(matches!(
+        kind.read(name.clone()).unwrap_err(),
+        Error::NotSubtreeBound { commit, .. } if commit == tip
+    ));
+
+    // The phantom this refusal prevents: the value-tree oid read back as an
+    // entity id addresses no document, so it resolves `Absent`.
+    let phantom = canonical_document_id(value_tree);
+    assert!(matches!(
+        kind.read(At::Entity(phantom)).unwrap(),
+        EntityState::Absent
+    ));
+}
+
+/// A bound-shaped root whose *value* does not decode is still not safe to
+/// tombstone by guesswork: `delete_name` refuses with the same typed error
+/// rather than clearing the name or recording an id it cannot stand behind.
+#[test]
+fn delete_name_refuses_a_bound_document_whose_value_does_not_decode() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    let doc = schema_of::<Counter>().unwrap();
+    kind.schema().put(&doc).unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
+
+    // `.schema` beside an `n` entry that is a blob, not the counter encoding.
+    let garbage = gix::objs::Write::write(
+        store.objects(),
+        &gix::objs::Blob {
+            data: b"not a counter".to_vec(),
+        },
+    )
+    .unwrap();
+    let bound = gix::objs::Write::write(
+        store.objects(),
+        &gix::objs::Tree {
+            entries: vec![
+                TreeEntry {
+                    mode: gix::objs::tree::EntryKind::Tree.into(),
+                    filename: ".schema".into(),
+                    oid: schema_tree,
+                },
+                TreeEntry {
+                    mode: gix::objs::tree::EntryKind::Blob.into(),
+                    filename: "n".into(),
+                    oid: garbage,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let name = entity("broken");
+    let tip = commit_ref(
+        &store,
+        "refs/store/counter/broken",
+        "undecodable value\n",
+        bound,
+        None,
+    );
+
+    let err = kind.delete_name(&name).unwrap_err();
+    assert!(
+        matches!(err, Error::NotDeletable { commit, .. } if commit == tip),
+        "an undecodable bound tip must refuse deletion, got {err:?}"
+    );
+    assert_eq!(
+        store.refs().read(&kind.reference(&name)).unwrap(),
+        Some(tip)
+    );
+}
+
+/// A malformed envelope — here a `.schema` entry naming an object the database
+/// lacks — is not a bound document either, so `delete_name` refuses instead of
+/// clearing the ref.
+#[test]
+fn delete_name_refuses_a_malformed_envelope() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    let doc = schema_of::<Counter>().unwrap();
+    kind.schema().put(&doc).unwrap();
+    let value_tree = store
+        .encode_value(
+            &value!({ "n": 1 }),
+            SchemaTree::from(serialize_into(&doc, store.objects()).unwrap()),
+        )
+        .unwrap();
+    let absent = ObjectId::from_hex(b"0123456789012345678901234567890123456789").unwrap();
+    let malformed = gix::objs::Write::write(
+        store.objects(),
+        &gix::objs::Tree {
+            entries: vec![
+                TreeEntry {
+                    mode: gix::objs::tree::EntryKind::Tree.into(),
+                    filename: ".schema".into(),
+                    oid: absent,
+                },
+                TreeEntry {
+                    mode: gix::objs::tree::EntryKind::Tree.into(),
+                    filename: "n".into(),
+                    oid: value_tree.object_id(),
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let name = entity("malformed");
+    let tip = commit_ref(
+        &store,
+        "refs/store/counter/malformed",
+        "malformed envelope\n",
+        malformed,
+        None,
+    );
+
+    let err = kind.delete_name(&name).unwrap_err();
+    assert!(
+        matches!(err, Error::NotDeletable { commit, .. } if commit == tip),
+        "a malformed envelope must refuse deletion, got {err:?}"
+    );
+    assert_eq!(
+        store.refs().read(&kind.reference(&name)).unwrap(),
+        Some(tip)
+    );
+}
+
+/// A legacy tip stays retired the one way that needs no entity id: `remove`
+/// prunes the ref outright, writing no tombstone. The name then reads `Absent`,
+/// not `Deleted`, because a hard-deleted name is indistinguishable from one
+/// that never existed — the documented cost of retiring a pre-envelope tip.
+#[test]
+fn a_legacy_tip_is_retired_by_removing_the_ref() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    let doc = schema_of::<Counter>().unwrap();
+    kind.schema().put(&doc).unwrap();
+    let value_tree =
+        facet_git_tree::serialize_value_with_schema(&value!({ "n": 1 }), &doc, store.objects())
+            .expect("write value tree");
+    let name = entity("legacy/removed");
+    commit_ref(
+        &store,
+        "refs/store/counter/legacy/removed",
+        "pre-binding value\n",
+        value_tree,
+        None,
+    );
+
+    assert!(kind.remove(&name).unwrap());
+    assert!(matches!(
+        kind.read(name.clone()).unwrap(),
+        EntityState::Absent
+    ));
+    assert!(matches!(
+        kind.delete_name(&name).unwrap(),
+        DeleteResult::Absent
+    ));
+    assert!(!kind.remove(&name).unwrap());
 }
 
 /// A user schema that happens to be structurally identical to the compiled-in

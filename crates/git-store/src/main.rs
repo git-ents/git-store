@@ -587,6 +587,7 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
             ExitClass::Invalid
         }
         git_store::Error::NotSubtreeBound { .. }
+        | git_store::Error::NotDeletable { .. }
         | git_store::Error::KindMismatch { .. }
         | git_store::Error::IdentityUniverse { .. }
         | git_store::Error::Schema(_)

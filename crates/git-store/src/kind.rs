@@ -915,6 +915,13 @@ where
     }
 
     /// Publish a typed tombstone at `name`, retaining its history.
+    ///
+    /// The tombstone must carry the [`EntityId`] the ref addressed, so a tip
+    /// that is not a bound document — a pre-binding ("legacy") commit whose
+    /// tree is a bare value tree, or any malformed or undecodable envelope —
+    /// is refused with [`Error::NotDeletable`] rather than tombstoned with an
+    /// invented id. [`remove`](Self::remove) retires such a tip (and any other)
+    /// by pruning the ref, writing no tombstone.
     pub fn delete_name(&self, name: &RefPath) -> Result<DeleteResult, Error>
     where
         R: Committer,
@@ -926,7 +933,30 @@ where
             let Some(current) = self.store.refs().read(&reference).map_err(Error::backend)? else {
                 return Ok(DeleteResult::Absent);
             };
-            if let EntityState::Deleted(existing) = self.read_commit(current)? {
+
+            // A tombstone must carry the `EntityId` the ref addressed
+            // (`docs/specification.adoc`, `plumbing.tombstone`), and an
+            // `EntityId` is the object id of a complete bound document tree —
+            // a value's entries beside the reserved `.schema` entry. A tip that
+            // does not resolve as this kind's bound document — a pre-binding
+            // ("legacy") commit whose tree is a bare value tree, or a malformed
+            // or undecodable envelope — has no such id, so tombstoning it would
+            // record a phantom one. Refuse instead of inventing an id, leaving
+            // the tip and its history exactly where they are. A tombstone of
+            // another kind and a backend read failure are their own diagnoses.
+            let state = match self.read_commit(current) {
+                Ok(state) => state,
+                Err(source @ (Error::KindMismatch { .. } | Error::Backend(_))) => {
+                    return Err(source);
+                }
+                Err(source) => {
+                    return Err(Error::NotDeletable {
+                        commit: current,
+                        source: Box::new(source),
+                    });
+                }
+            };
+            if let EntityState::Deleted(existing) = state {
                 return Ok(DeleteResult::AlreadyDeleted(existing));
             }
 

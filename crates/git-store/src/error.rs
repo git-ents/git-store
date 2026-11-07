@@ -63,6 +63,30 @@ pub enum Error {
         /// The data commit naming it.
         commit: ObjectId,
     },
+    /// A deletion named a ref whose tip is not a bound document this kind can
+    /// tombstone, so no content-derived [`EntityId`](crate::EntityId) can be
+    /// recorded for it.
+    ///
+    /// A tombstone records "the `EntityId` the ref addressed when it was
+    /// deleted" (`docs/specification.adoc`, `plumbing.tombstone`), and an
+    /// `EntityId` is the object id of a complete bound document tree — a
+    /// value's own entries beside the reserved `.schema` entry. A pre-binding
+    /// ("legacy") tip, whose tree is a bare value tree with no `.schema`, has
+    /// no such id: deriving one from its value tree would name an object no
+    /// bound document occupies, a phantom no reader could resolve. Deletion
+    /// refuses rather than record it, and the wrapped `source` says why the tip
+    /// did not resolve; the tip and its history stay exactly where they are.
+    /// Re-publish the tip under the current envelope, or prune the ref outright
+    /// with [`Kind::remove`](crate::Kind::remove), which writes no tombstone.
+    #[error("commit {commit} is not a tombstonable bound document")]
+    NotDeletable {
+        /// The tip commit whose deletion was refused.
+        commit: ObjectId,
+        /// Why the tip did not resolve as a bound document: the shape or
+        /// decode failure that left it without an [`EntityId`](crate::EntityId).
+        #[source]
+        source: Box<Error>,
+    },
     /// An object a read needed is not present.
     #[error("object {oid} is not present")]
     MissingObject {
