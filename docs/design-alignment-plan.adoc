@@ -12,16 +12,22 @@ This plan is intentionally staged. Each stage should leave the workspace
 buildable and should add regression coverage before removing the old behavior.
 
 > *Final implementation status.* The current implementation has reached the
-> storage contract described below; the phase sections that follow are retained
-> as historical design and rollout context, not as a list of unimplemented
-> changes.
+> storage contract in `docs/specification.adoc`. The objective, target
+> invariants, baseline, and phase sections below are retained as historical
+> design and rollout context, not as a list of unimplemented changes. Every
+> `{schema/, value/}` (or separate `schema/` and `value/` subtree) description
+> in those sections is the pre-freeze design and is superseded by the settled
+> envelope: the value's own entries directly at the document root beside the
+> reserved `.schema` entry (see
+> `link:specification.adoc#envelope[the document envelope]`). Do not read
+> those sections as current guidance.
 >
-> - `EntityId` is the OID of the complete bound document tree, whose root is
->   exactly `{schema/, value/}`. It is neither a publication commit OID nor a
->   caller-selected name. Canonical refs are direct
->   `refs/store/<kind>/<entity-id>` children. Named refs are compatibility
->   aliases, excluded from the canonical index, and may be maintained for old
->   callers.
+> - `EntityId` is the OID of the complete bound document tree, whose root holds
+>   the value's own entries directly beside the reserved `.schema` entry. It is
+>   neither a publication commit OID nor a caller-selected name. Canonical
+>   refs are direct `refs/store/<kind>/<entity-id>` children. Named refs are
+>   compatibility aliases, excluded from the canonical index, and may be
+>   maintained for old callers.
 > - `EntityState::{Present, Absent, Deleted}` distinguishes a live value, no
 >   ref (including an old hard-deleted ref), and an explicit typed tombstone.
 >   Tombstones are ordinary bound documents carrying `TombstoneState::Deleted`,
@@ -63,13 +69,13 @@ The implementation is complete when all of these are true:
    distinguishable from an absent/pruned ref.
 . Schema history is available for inspection, not a dependency of base reads.
 
-== Current baseline
+== Baseline when this plan was written
 
-The existing implementation already provides the most important reachability
-property: `Store::bind_schema()` creates the two root entries, and ordinary
-entity decoding reads the embedded schema. Preserve that representation and
-its fetch-without-`refs/schema/*` regression while changing the surrounding
-APIs.
+The implementation at that time already provided the most important
+reachability property: `Store::bind_schema()` created the two root entries, and
+ordinary entity decoding read the embedded schema. Preserve that
+representation and its fetch-without-`refs/schema/*` regression while changing
+the surrounding APIs.
 
 The main remaining seams are:
 

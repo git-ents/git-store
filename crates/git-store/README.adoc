@@ -21,10 +21,10 @@ $ git store document bind <value-tree> --schema refs/schema/recipe
 <document-tree>
 $ git store document inspect <document-tree>
 bound document <document-tree>
-  value: <value-tree>
   schema: <schema-tree>
 $ git store document publish recipe <document-tree> --expected absent --alias carbonara
 <entity-id>
+<commit>
 $ git store cat <document-tree> | jq .serves
 4
 ----
@@ -37,24 +37,22 @@ compile and a named write. The explicit `value` and `document` commands make
 each step addressable to callers that need explicit control.
 
 What landed is a real Git tree, not an opaque payload — `git ls-tree` and
-`git cat-file` are still useful query tools. A bound document's root is exactly
-two entries, `value/` and `schema/`; the schema used to validate the value
-travels inside the document, so it stays readable wherever its tree goes, with
-no dependence on also having `refs/schema/*`:
+`git cat-file` are still useful query tools. A bound document's root holds the
+value's own entries directly beside the reserved `.schema` entry; there is no
+`value/` or `schema/` subtree. The schema used to validate the value travels
+inside the document, so it stays readable wherever its tree goes, with no
+dependence on also having `refs/schema/*`:
 
 [source,console]
 ----
 $ git ls-tree refs/store/recipe/carbonara^{tree}
-040000 tree …    schema
-040000 tree …    value
-
-$ git ls-tree refs/store/recipe/carbonara^{tree}:value
+040000 tree …    .schema
 040000 tree …    ingredients
 100644 blob …    serves
 040000 tree …    steps
 100644 blob …    title
 
-$ git cat-file blob $(git rev-parse refs/store/recipe/carbonara^{tree}:value/serves)
+$ git cat-file blob $(git rev-parse refs/store/recipe/carbonara^{tree}:serves)
 4
 
 $ git log --oneline refs/store/recipe/carbonara     # this name's history
@@ -74,6 +72,7 @@ an historical publication commit directly:
 ----
 $ git ls-tree refs/schema/recipe^{tree}
 040000 tree …    defs
+100644 blob …    kind
 040000 tree …    root
 
 $ git store schema show
@@ -108,7 +107,7 @@ every field is its own object, addressed by content:
   produces.
 * *The schema isn't a config file on someone's laptop.* It is versioned data
   at `refs/schema/<kind>`, and every bound document carries the exact schema it
-  was validated against inside its own `schema/` subtree — reachable, gc-safe,
+  was validated against inside its own `.schema` entry — reachable, gc-safe,
   and fetch-complete by ordinary Git tree reachability — so old values stay
   readable after schema publication changes and after a fetch, push, or mirror
   that moves only the data ref. New commits contain no `Schema:`, `Schema-Version:`, or
@@ -205,10 +204,11 @@ tree, a schema publication commit, or any Git revision that peels to the schema
 tree; no kind lookup, schema-history guess, or trailer is consulted.
 
 `document bind <value-tree> --schema <schema-tree>` creates only the complete
-`{schema/, value/}` root tree. `document inspect <document-tree>` reports
-`bound`, `legacy_value_root`, or `malformed` without guessing. `document publish`
-then commits a prepared bound tree and updates the named ref and materialized
-index in one compare-and-swap batch.
+document root tree — the value's own entries beside `.schema`.
+`document inspect <document-tree>` reports `bound`, `legacy_value_root`, or
+`malformed` without guessing. `document publish` then commits a prepared bound
+tree and updates the named ref and materialized index in one compare-and-swap
+batch.
 
 `schema show <kind> --at <commit>` returns the schema snapshot at an explicit
 publication commit; without `--at` it returns the current snapshot. Text
@@ -328,19 +328,20 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   speak is refused rather than misread.
 * *Encoding is validation.* A value that does not conform to its selected
   schema fails with the offending path instead of writing a lossy tree.
-* *Documents are self-contained.* Every data commit's tree is exactly a
-  two-entry root, `{schema/, value/}`: `value/` contains the data and `schema/`
-  contains the exact schema tree used to validate it. `read` takes both
-  directly from the one commit, so old versions stay readable after a schema
-  evolves and after a fetch, push, or mirror that moves only the data ref.
+* *Documents are self-contained.* Every data commit's tree is the value's own
+  entries directly beside the reserved `.schema` entry: the value's entries
+  carry the data and `.schema` carries the exact schema tree used to validate
+  it. `read` takes both directly from the one commit, so old versions stay
+  readable after a schema evolves and after a fetch, push, or mirror that moves
+  only the data ref.
   Newly written commits contain none of the `Schema:`, `Schema-Version:`, or
   `Ents-Ref:` trailers. Those trailers are historical compatibility metadata:
   readers ignore them, including malformed or conflicting values, and never
   use them to resolve a schema.
 * *Entity identity is the complete bound tree OID.* `EntityId` is the OID of
-  the root tree containing exactly `schema/` and `value/`. It is not the
-  publication commit OID and not a caller-selected name; changing either the
-  bound schema or encoded value changes the ID. It is a derived value that
+  the document root tree: the value's own entries beside `.schema`. It is not
+  the publication commit OID and not a caller-selected name; changing either
+  the bound schema or encoded value changes the ID. It is a derived value that
   `compile_entity` produces for any document, published or not.
 * *Ref names are application policy.* Data refs are
   `refs/store/<kind>/<name>` for whatever name the caller picks, nesting
@@ -355,11 +356,11 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   `None`; match on `EntityState` when that distinction matters.
 * *Prepared documents expose the plumbing boundary.* `Store::encode_value`
   and `Store::decode_value` take an explicit schema tree and operate on an
-  unbound value tree. `Store::bind_document` creates the complete
-  `{schema/, value/}` root without a commit or ref; `Store::inspect_document`
-  classifies that root as bound, legacy value-root, or malformed. A
-  `Kind::publish_prepared` call then publishes the prepared tree, returning
-  both its content-derived `EntityId` and publication commit.
+  unbound value tree. `Store::bind_document` creates the complete document
+  root — the value's entries beside `.schema` — without a commit or ref;
+  `Store::inspect_document` classifies that root as bound, legacy value-root,
+  or malformed. A `Kind::publish_prepared` call then publishes the prepared
+  tree, returning both its content-derived `EntityId` and publication commit.
 * *Writes compare and swap.* Each entity write reads the entity and index
   refs, writes its commit and the next index tree, then applies both edits with
   one `RefStore::apply_batch`
@@ -386,10 +387,11 @@ dynamic.put(&RefSegment::new("cacio")?, &value!({ "title": "Cacio e Pepe", "serv
   the pair atomically. Schema interpretation is still separate from this
   entity-only fingerprint.
 * *Deletion is typed state.* `Tombstone` uses the same bound
-  `{schema/, value/}` frame as a live document. Its value carries an explicit
-  `TombstoneState::Deleted`, kind, and original `EntityId`, so a fetched
-  tombstone cannot be confused with a pruned ref. `EntityState::Absent` means
-  no ref exists (including an old hard-deleted ref); `EntityState::Deleted`
+  value-entries-beside-`.schema` envelope as a live document. Its value carries
+  an explicit `TombstoneState::Deleted`, kind, and original `EntityId`, so a
+  fetched tombstone cannot be confused with a pruned ref.
+  `EntityState::Absent` means no ref exists (including an old hard-deleted
+  ref); `EntityState::Deleted`
   means an explicit tombstone is still published. `delete` is idempotent:
   deleting a live ID publishes a tombstone, repeating it returns
   `DeleteResult::AlreadyDeleted`, and a missing ID returns

@@ -4,8 +4,8 @@
 :description: Self-contained typed documents stored as Git trees, thanks to `facet.rs` reflection in Rust.
 
 Store self-contained structured documents in Git with versioned schemas and
-ordinary Git history. Every document carries the exact `{schema, value}` pair
-used to encode it, so older values remain readable after a schema evolves and
+ordinary Git history. Every document carries the exact schema and value used
+to encode it, so older values remain readable after a schema evolves and
 ordinary reads do not depend on a current schema ref.
 
 == Install
@@ -34,20 +34,21 @@ git store cat <document-tree>
 `git store put <kind> <name> [<value>]` is the everyday write: it encodes,
 binds, and publishes in one step, advancing that name's ref.
 `git store compile <kind> [<value>]` is the pure form of the same composition:
-it creates a bound document whose root contains exactly `schema/` and `value/`,
-then prints the document-tree OID without advancing a ref. The explicit `value`
-and `document` commands expose the individual steps for scripts. `value encode` and
-`value decode` always take an explicit schema tree or schema publication commit;
-`document bind` does too. They do not infer a schema from a kind ref, commit
-trailer, or caller-selected name.
+it creates a bound document whose root holds the value's own entries directly
+beside the reserved `.schema` entry, then prints the document-tree OID without
+advancing a ref. The explicit `value` and `document` commands expose the
+individual steps for scripts. `value encode` and `value decode` always take an
+explicit schema tree or schema publication commit; `document bind` does too.
+They do not infer a schema from a kind ref, commit trailer, or caller-selected
+name.
 
-The `schema/` tree is the exact schema used to validate `value/`, so
+The `.schema` entry holds the exact schema used to validate the value, so
 `git store cat` can decode the document from its own tree even when no
 `refs/schema/*` ref is available. A published schema ref is a discovery,
 history, or authoring index; it does not define the type of an existing
 document.
 
-The printed hash is the OID of that complete bound `{schema, value}` root tree.
+The printed hash is the OID of that complete bound document root tree.
 It is the document's `EntityId`: it is not the publication commit OID and is
 not a caller-provided name. Schema and value both contribute to the ID.
 Canonical entity refs use that ID as the final segment:
@@ -105,9 +106,10 @@ The library's `EntityState` distinguishes `Present`, `Absent`, and `Deleted`.
 `Absent` means no canonical/alias ref exists, including an old hard-deleted
 ref. `Deleted` means a ref still exists and points to a typed tombstone whose
 value carries an explicit `Deleted` state, kind, and original `EntityId`.
-Tombstones use the same bound `{schema, value}` frame as ordinary documents, so
-they remain readable after the entity ref is fetched without the schema ref or
-materialized index. `read` returns that state; project it with `value()` when
+Tombstones use the same bound value-entries-beside-`.schema` envelope as
+ordinary documents, so they remain readable after the entity ref is fetched
+without the schema ref or materialized index. `read` returns that state;
+project it with `value()` when
 `Absent` and `Deleted` may both collapse to `None`, and match on
 `EntityState` when the distinction matters.
 
