@@ -318,11 +318,116 @@ fn invalid_index(message: &'static str) -> Error {
     ))
 }
 
+/// The value of one canonical (lowercase) hex digit.
+///
+/// Uppercase is refused deliberately: [`encode_hex`] only ever writes
+/// lowercase, so accepting uppercase would let a hand-written index tree carry
+/// a byte-for-byte different spelling of the same path — more than one
+/// encoding for one ref name. A tree that uses any other spelling is
+/// non-canonical and is rejected, so the caller rebuilds it.
 fn hex_digit(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use facet_git_tree::ObjectStore;
+
+    #[test]
+    fn decode_hex_accepts_only_lowercase() {
+        assert_eq!(decode_hex(b"00ff"), Some(vec![0x00, 0xff]));
+        assert_eq!(decode_hex(b"c3a9"), Some(vec![0xc3, 0xa9]));
+        assert_eq!(
+            decode_hex(b"00FF"),
+            None,
+            "uppercase hex is non-canonical and must be refused",
+        );
+        assert_eq!(decode_hex(b"C3A9"), None, "uppercase hex is non-canonical");
+    }
+
+    /// The length header before each segment is hex too, and must be canonical.
+    #[test]
+    fn parse_hex_accepts_only_lowercase() {
+        assert_eq!(parse_hex(b"0000000a"), Some(10));
+        assert_eq!(
+            parse_hex(b"0000000A"),
+            None,
+            "an uppercase length header is non-canonical",
+        );
+    }
+
+    #[test]
+    fn decode_path_round_trips_canonical_and_refuses_uppercase() {
+        let path = RefPath::new("é").expect("legal non-ASCII segment");
+        let canonical = encode_path(&path);
+        assert_eq!(decode_path(canonical.as_bytes()), Some(path.clone()));
+
+        // "é" is two bytes (c3 a9), so the canonical encoding is
+        // `p` + the 8-digit length + the hex payload `c3a9`. Upper-casing the
+        // payload leaves the `p` marker and every other byte canonical, so
+        // only the hex strictness can reject it.
+        assert_eq!(decode_path(b"p00000002c3a9"), Some(path.clone()));
+        assert_eq!(
+            decode_path(b"p00000002C3A9"),
+            None,
+            "an uppercase hex payload must be refused, not decoded",
+        );
+        // Same for an uppercase length header.
+        assert_eq!(
+            decode_path(b"p0000000A6162636465666768"),
+            None,
+            "an uppercase length header must be refused",
+        );
+    }
+
+    fn store() -> Store<crate::MemoryRefStore, ObjectStore> {
+        Store::new(crate::MemoryRefStore::new(), ObjectStore::default())
+    }
+
+    /// A one-entry tree carrying `filename`, whose commit target is a real
+    /// blob so the object store can hold it.
+    fn tree_with(store: &Store<crate::MemoryRefStore, ObjectStore>, filename: &str) -> ObjectId {
+        use gix::objs::Write;
+        let mode = gix::objs::tree::EntryMode::from(gix::objs::tree::EntryKind::Commit);
+        let target = Write::write(
+            store.objects(),
+            &gix::objs::Blob {
+                data: b"c".to_vec(),
+            },
+        )
+        .expect("write blob");
+        Write::write(
+            store.objects(),
+            &gix::objs::Tree {
+                entries: vec![gix::objs::tree::Entry {
+                    mode,
+                    filename: filename.into(),
+                    oid: target,
+                }],
+            },
+        )
+        .expect("write tree")
+    }
+
+    /// The end-to-end shape of the defect: a hand-built index tree whose path
+    /// entry is non-canonical must be rejected by the tree reader — which is
+    /// what makes `read_validated` fall back to the ref listing — rather than
+    /// silently decoded.
+    #[test]
+    fn read_tree_rejects_uppercase_hex_entry() {
+        let store = store();
+        assert!(
+            read_tree(&store, tree_with(&store, "p00000002c3a9")).is_ok(),
+            "a canonical entry must decode",
+        );
+        assert!(
+            read_tree(&store, tree_with(&store, "p00000002C3A9")).is_err(),
+            "a non-canonical entry must be refused",
+        );
     }
 }

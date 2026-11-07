@@ -5,7 +5,7 @@
 //! serialise without deadlocking.
 //!
 //! The lock lives at `<git-dir>/gix-refstore-locks/<encoded-ref>.lock`, where
-//! `<encoded-ref>` is the ref with `%` and `/` percent-escaped. It is a
+//! `<encoded-ref>` percent-encodes every byte outside `[a-z0-9.-]`. It is a
 //! `GixRefStore`-only concern, so this is a `repo`-specific suite rather than
 //! a conformance case.
 
@@ -93,7 +93,16 @@ mod linux {
     /// The lock directory and the lock file a ref's write would create.
     fn lock_paths(repo: &gix::Repository, name: &str) -> (PathBuf, PathBuf) {
         let dir = repo.git_dir().join("gix-refstore-locks");
-        let encoded = name.replace('%', "%25").replace('/', "%2F");
+        let encoded: String = name
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-') {
+                    char::from(b).to_string()
+                } else {
+                    format!("%{b:02x}")
+                }
+            })
+            .collect();
         let lock = dir.join(format!("{encoded}.lock"));
         (dir, lock)
     }

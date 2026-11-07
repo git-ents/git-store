@@ -246,11 +246,34 @@ impl<'r> GixRefStore<'r> {
     }
 }
 
-/// A flat, filesystem-safe lock filename for a ref: `%` and `/` are
-/// percent-escaped so the whole ref becomes one path segment, never a nested
-/// directory tree.
+/// A flat, filesystem-safe, case-insensitively-injective lock filename for a
+/// ref.
+///
+/// Every byte outside `[a-z0-9.-]` — including `/`, `%`, all uppercase
+/// letters, and every character a Windows filename forbids (`< > " |`) — is
+/// percent-encoded as `%` plus two lowercase hex digits. The output therefore
+/// contains only `[a-z0-9.-%]`: no uppercase letter, and none of `<>:"|?*\/~`.
+/// That makes it a legal filename on every platform and keeps two ref names
+/// that differ only in case (or in any of those characters) mapped to distinct
+/// files, even on a case-insensitive filesystem.
+///
+/// The encoding is injective: `%` is itself escaped (`%25`), so a `%` in the
+/// output always begins an escape and the literal bytes it stands for can
+/// never be confused with the bytes they encode to. It never emits `~`, which
+/// reserves the `~reap` sidecar suffix (see [`REAP_SUFFIX`]) for the reclaimer.
 fn encode_ref(name: &RefName) -> String {
-    name.as_str().replace('%', "%25").replace('/', "%2F")
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(name.as_str().len());
+    for byte in name.as_str().bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0xf)]));
+        }
+    }
+    encoded
 }
 
 /// The lock file `gix-lock` creates for `resource`: the resource path with
@@ -500,6 +523,109 @@ impl Committer for GixRefStore<'_> {
             Some(Ok(sig)) => sig.to_owned().map_err(GixError::git),
             Some(Err(err)) => Err(GixError::git(err)),
             None => Err(GixError::NoAuthor),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{REAP_SUFFIX, encode_ref};
+    use crate::RefName;
+
+    /// Ref names that are legal but exercise every way a lock-path encoding
+    /// can go wrong: uppercase letters, the characters Windows forbids in a
+    /// filename, the escape character itself, the path separator, and
+    /// non-ASCII bytes.
+    const TRICKY: &[&str] = &[
+        "refs/store/MixedCase",
+        "refs/store/a<b",
+        "refs/store/a>b",
+        "refs/store/a\"b",
+        "refs/store/a|b",
+        "refs/store/a%b",
+        "refs/store/a/b",
+        "refs/store/café",
+        "refs/store/AB",
+        "refs/store/ab",
+    ];
+
+    /// The table is only meaningful if every entry is a name `RefName` really
+    /// accepts, so prove that first rather than assume it.
+    #[test]
+    fn tricky_names_are_all_legal() {
+        for name in TRICKY {
+            RefName::new(*name).unwrap_or_else(|err| panic!("{name:?} should be legal: {err}"));
+        }
+    }
+
+    /// The encoded name must be a legal filename everywhere (only
+    /// `[a-z0-9.-%]`, no uppercase, none of `<>:"|?*\/~`) and injective —
+    /// including across names that differ only in case, which collide on a
+    /// case-insensitive filesystem.
+    #[test]
+    fn encode_ref_is_injective_and_filesystem_safe() {
+        let mut encoded = Vec::new();
+        for name in TRICKY {
+            let name = RefName::new(*name).expect("legal");
+            let enc = encode_ref(&name);
+            encoded.push(enc.clone());
+
+            assert!(
+                enc.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'%')
+                }),
+                "{name:?} encoded to {enc:?}, which escapes the [a-z0-9.-%] alphabet",
+            );
+            for forbidden in ['<', '>', '"', '|', '/', '\\', ':', '*', '?', '~'] {
+                assert!(
+                    !enc.contains(forbidden),
+                    "{name:?} encoded to {enc:?}, which contains {forbidden:?}",
+                );
+            }
+            assert!(
+                !enc.chars().any(|c| c.is_ascii_uppercase()),
+                "{name:?} encoded to {enc:?}, which contains an uppercase letter",
+            );
+        }
+
+        for (i, a) in encoded.iter().enumerate() {
+            for b in &encoded[i + 1..] {
+                assert_ne!(a, b, "two tricky names collide at {a:?}");
+                // A case-insensitive filesystem folds names; the encoding must
+                // survive that fold without collapsing distinct refs.
+                assert_ne!(
+                    a.to_ascii_lowercase(),
+                    b.to_ascii_lowercase(),
+                    "{a:?} and {b:?} collide on a case-insensitive filesystem",
+                );
+            }
+        }
+    }
+
+    /// The reclaim scheme appends `~reap` to a primary name. `~` never appears
+    /// in an encoded primary, so a sidecar can never be mistaken for one, and
+    /// the sidecars stay injective alongside the primaries.
+    #[test]
+    fn reap_sidecar_is_uncolliding_and_injective() {
+        let primaries: Vec<String> = TRICKY
+            .iter()
+            .map(|name| encode_ref(&RefName::new(*name).expect("legal")))
+            .collect();
+        for primary in &primaries {
+            assert!(
+                !primary.contains('~'),
+                "a primary name contains the sidecar separator: {primary:?}",
+            );
+        }
+
+        let mut all: Vec<String> = Vec::new();
+        for primary in &primaries {
+            all.push(primary.clone());
+            all.push(format!("{primary}{REAP_SUFFIX}"));
+        }
+        all.sort();
+        for pair in all.windows(2) {
+            assert_ne!(pair[0], pair[1], "a sidecar and a primary collide");
         }
     }
 }
