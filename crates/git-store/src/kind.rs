@@ -508,7 +508,10 @@ where
 
     /// Resolve the name and ref `tree` publishes to and — when `expect`
     /// still holds — the commit it will point at and the [`RefEdit`] (if
-    /// any) that moves the ref there, without writing or applying anything.
+    /// any) that carries the ref there, without writing or applying anything.
+    /// When the content is already at the ref the edit is a no-op update
+    /// (`expected == new`) if a compare-and-swap was requested, so the
+    /// expectation is still enforced atomically, and `None` otherwise.
     /// `expect` of `None` skips the compare-and-swap check entirely, so the
     /// ref advances unconditionally like a branch.
     ///
@@ -558,7 +561,21 @@ where
 
         // Republishing identical content is a no-op; otherwise history advances.
         let (commit, edit) = match current {
-            Some(commit) if self.store.commit_tree(commit)? == tree => (commit, None),
+            Some(commit) if self.store.commit_tree(commit)? == tree => {
+                // The ref stays where it is. When the caller asked for a
+                // compare-and-swap, still route a no-op update through the ref
+                // store so the expectation is verified atomically at the point
+                // the publication reports success: a bare read here would let
+                // a write landing after it be reported as a successful
+                // publication of this content. `expected == new`, so a
+                // confirmed edit leaves the ref — and its history — untouched.
+                let edit = expect.map(|_| RefEdit::Update {
+                    name: reference.clone(),
+                    expected: commit,
+                    new: commit,
+                });
+                (commit, edit)
+            }
             Some(expected) => {
                 let next =
                     self.store

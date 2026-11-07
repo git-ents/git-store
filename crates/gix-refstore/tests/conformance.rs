@@ -119,6 +119,32 @@ fn update_with_correct_expected_moves_ref<S: RefStore>(store: &S, oid: impl Fn(u
     assert_eq!(store.read(&name).expect("read"), Some(new));
 }
 
+/// A no-op update — `expected == new` — whose expectation still holds is
+/// accepted, leaving the ref where it is. `publish_prepared` relies on exactly
+/// this to verify an explicit expectation atomically when republishing
+/// identical content, which must not advance history.
+fn update_to_the_same_oid_with_correct_expected_succeeds<S: RefStore>(
+    store: &S,
+    oid: impl Fn(u32) -> ObjectId,
+) {
+    let name = RefName::new("refs/store/recipe/carbonara").expect("valid name");
+    let original = oid(1);
+    store
+        .apply(RefEdit::Create {
+            name: name.clone(),
+            new: original,
+        })
+        .expect("create");
+    store
+        .apply(RefEdit::Update {
+            name: name.clone(),
+            expected: original,
+            new: original,
+        })
+        .expect("a no-op update whose expectation holds must apply");
+    assert_eq!(store.read(&name).expect("read"), Some(original));
+}
+
 fn update_with_stale_expected_fails_and_leaves_value<S: RefStore>(
     store: &S,
     oid: impl Fn(u32) -> ObjectId,
@@ -358,6 +384,7 @@ conformance_tests! {
     create_existing_fails_and_leaves_value,
     create_existing_with_same_oid_fails,
     update_with_correct_expected_moves_ref,
+    update_to_the_same_oid_with_correct_expected_succeeds,
     update_with_stale_expected_fails_and_leaves_value,
     delete_with_correct_expected_removes_ref,
     delete_with_stale_expected_fails_and_leaves_value,

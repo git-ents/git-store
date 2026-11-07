@@ -13,8 +13,8 @@ use facet_git_tree::{GitObject, ObjectStore, TreeEntry, schema_of, serialize_int
 use facet_value::value;
 use git_store::{
     ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
-    DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore, ObjectId, RefName,
-    RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree, entity_id_name,
+    DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore, ObjectId, PublishOptions,
+    RefName, RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree, entity_id_name,
     entity_name, entity_name_under,
 };
 use gix::bstr::ByteSlice;
@@ -1886,4 +1886,166 @@ fn transaction_stale_expectation_leaves_every_staged_ref_untouched() {
     assert!(b.list_entries().unwrap().is_empty());
     assert_eq!(a.list_entries().unwrap().len(), 1);
     assert_eq!(a.read(existing).unwrap().value(), Some(value!({ "n": 1 })));
+}
+
+// --- fault-injecting RefStore: the no-op publication's compare-and-swap ---
+
+/// A competing write to land the moment a watched ref is read, plus the
+/// pre-race value to hand back so the caller resolves against state the ref
+/// no longer holds.
+struct ReadInjection {
+    target: RefName,
+    report: ObjectId,
+    competing: RefEdit,
+}
+
+/// Wraps a [`MemoryRefStore`] to reproduce the window between the read that
+/// resolves a publication and the caller being told it succeeded: the read of
+/// one watched ref lands a competing write first, then reports the value from
+/// before that write.
+struct InjectOnReadRefStore {
+    inner: MemoryRefStore,
+    injection: RefCell<Option<ReadInjection>>,
+}
+
+impl InjectOnReadRefStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryRefStore::new(),
+            injection: RefCell::new(None),
+        }
+    }
+
+    fn arm(&self, injection: ReadInjection) {
+        *self.injection.borrow_mut() = Some(injection);
+    }
+}
+
+impl RefStore for InjectOnReadRefStore {
+    type Error = Infallible;
+
+    fn read(&self, name: &RefName) -> Result<Option<ObjectId>, Self::Error> {
+        let fired = {
+            let mut slot = self.injection.borrow_mut();
+            match slot.as_ref() {
+                Some(injection) if injection.target == *name => slot.take(),
+                _ => None,
+            }
+        };
+        if let Some(injection) = fired {
+            self.inner
+                .apply(injection.competing)
+                .expect("injected competing write applies");
+            return Ok(Some(injection.report));
+        }
+        self.inner.read(name)
+    }
+
+    fn prefixed(&self, prefix: &RefPrefix) -> Result<Vec<(RefName, ObjectId)>, Self::Error> {
+        self.inner.prefixed(prefix)
+    }
+
+    fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>> {
+        self.inner.apply_batch(edits)
+    }
+}
+
+impl Committer for InjectOnReadRefStore {
+    type Error = Infallible;
+
+    fn signature(&self) -> Result<gix::actor::Signature, Self::Error> {
+        self.inner.signature()
+    }
+}
+
+/// Write a commit object directly into `store`'s object database, without
+/// touching any ref — a fixture for a competing writer's commit.
+fn manual_commit<R, O>(
+    store: &Store<R, O>,
+    tree: ObjectId,
+    parent: Option<ObjectId>,
+    message: &str,
+) -> ObjectId
+where
+    R: RefStore + Committer,
+    O: gix::prelude::Find + gix::objs::Write,
+{
+    let signature = store.refs().signature().expect("fixed signature");
+    let commit = gix::objs::Commit {
+        tree,
+        parents: parent.into_iter().collect(),
+        author: signature.clone(),
+        committer: signature,
+        encoding: None,
+        message: message.into(),
+        extra_headers: Vec::new(),
+    };
+    gix::objs::Write::write(store.objects(), &commit).expect("write commit")
+}
+
+/// Republishing identical content is a no-op — but when the caller supplies an
+/// explicit [`Expectation::Exactly`], that expectation is a one-shot
+/// compare-and-swap and must still hold at the moment the call reports success.
+/// A competing write landing between the read that resolves the publication and
+/// the return must not be reported as a successful publication of the content
+/// the caller asked for.
+#[test]
+fn no_op_republish_verifies_the_expectation_atomically() {
+    let store = Store::new(InjectOnReadRefStore::new(), ObjectStore::default());
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+
+    let alias = entity("c");
+    let published = kind.write(&value!({ "n": 1 })).at(&alias).unwrap();
+
+    // A legitimate competing commit for different content, parented on the
+    // published one, built without touching `alias` or the kind index.
+    let competing_tree = kind.compile(&value!({ "n": 2 })).unwrap();
+    let competing = manual_commit(&store, competing_tree, Some(published), "competing\n");
+
+    // Republish the identical content under `Exactly(published)`. Arm the
+    // store so the read feeding `resolve_publish` lands the competing commit
+    // first and reports the pre-race value, so the identity shortcut is taken
+    // over a ref that no longer holds `published`.
+    let tree = kind.compile(&value!({ "n": 1 })).unwrap();
+    assert_eq!(
+        match store.objects().get(&published).unwrap().unwrap() {
+            GitObject::Commit(commit) => commit.tree,
+            other => panic!("expected a commit, got {other:?}"),
+        },
+        tree,
+        "the recompiled tree must equal the published commit's tree"
+    );
+    let prepared = match store.inspect_document(DocumentTree::from(tree)).unwrap() {
+        DocumentInspection::Bound(document) => document,
+        other => panic!("expected a bound document, got {other:?}"),
+    };
+    let reference = kind.reference(&alias);
+    store.refs().arm(ReadInjection {
+        target: reference.clone(),
+        report: published,
+        competing: RefEdit::Update {
+            name: reference.clone(),
+            expected: published,
+            new: competing,
+        },
+    });
+
+    let result = kind.publish_prepared(
+        &prepared,
+        PublishOptions::new("prepared publication")
+            .with_alias(alias.clone())
+            .with_expectation(Expectation::Exactly(published)),
+    );
+
+    // The documented promise: either the call fails because the expectation
+    // went stale under it, or it succeeds and the ref really points at the
+    // commit it reports.
+    if let Ok(publication) = result {
+        assert_eq!(
+            store.refs().read(&reference).unwrap(),
+            Some(publication.commit),
+            "a successful publication must leave the ref at the commit it reports"
+        );
+    }
 }
