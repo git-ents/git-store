@@ -59,6 +59,16 @@ pub(crate) fn object_kind<S: Find + ?Sized>(
 
 /// Split a document root into the root itself and its embedded schema tree.
 ///
+/// This is the *validating parser* the read path is built on: it accepts only a
+/// well-formed envelope and rejects everything else.
+/// [`crate::Store::inspect_document`] is the *classifier* over the same shapes:
+/// it reports a `.schema`-less tree as
+/// [`DocumentInspection::LegacyValueRoot`](crate::DocumentInspection) (the
+/// absence of an envelope, not a value) and an empty or defective root as
+/// malformed, where this function returns an error. The two are deliberately
+/// different postures, not two verdicts on the same question: a tree is a
+/// document to the classifier exactly when this function succeeds.
+///
 /// The root must carry a `.schema` entry holding a tree, and at least one other
 /// entry for the value; every other entry is the value's own. `commit` names
 /// the commit the root came from, for diagnostics.

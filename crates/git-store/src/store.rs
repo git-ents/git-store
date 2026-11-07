@@ -350,15 +350,26 @@ where
         })
     }
 
-    /// Inspect a document boundary without consulting a kind or schema ref.
+    /// Classify a document boundary without consulting a kind or schema ref.
+    ///
+    /// This is a *classifier*, not a validating parser: it answers "does this
+    /// tree carry the `.schema` envelope entry?" and never fails on shape.
+    /// `envelope::split` — the read path — is the *validating parser*: it
+    /// accepts only a well-formed envelope and rejects every shape below as
+    /// [`Error::NotSubtreeBound`] or [`Error::SubtreeMissing`]. The two
+    /// therefore answer "is this a document envelope?" identically — this
+    /// method reports `Bound` exactly when `envelope::split` succeeds — while
+    /// `decode` adds the schema deserialization and read on top.
     ///
     /// A root carrying a readable `.schema` entry beside at least one entry of
     /// the value's own is returned as [`DocumentInspection::Bound`]. A tree with
-    /// no `.schema` entry is reported as a legacy unbound value root, and
-    /// envelope-like but invalid trees — a `.schema` that is not a tree or is
+    /// no `.schema` entry is reported as [`DocumentInspection::LegacyValueRoot`]
+    /// — the absence of an envelope, not a claim that the tree is a value.
+    /// Envelope-like but invalid trees — a `.schema` that is not a tree or is
     /// missing, or one with no value entries beside it — are reported as
     /// structured [`DocumentInspection::Malformed`] metadata instead of being
-    /// guessed.
+    /// guessed. An empty root is malformed rather than a legacy value candidate:
+    /// it is neither an envelope nor a bare value tree.
     pub fn inspect_document(
         &self,
         document_tree: DocumentTree,
@@ -382,6 +393,18 @@ where
         let schema = entries.iter().find(|entry| entry.0 == SCHEMA_ENTRY);
 
         let Some(schema) = schema else {
+            // No `.schema` entry: not an envelope. Every other shape here could
+            // be a pre-binding bare value tree, which the classifier reports
+            // without interpreting. An empty root cannot: it is neither an
+            // envelope nor a bare value tree, so it is refused rather than
+            // offered as a legacy value candidate.
+            if entries.is_empty() {
+                return Ok(DocumentInspection::Malformed {
+                    document_tree,
+                    found,
+                    reason: DocumentShapeError::EmptyRoot,
+                });
+            }
             return Ok(DocumentInspection::LegacyValueRoot {
                 value_tree: document_tree,
             });

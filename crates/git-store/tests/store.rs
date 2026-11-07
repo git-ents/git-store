@@ -16,7 +16,7 @@ use git_store::{
     ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
     DocumentTree, EntityState, Entry, Error, Expectation, MemoryRefStore, ObjectId, PublishOptions,
     RefName, RefPath, RefPrefix, RefSegment, RefStore, SchemaTree, Store, Subtree,
-    canonical_document_id, entity_id_name, entity_name, entity_name_under,
+    canonical_document_id, decode, entity_id_name, entity_name, entity_name_under,
 };
 use gix::bstr::ByteSlice;
 use gix_refstore::RefEdit;
@@ -282,6 +282,136 @@ fn inspection_reports_malformed_envelopes_without_guessing() {
         panic!("expected malformed document metadata");
     };
     assert_eq!(reason, DocumentShapeError::SchemaMissing { oid: absent });
+}
+
+/// Claim D3: [`Store::inspect_document`] classified *every* tree without a
+/// `.schema` entry as [`DocumentInspection::LegacyValueRoot`], so a schema
+/// document tree (entries `kind`/`root`/`defs`), an empty tree, and a genuine
+/// pre-binding value tree all looked alike — while the split-backed read path
+/// ([`decode`]) rejects every one of them.
+///
+/// This pins what each shape is to each API. The classifier answers "does this
+/// tree carry the envelope entry?"; the parser answers "is this a usable
+/// envelope, and decode it". Only shapes that could plausibly be bare value
+/// roots may be `LegacyValueRoot`; a tree that is provably not a value (an
+/// empty root, which no encoding writes and no bare value produces) must not.
+#[test]
+fn classification_and_the_read_path_agree_on_every_root_shape() {
+    use gix::objs::{Tree, Write, tree::EntryKind};
+
+    let store = store();
+    let doc = schema_of::<Counter>().unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
+
+    // (a) A `.schema`-only root: an envelope with no value entries beside it.
+    //     A struct contributes at least the `none` marker, so this format can
+    //     never have written this shape.
+    let schema_only = Write::write(
+        store.objects(),
+        &Tree {
+            entries: vec![TreeEntry {
+                mode: EntryKind::Tree.into(),
+                filename: ".schema".into(),
+                oid: schema_tree,
+            }],
+        },
+    )
+    .unwrap();
+
+    // (b) A schema document tree: the bare `Schema` value (entries
+    //     `kind`/`root`/`defs`) with no `.schema` of its own.
+    let schema_document = schema_tree;
+
+    // (c) An empty tree. `envelope.empty` writes no empty tree and a bare value
+    //     always contributes the `none` marker, so an empty tree is neither a
+    //     document nor a value.
+    let empty = Write::write(store.objects(), &Tree { entries: vec![] }).unwrap();
+
+    // (d) A genuine legacy value root: a bare value tree with real entries, the
+    //     shape every pre-envelope commit carried.
+    let legacy =
+        facet_git_tree::serialize_value_with_schema(&value!({ "n": 7 }), &doc, store.objects())
+            .unwrap();
+
+    // (e) A bound document, for contrast.
+    let bound = bound_document(&store, &value!({ "n": 7 }), &doc);
+
+    let kind_of = |tree: ObjectId| {
+        store
+            .inspect_document(DocumentTree::from(tree))
+            .unwrap()
+            .kind()
+    };
+    // The split-backed read path refuses every non-envelope with the commit
+    // being the tree itself (as `decode` passes `tree` for both root and
+    // commit).
+    let read_refuses = |tree: ObjectId| {
+        matches!(
+            decode(tree, store.objects()),
+            Err(Error::NotSubtreeBound { commit, .. }) if commit == tree
+        )
+    };
+
+    // (a) Envelope-like but with no value entries: malformed by the classifier,
+    //     unbound by the parser.
+    assert!(matches!(
+        store
+            .inspect_document(DocumentTree::from(schema_only))
+            .unwrap(),
+        DocumentInspection::Malformed {
+            reason: DocumentShapeError::NoValueEntries,
+            ..
+        }
+    ));
+    assert!(read_refuses(schema_only));
+
+    // (b) A schema document tree is neither an envelope nor a value. It reaches
+    //     the classifier's no-envelope arm, which reports the *absence* of an
+    //     envelope and does not claim the tree is a value; the parser rejects
+    //     it.
+    assert_eq!(kind_of(schema_document), DocumentKind::LegacyValueRoot);
+    assert!(read_refuses(schema_document));
+
+    // (c) An empty tree is neither an envelope nor a value, so the classifier
+    //     must not offer it as a legacy value root.
+    assert_eq!(
+        kind_of(empty),
+        DocumentKind::Malformed,
+        "an empty tree is not a legacy value root"
+    );
+    assert!(read_refuses(empty));
+
+    // (d) A genuine pre-binding value tree is still recognized as unbound...
+    assert_eq!(kind_of(legacy), DocumentKind::LegacyValueRoot);
+    // ...and the parser still refuses it: it has no envelope.
+    assert!(read_refuses(legacy));
+
+    // (e) A bound document is a document to both.
+    assert_eq!(kind_of(bound), DocumentKind::Bound);
+    assert!(decode(bound, store.objects()).is_ok());
+
+    // The invariant tying the two together: for every shape here, the
+    // classifier calls it a document exactly when the read path accepts it.
+    // (`decode` layers schema validation over `envelope::split`; these shapes
+    // fail the envelope check first, so the two coincide.)
+    for (tree, is_document) in [
+        (schema_only, false),
+        (schema_document, false),
+        (empty, false),
+        (legacy, false),
+        (bound, true),
+    ] {
+        assert_eq!(
+            kind_of(tree) == DocumentKind::Bound,
+            decode(tree, store.objects()).is_ok(),
+            "classifier and parser disagree about {tree}"
+        );
+        assert_eq!(
+            kind_of(tree) == DocumentKind::Bound,
+            is_document,
+            "unexpected document-ness for {tree}"
+        );
+    }
 }
 
 #[test]

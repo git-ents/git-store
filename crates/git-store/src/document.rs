@@ -41,14 +41,22 @@ pub enum DocumentKind {
     /// An exact, readable document envelope: a `.schema` entry and the value's
     /// own entries beside it.
     Bound,
-    /// A tree with no `.schema` entry, so it can be treated as a historical
-    /// value-root candidate, but has no schema binding.
+    /// A tree with no `.schema` entry, so it carries no envelope.
+    ///
+    /// The name is historical: the classifier reports the *absence* of an
+    /// envelope, not that the tree is a value. A pre-binding bare value tree, a
+    /// published schema document tree, and any other `.schema`-less tree all
+    /// reach this arm, and the tree alone cannot tell them apart. The tree is
+    /// not interpreted.
     LegacyValueRoot,
-    /// A tree that looks like a document envelope but has an invalid shape.
+    /// A tree that cannot be used as a document: an envelope-like shape with a
+    /// structural defect, or a tree (an empty one) that is provably neither a
+    /// document nor a bare value.
     Malformed,
 }
 
-/// Why a tree was classified as a malformed document envelope.
+/// Why a tree was classified as malformed rather than as a document envelope
+/// or a legacy value candidate.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DocumentShapeError {
     /// The `.schema` entry exists but is not a tree object.
@@ -68,6 +76,17 @@ pub enum DocumentShapeError {
         /// The missing schema object.
         oid: ObjectId,
     },
+    /// The root tree has no entries at all, so it is neither a document
+    /// envelope nor a bare value tree.
+    ///
+    /// A document envelope always contributes its value's entries beside
+    /// `.schema`, a bare value always contributes at least the encoding's
+    /// `none` presence marker, and `envelope.empty` writes no empty tree
+    /// (`docs/specification.adoc`). An empty root is therefore neither
+    /// candidate, and is refused rather than offered as a legacy value
+    /// candidate.
+    #[error("document root tree is empty")]
+    EmptyRoot,
 }
 
 /// Structured metadata for a tree at a document boundary.
@@ -75,12 +94,19 @@ pub enum DocumentShapeError {
 pub enum DocumentInspection {
     /// A complete, structurally readable bound document.
     Bound(PreparedDocument),
-    /// A historical value-root tree with no `.schema` envelope.
+    /// A tree with no `.schema` envelope: not a document, and not interpreted.
+    ///
+    /// It may be a pre-binding bare value tree, but the classifier does not
+    /// verify that — a schema document tree, an arbitrary tree, or any other
+    /// tree without `.schema` reports the same. See
+    /// [`DocumentKind::LegacyValueRoot`].
     LegacyValueRoot {
-        /// The tree that contains the unbound value.
+        /// The inspected tree, which carries no `.schema` entry.
         value_tree: ObjectId,
     },
-    /// A tree with an envelope-like shape that cannot be used as a document.
+    /// A tree that cannot be used as a document: an envelope-like shape with a
+    /// structural defect, or a tree that is provably neither a document nor a
+    /// bare value (an empty root). See [`DocumentShapeError`].
     Malformed {
         /// The inspected root tree.
         document_tree: ObjectId,
