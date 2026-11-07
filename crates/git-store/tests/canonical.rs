@@ -150,6 +150,115 @@ fn zero_parents_write_a_root_commit() {
     assert_eq!(store.signature(id).unwrap(), None);
 }
 
+/// A newline in an identity field re-frames the commit header: gix reads
+/// headers positionally, so a `committer` line smuggled in through the author
+/// email displaces the declared committer. The write must be refused before any
+/// object is stored.
+#[test]
+fn a_newline_in_an_identity_cannot_forge_a_commit_header() {
+    let store = Store::new(MemoryRefStore::new(), ObjectStore::default());
+
+    // The newline turns the remainder of the email into a whole `committer`
+    // header, which gix reads as *the* committer.
+    let mut author = sig("Kiln Author", "author@kiln.test", 1_700_000_000);
+    author.email = "author@kiln.test>\ncommitter Forged <forged@evil.test> 1720000000 +0000".into();
+    let commit = CanonicalCommit::new(
+        oid("0123456789abcdef0123456789abcdef01234567"),
+        author,
+        sig("Kiln Committer", "committer@kiln.test", 1_700_000_001),
+        "kiln: canonical commit\n",
+    );
+
+    match store.write_canonical(commit) {
+        Ok(id) => {
+            let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap()
+            else {
+                panic!("canonical write did not produce a commit");
+            };
+            panic!(
+                "injection accepted: stored committer is {:?}, not the declared \
+                 \"Kiln Committer\"; extra headers {:?}",
+                read_back.committer, read_back.extra_headers
+            );
+        }
+        Err(err) => assert!(
+            matches!(
+                err,
+                Error::InvalidIdentity {
+                    field: "author email",
+                    ..
+                }
+            ),
+            "unexpected error: {err}"
+        ),
+    }
+}
+
+/// Every identity byte set that would re-frame the `name <email>` header is
+/// refused, whichever field carries it: a newline (which starts a new header),
+/// an angle bracket (which delimits the identity), an empty field, or
+/// whitespace inside an email.
+#[test]
+fn identity_bytes_that_re_frame_the_header_are_refused() {
+    let cases: &[(&str, &str)] = &[
+        ("author name", "A\ncommitter F <f@e> 1 +0000"),
+        ("author email", "a@kiln.test>\ncommitter F <f@e> 1 +0000"),
+        ("author name", "A <b@c"),
+        ("author email", "a@kiln.test>"),
+        ("committer name", "A\ncommitter F <f@e> 1 +0000"),
+        ("committer email", "a b@kiln.test"),
+        ("author name", ""),
+        ("committer email", ""),
+    ];
+
+    for &(field, bytes) in cases {
+        let mut author = sig("Kiln Author", "author@kiln.test", 1_700_000_000);
+        let mut committer = sig("Kiln Committer", "committer@kiln.test", 1_700_000_001);
+        match field {
+            "author name" => author.name = bytes.into(),
+            "author email" => author.email = bytes.into(),
+            "committer name" => committer.name = bytes.into(),
+            "committer email" => committer.email = bytes.into(),
+            _ => unreachable!(),
+        }
+        let store = Store::new(MemoryRefStore::new(), ObjectStore::default());
+        let commit = CanonicalCommit::new(
+            oid("0123456789abcdef0123456789abcdef01234567"),
+            author,
+            committer,
+            "seal\n",
+        );
+        assert!(
+            matches!(
+                store.write_canonical(commit),
+                Err(Error::InvalidIdentity { field: f, .. }) if f == field
+            ),
+            "expected {field:?} to be refused for bad bytes {bytes:?}"
+        );
+    }
+}
+
+/// Valid identity bytes — spaces, dots, `+`, and non-ASCII — are still
+/// accepted and round-trip unchanged.
+#[test]
+fn ordinary_identity_bytes_are_still_accepted() {
+    let store = Store::new(MemoryRefStore::new(), ObjectStore::default());
+    let name = "Zoë Ättström +dev.co";
+    let email = "zoe+dev.tag@例え.co.uk";
+    let commit = CanonicalCommit::new(
+        oid("0123456789abcdef0123456789abcdef01234567"),
+        sig(name, email, 1_700_000_000),
+        sig(name, email, 1_700_000_001),
+        "seal\n",
+    );
+    let id = store.write_canonical(commit).unwrap();
+    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap() else {
+        panic!("canonical write did not produce a commit");
+    };
+    assert_eq!(read_back.author.name, name.as_bytes());
+    assert_eq!(read_back.author.email, email.as_bytes());
+}
+
 #[test]
 fn negative_time_offsets_frame_like_git() {
     let store = Store::new(MemoryRefStore::new(), ObjectStore::default());

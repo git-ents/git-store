@@ -189,6 +189,26 @@ pub enum Error {
         /// The repeated parent.
         parent: ObjectId,
     },
+    /// A canonical commit's author or committer identity carries bytes that
+    /// would re-frame the commit header, so the written object would not mean
+    /// what the caller declared.
+    ///
+    /// A newline in a name or email ends the identity's header line early and
+    /// starts another, so it can fabricate a whole `committer`, `gpgsig`, or
+    /// other header; an angle bracket shifts the `name <email>` boundaries a
+    /// reader parses; an empty field names nobody; whitespace in an email is
+    /// not part of an identity. Git's own signature writer refuses the same
+    /// bytes; the canonical writer bypasses it by formatting the header by
+    /// hand.
+    #[error("canonical commit {field} is invalid: {reason}")]
+    InvalidIdentity {
+        /// Which identity field, for example `"author name"` or
+        /// `"committer email"`.
+        field: &'static str,
+        /// Why it is invalid: empty, a control character, an angle bracket, or
+        /// whitespace in an email.
+        reason: &'static str,
+    },
     /// A backend failure from the ref store or object store.
     #[error(transparent)]
     Backend(Box<dyn std::error::Error + Send + Sync + 'static>),

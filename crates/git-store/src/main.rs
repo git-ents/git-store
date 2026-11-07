@@ -599,6 +599,7 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         | git_store::Error::Deserialize(_)
         | git_store::Error::UnsupportedObjectFormat { .. } => ExitClass::Other,
         git_store::Error::DuplicateParent { .. }
+        | git_store::Error::InvalidIdentity { .. }
         | git_store::Error::DocumentRootNotStruct { .. } => ExitClass::Invalid,
         git_store::Error::Doctor(_) => ExitClass::Other,
     }
