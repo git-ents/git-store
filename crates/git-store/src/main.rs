@@ -21,20 +21,21 @@
 //! entity ref under the selected data prefix is itself a valid `<tree-ish>`
 //! for `cat`/`check`.
 
+mod cli;
 mod interactive;
 
 use std::collections::BTreeSet;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
+use crate::cli::{
+    ClassifiedContext, ExitClass, ListItem, OutputFormat, cli_context, cli_error, emit_fields,
+    emit_list, emit_record, emit_single, json_record, oid_value, string_array,
+};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
-use git_database::cli::{
-    ClassifiedContext, ExitClass, ListItem, OutputFormat, cli_context, cli_error, emit_fields,
-    emit_list, emit_record, emit_single, json_record, oid_value, string_array,
-};
 use git_store::{
     ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId, EntityState,
     Expectation, GixRefStore, Kind, Layout, ObjectId, Publication, PublishOptions, RefName,
@@ -61,7 +62,6 @@ Everyday
   rm        Delete an entity
   check     Validate a value against a schema
   schema    Define, read, or trace a kind's schema
-  db        Versioned key/value database (Dolt-shaped porcelain)
 
 Plumbing — composable, oid in, oid out
   value     encode | decode
@@ -188,12 +188,6 @@ enum Command {
     Entity {
         #[command(subcommand)]
         command: EntityCommand,
-    },
-    /// Versioned key/value database (Dolt-shaped porcelain).
-    #[command(name = "db")]
-    Db {
-        #[command(subcommand)]
-        command: git_database::cli::db::DbCommand,
     },
 }
 
@@ -525,7 +519,6 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
                 output,
             )?,
         },
-        Command::Db { command } => git_database::cli::db::run(&repo, command, output)?,
         Command::Entity { command } => match command {
             EntityCommand::Resolve { kind, name } => {
                 entity_resolve(&repo, &store, &kind, &name, output)?

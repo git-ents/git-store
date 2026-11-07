@@ -1,8 +1,6 @@
-//! The database CLI: the Dolt-shaped `git store db` command surface, and the
-//! output-format and exit-code plumbing it shares with the `git-store`
-//! binary's own CLI.
-
-pub mod db;
+//! The CLI's shared output-format and exit-code plumbing: the machine-format
+//! envelope, list rendering, and the typed failure classes the process exit
+//! code is derived from.
 
 use std::fmt;
 
