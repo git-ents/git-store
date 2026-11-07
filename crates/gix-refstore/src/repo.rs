@@ -38,6 +38,18 @@ const REAP_SUFFIX: &str = "~reap";
 const STALE_LOCK_GRACE: Duration = Duration::from_secs(10);
 
 /// A [`RefStore`] over a `gix` repository's refs.
+///
+/// # Read consistency
+///
+/// [`RefStore::read`] and [`RefStore::prefixed`] take no lock: they read the
+/// loose ref files (and `packed-refs`) directly. [`RefStore::apply_batch`]
+/// commits a multi-ref transaction one `rename(2)` at a time — gix-ref's own
+/// docs call this the "non-atomic nature of multi-file edits" — so a reader
+/// running concurrently with a batch can see one ref of the batch moved and
+/// another not, and a listing can catch a namespace between renames. This is
+/// inherent to refs stored as plain files: it holds across processes and
+/// cannot be fixed inside one of them. Callers needing a mutually consistent
+/// view must re-read and re-validate. See [`RefStore`] for the exact promise.
 pub struct GixRefStore<'r> {
     repo: &'r gix::Repository,
 }

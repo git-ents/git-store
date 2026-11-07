@@ -29,11 +29,36 @@ pub enum ApplyError<E> {
 /// Compare-and-swap storage for Git refs.
 ///
 /// Objects are written through `gix_object::Write`; this is refs only.
+///
+/// # Read consistency
+///
+/// Reads ([`RefStore::read`], [`RefStore::prefixed`]) are lock-free and are
+/// **not** snapshot-isolated. Reading several refs — in one listing or in
+/// successive calls — can observe a concurrent [`RefStore::apply_batch`]
+/// only partially: one ref of the batch moved, another not yet. Nothing here
+/// promises otherwise, and nothing over plain ref files shared across
+/// processes could: a multi-ref transaction is committed one `rename(2)` at a
+/// time. A caller needing a mutually consistent multi-ref view must re-read
+/// and re-validate; there is no snapshot primitive.
+///
+/// What [`RefStore::apply_batch`] does promise is all-or-nothing *write*
+/// atomicity: every expectation is checked before any edit is published, a
+/// lost race changes nothing, and writers are serialized against each other
+/// across threads and processes. That is a promise about writers, not about
+/// what a concurrent reader observes.
+///
+/// [`MemoryRefStore`](crate::MemoryRefStore) is stricter than the trait: it
+/// serializes reads against writes in-process, so its readers *are*
+/// point-in-time consistent. That is a property of that one backend, not a
+/// guarantee of this trait, and it does not extend across processes.
 pub trait RefStore {
     /// A failure of the backend itself, as distinct from a lost race.
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// The object `name` points at, or `None` when the ref does not exist.
+    ///
+    /// Lock-free and not snapshot-isolated; see the trait's
+    /// [read consistency](RefStore#read-consistency) note.
     fn read(&self, name: &RefName) -> Result<Option<ObjectId>, Self::Error>;
 
     /// Every ref under `prefix`, ascending by name.
@@ -41,6 +66,10 @@ pub trait RefStore {
     /// The boundary is a whole segment: `<prefix>/foobar` is not under
     /// `<prefix>/foo`. Ordering is part of the contract — callers may rely
     /// on it instead of sorting.
+    ///
+    /// Lock-free and not snapshot-isolated: a concurrent batch can be caught
+    /// mid-flight, so the listing is not a view of one instant. See the
+    /// trait's [read consistency](RefStore#read-consistency) note.
     fn prefixed(&self, prefix: &RefPrefix) -> Result<Vec<(RefName, ObjectId)>, Self::Error>;
 
     /// Apply `edit` if its [`Expectation`] still holds, atomically against
@@ -59,9 +88,11 @@ pub trait RefStore {
     /// unchanged. Implementations must not emulate this with sequential calls
     /// to [`RefStore::apply`].
     ///
-    /// The promise is atomicity against concurrent readers and writers, not
-    /// durability: it says nothing about crash safety, and a successful return
-    /// does not imply the result has been fsynced.
+    /// The promise is all-or-nothing atomicity against concurrent *writers*,
+    /// not durability: it says nothing about crash safety, and a successful
+    /// return does not imply the result has been fsynced. It is not read
+    /// isolation — see the trait's [read consistency](RefStore#read-consistency)
+    /// note for what a concurrent reader can observe.
     fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>>;
 }
 

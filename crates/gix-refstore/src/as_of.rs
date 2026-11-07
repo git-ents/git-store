@@ -25,6 +25,13 @@ use crate::store::{ApplyError, RefStore};
 /// An override maps a name to `Some(id)` — as if it held `id` — or `None` —
 /// as if it did not exist. A name absent from the overrides is answered by
 /// `inner`, unchanged.
+///
+/// This is **not** a snapshot: it folds its fixed overrides over `inner`'s
+/// state as of each call, so two of its own reads can disagree when `inner`
+/// moves between them. It inherits `inner`'s read guarantee — lock-free and
+/// not snapshot-isolated for a [`GixRefStore`](crate::GixRefStore). Use it to
+/// ask a question of a chosen set of values, not to pin a consistent view
+/// across reads.
 pub struct AsOfRefStore<S> {
     inner: S,
     overrides: BTreeMap<RefName, Option<ObjectId>>,

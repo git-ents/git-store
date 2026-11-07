@@ -36,6 +36,12 @@ lost batch names the expectation that failed and publishes none of its edits.
 the identity to stamp on writes, kept separate because a store's refs and a
 repository's configured identity are independent concerns.
 
+Reads are lock-free and not snapshot-isolated in `GixRefStore`, whose batches
+gitoxide commits one `rename(2)` at a time, so a concurrent reader can observe
+a batch partially applied; `MemoryRefStore` additionally serializes reads
+against writes, so its readers are point-in-time consistent in-process.
+Neither guarantee extends across processes — over plain ref files it cannot.
+
 Objects are written through `gix_object::Write`; this crate is refs only.
 A batch may therefore publish object IDs whose objects were written before the
 transaction, leaving unreachable objects if publication loses its race.
