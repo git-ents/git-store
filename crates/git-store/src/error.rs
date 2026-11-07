@@ -203,6 +203,21 @@ pub enum Error {
         /// The keyword of the node the schema root resolved to, e.g. `list`.
         node: &'static str,
     },
+    /// A document's schema root cannot be resolved at all.
+    ///
+    /// The root is a `ref` naming a definition absent from `defs`, or a chain
+    /// of them cycling without reaching a concrete node. Because the root never
+    /// resolves, no struct's fields could sit beside `.schema`, so the schema
+    /// is refused at registration rather than published and failing every
+    /// later write.
+    #[error("schema root for kind \"{kind}\" does not resolve: {source}")]
+    SchemaRootUnresolved {
+        /// The kind whose schema was rejected.
+        kind: String,
+        /// Why the root did not resolve: a dangling `ref` or a ref cycle.
+        #[source]
+        source: facet_git_tree::RefError,
+    },
     /// The schema-of-schemas fixed-point check failed.
     #[error(transparent)]
     Doctor(#[from] facet_git_tree::doctor::DoctorError),

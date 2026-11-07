@@ -10,7 +10,7 @@ use std::convert::Infallible;
 use std::rc::Rc;
 
 use facet::Facet;
-use facet_git_tree::{GitObject, ObjectStore, TreeEntry, schema_of, serialize_into};
+use facet_git_tree::{GitObject, Node, ObjectStore, Schema, TreeEntry, schema_of, serialize_into};
 use facet_value::value;
 use git_store::{
     ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
@@ -307,6 +307,75 @@ fn schema_snapshots_are_owned_and_independent_of_publication_progress() {
     assert_eq!(current.schema, second_published);
     assert_ne!(current.schema_tree(), first_snapshot.schema_tree());
     assert_eq!(historical.schema, first_snapshot.schema);
+}
+
+/// A schema whose resolved root is not a struct cannot describe a document:
+/// the value's named fields have nowhere to sit beside `.schema`, so there is
+/// no envelope to bind. Registration must refuse it, rather than publishing it
+/// and then failing every later `put` — which would blame the value for a
+/// defect in the schema (`docs/specification.adoc`, `envelope.schema-root`).
+#[test]
+fn a_non_struct_root_schema_is_refused_at_registration() {
+    let store = store();
+    let kind = store.dynamic(seg("counters"));
+    let doc = schema_of::<Vec<Counter>>().unwrap();
+    assert_eq!(
+        doc.resolved_root().unwrap().keyword(),
+        "list",
+        "the fixture's root must not be a struct"
+    );
+
+    let err = kind.schema().put(&doc).unwrap_err();
+    match err {
+        Error::DocumentRootNotStruct { kind, node } => {
+            assert_eq!(kind, "Vec", "the error names the refused schema");
+            assert_eq!(node, "list");
+        }
+        other => panic!("expected DocumentRootNotStruct, got {other:?}"),
+    }
+
+    // The refusal is atomic: nothing was published, so the kind is simply
+    // unconfigured and a later `put` reports the missing schema rather than a
+    // value-shape failure.
+    assert_eq!(kind.schema().get().unwrap(), None);
+    let err = kind.put(&entity("x"), &value!([])).unwrap_err();
+    assert!(matches!(err, Error::NoSchema { .. }), "{err:?}");
+
+    // A struct-root schema still registers and puts, unaffected.
+    let good = store.dynamic(seg("counter"));
+    good.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    good.put(&entity("c"), &value!({ "n": 1 })).unwrap();
+    assert_eq!(
+        good.read(entity("c")).unwrap().value(),
+        Some(value!({ "n": 1 }))
+    );
+}
+
+/// A root `ref` that names no definition — a hand-authored schema's most
+/// likely defect — can never resolve to a struct, so it is refused at
+/// registration too, not published and failing every later write.
+#[test]
+fn a_root_ref_that_cannot_resolve_is_refused_at_registration() {
+    let store = store();
+    let kind = store.dynamic(seg("broken"));
+    let doc = Schema {
+        kind: "broken".to_owned(),
+        root: Node::Ref("Missing".to_owned()),
+        defs: Default::default(),
+    };
+
+    let err = kind.schema().put(&doc).unwrap_err();
+    match err {
+        Error::SchemaRootUnresolved { kind, source } => {
+            assert_eq!(kind, "broken");
+            match source {
+                facet_git_tree::RefError::Dangling { name } => assert_eq!(name, "Missing"),
+                other => panic!("expected a dangling ref, got {other:?}"),
+            }
+        }
+        other => panic!("expected SchemaRootUnresolved, got {other:?}"),
+    }
+    assert_eq!(kind.schema().get().unwrap(), None);
 }
 
 #[test]

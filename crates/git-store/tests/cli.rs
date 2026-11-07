@@ -319,6 +319,28 @@ fn failures_have_typed_exit_codes() {
     assert_eq!(code, 4, "CAS stderr: {err}");
 }
 
+/// A schema that cannot serve as a document root is refused at `schema put`,
+/// before anything is published — not accepted and then failing every later
+/// `put` with an error that blames the value.
+#[test]
+fn schema_put_refuses_a_schema_that_cannot_be_a_document() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    // A list root: a well-formed schema document, but not a document schema.
+    let list_root = r#"{"kind":"counters","root":{"list":"u32"},"defs":{}}"#;
+    let (_, err, code) = run_with_status(path, Some(list_root), &["schema", "put", "counters"]);
+    assert_ne!(code, 0, "schema put must fail: {err}");
+    assert!(err.contains("not a struct"), "stderr: {err}");
+
+    // A root `ref` naming no definition never resolves either.
+    let dangling = r#"{"kind":"broken","root":{"ref":"Missing"},"defs":{}}"#;
+    let (_, err, code) = run_with_status(path, Some(dangling), &["schema", "put", "broken"]);
+    assert_eq!(code, 5, "dangling-ref stderr: {err}");
+    assert!(err.contains("does not resolve"), "stderr: {err}");
+}
+
 /// A hand-authored schema JSON document — exactly the shape every file under
 /// `crates/git-store/schemas/*.json` has — is a plain `facet-git-tree` schema:
 /// no `version` key, since the publication kind is selected by the CLI/ref and

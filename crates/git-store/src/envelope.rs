@@ -23,12 +23,14 @@ use crate::error::{Error, Subtree};
 /// The reserved root entry naming a document's unbound schema.
 pub(crate) const SCHEMA_ENTRY: &str = Subtree::Schema.as_str();
 
-/// Refuse a schema whose resolved root is not a struct.
+/// Refuse a schema that cannot serve as a document root.
 ///
 /// Only a struct root has named entries that can sit beside `.schema`; any
-/// other resolved root describes a bare value, not a document. A dangling or
-/// cyclic root reference is a schema defect rather than a document-shape one,
-/// and is left for the codec's own schema validation to report precisely.
+/// other resolved root describes a bare value, not a document. A root that
+/// does not resolve at all — a `ref` naming a definition absent from `defs`,
+/// or a ref cycle — can likewise never form a document, and is reported as
+/// [`Error::SchemaRootUnresolved`] rather than published and failing every
+/// later write.
 pub(crate) fn ensure_struct_root(doc: &Schema) -> Result<(), Error> {
     match doc.resolved_root() {
         Ok(Node::Struct(_)) => Ok(()),
@@ -36,7 +38,10 @@ pub(crate) fn ensure_struct_root(doc: &Schema) -> Result<(), Error> {
             kind: doc.kind.clone(),
             node: node.keyword(),
         }),
-        Err(_) => Ok(()),
+        Err(source) => Err(Error::SchemaRootUnresolved {
+            kind: doc.kind.clone(),
+            source,
+        }),
     }
 }
 

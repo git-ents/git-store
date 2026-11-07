@@ -590,6 +590,7 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         | git_store::Error::NotDeletable { .. }
         | git_store::Error::KindMismatch { .. }
         | git_store::Error::IdentityUniverse { .. }
+        | git_store::Error::SchemaRootUnresolved { .. }
         | git_store::Error::Schema(_)
         | git_store::Error::SchemaWrite(_)
         | git_store::Error::SchemaRead(_) => ExitClass::Schema,

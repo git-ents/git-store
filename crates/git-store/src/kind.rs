@@ -1112,11 +1112,17 @@ where
     }
 
     /// Write the schema document and publish it over the current tip.
+    ///
+    /// The schema is validated as a document schema first: a root that does
+    /// not resolve to a struct — including one that does not resolve at all —
+    /// is refused here, at registration, rather than published and failing
+    /// every later `put` for the kind.
     pub fn write(&self, doc: &Schema) -> Result<ObjectId, Error>
     where
         R: Committer,
         O: Write,
     {
+        envelope::ensure_struct_root(doc)?;
         self.check_identity_subtrees(doc)?;
         let message = format!("schema {}\n", self.kind);
         self.store
