@@ -9,9 +9,8 @@ use git_store::{CanonicalCommit, Error, MemoryRefStore, ObjectId, SignatureBytes
 use gix::actor::Signature;
 use gix::bstr::ByteSlice;
 use gix::date::Time;
-use std::cell::RefCell;
 use std::convert::Infallible;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use facet_git_tree::ObjectStore;
 
@@ -42,7 +41,7 @@ fn sample() -> CanonicalCommit {
 
 /// Signs by recording what it was asked to cover; a canonical write must
 /// never ask.
-type Covered = Rc<RefCell<Vec<Vec<u8>>>>;
+type Covered = Arc<Mutex<Vec<Vec<u8>>>>;
 
 struct Recorder(Covered);
 
@@ -50,13 +49,13 @@ impl Signer for Recorder {
     type Error = Infallible;
 
     fn sign(&self, bytes: &[u8]) -> Result<SignatureBytes, Self::Error> {
-        self.0.borrow_mut().push(bytes.to_vec());
+        self.0.lock().unwrap().push(bytes.to_vec());
         Ok(SignatureBytes::from(b"not a signature".to_vec()))
     }
 }
 
 fn store_with_signer() -> (Store<MemoryRefStore, ObjectStore>, Covered) {
-    let covered: Covered = Rc::default();
+    let covered: Covered = Arc::default();
     let store = Store::new(MemoryRefStore::new(), ObjectStore::default())
         .with_signer(Recorder(covered.clone()));
     (store, covered)
@@ -102,7 +101,7 @@ fn the_same_declared_fields_write_the_same_object() {
 fn a_configured_signer_is_never_consulted_and_no_signature_is_stored() {
     let (store, covered) = store_with_signer();
     let id = store.write_canonical(sample()).unwrap();
-    assert!(covered.borrow().is_empty());
+    assert!(covered.lock().unwrap().is_empty());
     assert_eq!(store.signature(id).unwrap(), None);
 }
 

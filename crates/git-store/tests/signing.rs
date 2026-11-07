@@ -13,9 +13,8 @@
 //! Verifying the transport against real `git` needs a real key and a real
 //! repository, so that lives in `tests/repository.rs`.
 
-use std::cell::RefCell;
 use std::convert::Infallible;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use facet::Facet;
 use facet_git_tree::ObjectStore;
@@ -28,7 +27,7 @@ struct Counter {
 
 /// The bytes each `sign` call was asked to cover, shared with the test that
 /// handed the signer to a store.
-type Covered = Rc<RefCell<Vec<Vec<u8>>>>;
+type Covered = Arc<Mutex<Vec<Vec<u8>>>>;
 
 /// Signs by recording what it was asked to cover and returning bytes that are
 /// not a signature in any format.
@@ -38,7 +37,7 @@ impl Signer for Recorder {
     type Error = Infallible;
 
     fn sign(&self, bytes: &[u8]) -> Result<SignatureBytes, Self::Error> {
-        self.0.borrow_mut().push(bytes.to_vec());
+        self.0.lock().unwrap().push(bytes.to_vec());
         Ok(SignatureBytes::from(OPAQUE.to_vec()))
     }
 }
@@ -114,7 +113,7 @@ fn a_signed_write_returns_its_bytes_verbatim() {
 #[test]
 fn the_signer_covers_the_unsigned_commit_bytes() {
     let covered = Covered::default();
-    let store = store().with_signer(Recorder(Rc::clone(&covered)));
+    let store = store().with_signer(Recorder(Arc::clone(&covered)));
     store
         .kind::<Counter>(kind())
         .schema()
@@ -125,7 +124,12 @@ fn the_signer_covers_the_unsigned_commit_bytes() {
         .put(&name(), &Counter { n: 1 })
         .unwrap();
 
-    let covered = covered.borrow().last().cloned().expect("the value write");
+    let covered = covered
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the value write");
     let unsigned = gix::objs::CommitRef::from_bytes(&covered, gix::hash::Kind::Sha1).unwrap();
     assert!(unsigned.extra_headers.is_empty());
 

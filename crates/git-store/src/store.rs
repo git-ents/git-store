@@ -1,6 +1,7 @@
 //! [`Store`]: kinds, schemas, and entities as Git refs and commits.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use facet::Facet;
 use facet_git_tree::ObjectId;
@@ -124,8 +125,15 @@ pub struct Store<R, O> {
     refs: R,
     objects: O,
     layout: Layout,
-    signer: Option<Box<dyn ErasedSigner>>,
-    schemas: RefCell<HashMap<ObjectId, Rc<Schema>>>,
+    signer: Option<Box<dyn ErasedSigner + Send + Sync>>,
+    /// Decoded schemas, keyed by their content-addressed schema tree id.
+    ///
+    /// An `RwLock` rather than a `RefCell` lets a `Store` be shared across
+    /// threads when its ref store and object store are themselves `Sync`.
+    /// Concurrent misses may compute the same schema twice; the value is
+    /// content-addressed, so the duplicate is harmless and needs no
+    /// invalidation.
+    schemas: RwLock<HashMap<ObjectId, Arc<Schema>>>,
 }
 
 /// The extra commit header a signed write's bytes land in.
@@ -179,15 +187,16 @@ where
             objects,
             layout,
             signer: None,
-            schemas: RefCell::new(HashMap::new()),
+            schemas: RwLock::new(HashMap::new()),
         }
     }
 
     /// Configure a signer for commits written by this store.
     ///
     /// The signer output is stored as opaque bytes. A store without a signer
-    /// writes unsigned commits.
-    pub fn with_signer(mut self, signer: impl Signer + 'static) -> Self {
+    /// writes unsigned commits. The signer must be `Send + Sync` so a store
+    /// whose backends are `Sync` can be shared across threads.
+    pub fn with_signer(mut self, signer: impl Signer + Send + Sync + 'static) -> Self {
         self.signer = Some(Box::new(signer));
         self
     }
@@ -227,13 +236,25 @@ where
         &self.objects
     }
 
-    pub(crate) fn schema(&self, tree: ObjectId) -> Result<Rc<Schema>, Error> {
-        if let Some(schema) = self.schemas.borrow().get(&tree) {
-            return Ok(Rc::clone(schema));
+    pub(crate) fn schema(&self, tree: ObjectId) -> Result<Arc<Schema>, Error> {
+        {
+            let cache = self
+                .schemas
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(schema) = cache.get(&tree) {
+                return Ok(Arc::clone(schema));
+            }
         }
 
-        let schema = Rc::new(deserialize::<Schema>(&tree, self.objects())?);
-        self.schemas.borrow_mut().insert(tree, Rc::clone(&schema));
+        // Decode outside the cache lock: a miss must not hold a read lock
+        // while another thread computes the same schema, and a hit returns
+        // the cached `Arc` without ever touching the object store.
+        let schema = Arc::new(deserialize::<Schema>(&tree, self.objects())?);
+        self.schemas
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(tree, Arc::clone(&schema));
         Ok(schema)
     }
 

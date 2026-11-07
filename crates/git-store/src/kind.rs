@@ -1,6 +1,6 @@
 //! One [`Kind`]: its schema ref and the entities beneath it.
 
-use std::{marker::PhantomData, rc::Rc};
+use std::{marker::PhantomData, sync::Arc};
 
 use facet::Facet;
 use facet_git_tree::{
@@ -219,7 +219,7 @@ where
     fn bound_state(
         &self,
         root: ObjectId,
-        doc: Rc<Schema>,
+        doc: Arc<Schema>,
         commit: ObjectId,
         message: String,
     ) -> Result<EntityState<E::Value>, Error> {
@@ -288,7 +288,7 @@ where
     fn read_bound(
         &self,
         commit: ObjectId,
-    ) -> Result<(ObjectId, ObjectId, Rc<Schema>, String), Error> {
+    ) -> Result<(ObjectId, ObjectId, Arc<Schema>, String), Error> {
         let (root, message) = self.store.commit_tree_and_summary(commit)?;
         let (root, schema_tree) = self.store.split(root, commit)?;
         let doc = self.store.schema(schema_tree)?;
