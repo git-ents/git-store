@@ -1,6 +1,11 @@
 //! A [`RefStore`]/[`Committer`] backed by a `gix::Repository`'s own refs.
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::BTreeSet,
+    io::Write as _,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use gix::actor::Signature;
 use gix::refs::transaction::{Change, PreviousValue, RefEdit as GixRefEdit, RefLog};
@@ -18,6 +23,19 @@ const LOCK_DIR: &str = "gix-refstore-locks";
 
 /// How long to block, with backoff, for a contended per-ref lock.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A per-ref sidecar lock that serializes *reclamation* of a dead writer's
+/// lock, so two reclaimers can never both decide to remove the same file.
+///
+/// `~` cannot appear in a ref name, so [`encode_ref`] never emits it and this
+/// name can never collide with another ref's lock file.
+const REAP_SUFFIX: &str = "~reap";
+
+/// How long a lock file must have gone untouched before a provably-dead
+/// owner's leftover may be reclaimed. Combined with the liveness check, never
+/// on its own: a live owner is respected no matter how old its file is, and a
+/// time skewed into the future reads as "not old".
+const STALE_LOCK_GRACE: Duration = Duration::from_secs(10);
 
 /// A [`RefStore`] over a `gix` repository's refs.
 pub struct GixRefStore<'r> {
@@ -37,20 +55,120 @@ impl<'r> GixRefStore<'r> {
     /// acquiring the ref's own lock, and waits out `core.filesRefLockTimeout`
     /// to acquire it, so a writer committing inside that window is
     /// overwritten rather than detected. This closes the window; the lock is
-    /// held until the returned marker drops.
-    fn lock(&self, name: &RefName) -> Result<gix::lock::Marker, GixError> {
+    /// held until the returned handle drops.
+    ///
+    /// A lock a *live* writer holds is waited out; one left by a writer that
+    /// has provably died is reclaimed (see [`Self::reclaim`]), so a crash does
+    /// not leave the ref unwritable forever.
+    fn lock(&self, name: &RefName) -> Result<gix::lock::File, GixError> {
+        use gix::lock::acquire::Fail;
+
         // Pre-create the lock directory once and leave it in place: letting
         // the lock's rollback remove empty parents races the next writer's
         // creation of the same directory. With the directory persistent, only
         // the `.lock` files themselves churn.
         let dir = self.repo.git_dir().join(LOCK_DIR);
         std::fs::create_dir_all(&dir).map_err(GixError::git)?;
-        gix::lock::Marker::acquire_to_hold_resource(
-            dir.join(encode_ref(name)),
-            gix::lock::acquire::Fail::AfterDurationWithBackoff(LOCK_TIMEOUT),
+        let resource = dir.join(encode_ref(name));
+
+        // Fast path: an uncontended lock, by far the common case, is taken
+        // without ever paying the timeout.
+        match self.acquire(&resource, Fail::Immediately) {
+            Ok(file) => return Ok(file),
+            Err(gix::lock::acquire::Error::PermanentlyLocked { .. }) => {}
+            Err(err) => return Err(GixError::git(err)),
+        }
+
+        // The lock is held. If its owner is provably gone it is a crashed
+        // writer's leftover — the destructor that would have removed it never
+        // ran — and this ref would otherwise stay unwritable for good. Reclaim
+        // it and take it. A *live* owner is real contention: wait it out below
+        // rather than clobbering it.
+        if self.reclaim(&resource)? {
+            return self
+                .acquire(&resource, Fail::Immediately)
+                .map_err(GixError::git);
+        }
+        self.acquire(&resource, Fail::AfterDurationWithBackoff(LOCK_TIMEOUT))
+            .map_err(GixError::git)
+    }
+
+    /// Take the lock file at `resource`, recording this process as its owner.
+    ///
+    /// The owner record is what lets a later writer tell a crashed holder from
+    /// a live one. It is written immediately after the file is created, so the
+    /// only way to observe its absence is a crash in that microsecond window.
+    /// The trailing newline marks the record complete: a reader that catches a
+    /// partial write sees no terminator and so never mistakes a truncated pid
+    /// for a different, possibly-dead one.
+    fn acquire(
+        &self,
+        resource: &Path,
+        mode: gix::lock::acquire::Fail,
+    ) -> Result<gix::lock::File, gix::lock::acquire::Error> {
+        let mut file = gix::lock::File::acquire_to_update_resource(resource, mode, None)?;
+        file.write_all(format!("{}\n", std::process::id()).as_bytes())?;
+        file.flush()?;
+        Ok(file)
+    }
+
+    /// Remove a lock file whose owner is provably dead, so a crashed writer
+    /// does not lock its ref forever. Returns whether the caller should retry
+    /// acquisition.
+    ///
+    /// Reclamation is serialized by a per-ref sidecar lock; that is what makes
+    /// it race-free. Without it, two reclaimers could interleave such that one
+    /// removes the *fresh* lock the other had just taken, breaking mutual
+    /// exclusion. While we hold the sidecar nothing else can unlink or replace
+    /// the primary: to be eligible the primary's writer must be dead, a dead
+    /// writer's destructor never runs, and the only unlinkers that exist are
+    /// the writer itself and a sidecar holder. So the file we inspect is the
+    /// file we remove.
+    fn reclaim(&self, resource: &Path) -> Result<bool, GixError> {
+        let sidecar = resource.with_file_name(format!(
+            "{}{REAP_SUFFIX}",
+            resource
+                .file_name()
+                .expect("a lock resource has a file name")
+                .to_string_lossy(),
+        ));
+        let _held = match gix::lock::Marker::acquire_to_hold_resource(
+            sidecar,
+            gix::lock::acquire::Fail::Immediately,
             None,
-        )
-        .map_err(GixError::git)
+        ) {
+            Ok(marker) => marker,
+            // Another reclaimer is running, or a previous one crashed mid-way.
+            // Either way, do not reclaim: the caller reports the lock as held,
+            // which is no worse than the leak reclamation exists to repair.
+            Err(_) => return Ok(false),
+        };
+
+        let lock_path = lock_file_of(resource);
+        let owner = match std::fs::read(&lock_path) {
+            Ok(bytes) => std::str::from_utf8(&bytes).ok().and_then(|text| {
+                // Only a terminated record is a complete one.
+                text.strip_suffix('\n')?.parse::<u32>().ok()
+            }),
+            // The holder released it since the timeout: nothing to reclaim.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(err) => return Err(GixError::git(err)),
+        };
+
+        // No parseable owner — a writer between creating the file and recording
+        // itself, or a foreign file. Never reclaim on a guess.
+        let Some(pid) = owner else {
+            return Ok(false);
+        };
+        if !owner_is_dead(pid) || !older_than_grace(&lock_path) {
+            return Ok(false);
+        }
+
+        match std::fs::remove_file(&lock_path) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(err) => Err(GixError::git(err)),
+        }
     }
 
     /// Refuse a batch the ref store cannot publish atomically.
@@ -121,6 +239,41 @@ impl<'r> GixRefStore<'r> {
 /// directory tree.
 fn encode_ref(name: &RefName) -> String {
     name.as_str().replace('%', "%25").replace('/', "%2F")
+}
+
+/// The lock file `gix-lock` creates for `resource`: the resource path with
+/// `.lock` appended.
+fn lock_file_of(resource: &Path) -> PathBuf {
+    let mut path = resource.as_os_str().to_owned();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+/// Whether `pid` provably belongs to no live process.
+///
+/// On Linux a missing `/proc/<pid>` is that proof. Elsewhere there is no
+/// portable probe without pulling in a dependency, so every owner counts as
+/// live and reclamation never happens: a leak may remain, but a live writer is
+/// never clobbered.
+#[cfg(target_os = "linux")]
+fn owner_is_dead(pid: u32) -> bool {
+    !Path::new("/proc").join(pid.to_string()).exists()
+}
+
+/// See the Linux definition for why this is conservative.
+#[cfg(not(target_os = "linux"))]
+fn owner_is_dead(_pid: u32) -> bool {
+    false
+}
+
+/// Whether `path` last changed at least [`STALE_LOCK_GRACE`] ago. A time in the
+/// future (clock skew) reads as "not old" and so is never reclaimed.
+fn older_than_grace(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|mtime| mtime.elapsed().ok())
+        .is_some_and(|age| age >= STALE_LOCK_GRACE)
 }
 
 /// A failure of the underlying repository.
