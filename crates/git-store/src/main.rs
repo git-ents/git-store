@@ -590,8 +590,6 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         | git_store::Error::SchemaWrite(_)
         | git_store::Error::SchemaRead(_) => ExitClass::Schema,
         git_store::Error::ReservedTrailer { .. }
-        | git_store::Error::NameTaken { .. }
-        | git_store::Error::EntityIdCollision { .. }
         | git_store::Error::Deleted { .. }
         | git_store::Error::InvalidTombstone
         | git_store::Error::Signer(_)

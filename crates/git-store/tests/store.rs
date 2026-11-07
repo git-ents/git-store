@@ -1840,8 +1840,8 @@ fn try_update_does_not_clobber_a_write_that_lands_during_rebuild() {
 
 /// A [`Put::anonymous`] whose first `Create` loses to spurious backend
 /// contention — nothing actually landed — retries the very same create
-/// rather than reporting [`Error::NameTaken`]: the name is still free, so
-/// there is nothing to have collided with.
+/// rather than reporting a collision: the name is still free, so there is
+/// nothing to have collided with.
 #[test]
 fn anonymous_retries_to_success_on_pure_contention() {
     let store = flaky_store();

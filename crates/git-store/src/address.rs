@@ -16,6 +16,16 @@ pub enum At {
     Name(RefPath),
     /// The content-derived identity: the bound document tree id, the value's
     /// entries beside `.schema`.
+    ///
+    /// This resolves the ref [`entity_id_name`](crate::entity_id_name) derives
+    /// from `id`, exactly like [`At::Name`] holding that path — it is not a
+    /// promise that the ref holds the document `id` names. The store attaches
+    /// no meaning to a name, so a canonical ref advances like any other and a
+    /// caller-chosen name may coincide with an entity id; reading the id then
+    /// returns whatever the ref currently points at, or [`Absent`] when no
+    /// such ref exists.
+    ///
+    /// [`Absent`]: crate::EntityState::Absent
     Entity(EntityId),
     /// A specific publication commit.
     Commit(ObjectId),

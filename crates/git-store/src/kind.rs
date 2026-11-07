@@ -133,6 +133,14 @@ where
 
     /// Store `value` under `name` and return its content-derived id rather
     /// than the publication commit.
+    ///
+    /// The returned [`EntityId`] is the identity of the published document,
+    /// not the `name` it landed at: the only ref this creates is the alias, so
+    /// no ref addresses the id unless `name` itself spells it. A read of
+    /// [`At::Entity`](crate::At::Entity) with the returned id therefore finds
+    /// nothing (or, worse, a different document a caller later published at
+    /// that colliding name) — use [`put_entity`](Self::put_entity) when the
+    /// caller needs to read the result back by its id.
     pub fn put_with_alias(&self, alias: &RefPath, value: &E::Value) -> Result<EntityId, Error>
     where
         R: Committer,
@@ -1091,6 +1099,18 @@ pub fn entity_name(commit: ObjectId) -> RefPath {
 }
 
 /// Return the ref path naming an entity by its [`EntityId`].
+///
+/// The path lives in the same `refs/store/<kind>/` namespace as every
+/// caller-chosen name, under the same policy: a name carries no meaning
+/// (link:../../docs/specification.adoc the identity rule "Ref names under
+/// `refs/store/<kind>/` are application policy"). Consequently the store
+/// cannot police the overlap between a caller-chosen alias and a canonical
+/// entity-id name — a ref spelled like an entity id is indistinguishable
+/// from, and advances exactly like, any other name. In particular, a
+/// caller may publish different content at a name that happens to equal some
+/// [`EntityId`], and a successive read of that id resolves the caller's
+/// later publication; the store attaches no meaning to either, so it raises
+/// no collision.
 pub fn entity_id_name(id: EntityId) -> RefPath {
     id.as_segment().into()
 }
@@ -1154,6 +1174,11 @@ where
 
     /// Commit the value under `alias`, returning the derived [`EntityId`]
     /// rather than the publication commit.
+    ///
+    /// The [`EntityId`] identifies the document by content; the only ref
+    /// created is `alias`, so the returned id is addressable only if `alias`
+    /// happens to spell it (or another write later creates that ref).
+    /// Publishing under a content-derived name is [`canonical`](Self::canonical).
     pub fn with_alias(self, alias: &RefPath) -> Result<EntityId, Error>
     where
         R: Committer,

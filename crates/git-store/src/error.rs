@@ -3,7 +3,7 @@
 use std::fmt;
 
 use facet_git_tree::ObjectId;
-use gix_refstore::{RefName, RefSegment};
+use gix_refstore::RefSegment;
 
 /// One of a document's two logical halves: the schema entry or the value it
 /// describes.
@@ -93,23 +93,6 @@ pub enum Error {
     ReservedTrailer {
         /// The reserved trailer name found at the start of a message line.
         trailer: &'static str,
-    },
-    /// An alias attempted to overwrite an immutable canonical entity ref.
-    #[error("{name} is a canonical entity ref and cannot be used as an alias")]
-    NameTaken {
-        /// The ref that is reserved by another entity.
-        name: RefName,
-    },
-    /// A canonical ref points at a document tree different from the tree its
-    /// name claims. This indicates an out-of-band ref corruption or collision.
-    #[error("entity id {id} points at document tree {found}, expected {expected}")]
-    EntityIdCollision {
-        /// The derived id encoded by the ref name.
-        id: crate::EntityId,
-        /// The document tree represented by the id.
-        expected: ObjectId,
-        /// The tree actually found at the canonical ref.
-        found: ObjectId,
     },
     /// A document or tombstone belongs to a different kind than the handle
     /// used to read or recognize it.
