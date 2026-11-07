@@ -4,9 +4,10 @@
 //! `git fetch`, cross-thread concurrency, `git ls-tree`-shaped plumbing
 //! assertions) lives in `tests/repository.rs` instead.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::rc::Rc;
 
 use facet::Facet;
 use facet_git_tree::{GitObject, ObjectStore, TreeEntry, schema_of, serialize_into};
@@ -2092,4 +2093,201 @@ fn no_op_republish_verifies_the_expectation_atomically() {
             "a successful publication must leave the ref at the commit it reports"
         );
     }
+}
+
+// --- ref-listing cost of maintaining the per-kind index ---
+
+/// Wraps a [`MemoryRefStore`], counting the ref-listing work a run performs so
+/// a test can assert that publishing does not re-list the whole kind.
+struct CountingRefs {
+    inner: MemoryRefStore,
+    listed: Cell<usize>,
+    scanned: Cell<usize>,
+}
+
+impl CountingRefs {
+    fn new() -> Self {
+        Self {
+            inner: MemoryRefStore::new(),
+            listed: Cell::new(0),
+            scanned: Cell::new(0),
+        }
+    }
+}
+
+impl RefStore for CountingRefs {
+    type Error = Infallible;
+
+    fn read(&self, name: &RefName) -> Result<Option<ObjectId>, Self::Error> {
+        self.inner.read(name)
+    }
+
+    fn prefixed(&self, prefix: &RefPrefix) -> Result<Vec<(RefName, ObjectId)>, Self::Error> {
+        let refs = self.inner.prefixed(prefix)?;
+        self.listed.set(self.listed.get() + 1);
+        self.scanned.set(self.scanned.get() + refs.len());
+        Ok(refs)
+    }
+
+    fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>> {
+        self.inner.apply_batch(edits)
+    }
+}
+
+impl Committer for CountingRefs {
+    type Error = Infallible;
+
+    fn signature(&self) -> Result<gix::actor::Signature, Self::Error> {
+        self.inner.signature()
+    }
+}
+
+/// Publishing N entities to one kind must not re-list the whole kind per
+/// publish. The per-kind index is a materialized cache, but maintaining it
+/// must not scan every existing entity ref: the ref-listing work across N
+/// publishes must not grow with N.
+#[test]
+fn publishing_many_entities_does_not_relist_the_kind() {
+    fn work_after(n: usize) -> (usize, usize) {
+        let store = Store::new(CountingRefs::new(), ObjectStore::default());
+        let counter = store.dynamic(seg("counter"));
+        counter
+            .schema()
+            .put(&schema_of::<Counter>().unwrap())
+            .unwrap();
+        for i in 0..n {
+            counter
+                .put(&entity(&format!("e{i}")), &value!({ "n": i }))
+                .unwrap();
+        }
+        (store.refs().listed.get(), store.refs().scanned.get())
+    }
+
+    let (small_listed, small_scanned) = work_after(8);
+    let (large_listed, large_scanned) = work_after(16);
+    assert_eq!(
+        (small_listed, small_scanned),
+        (large_listed, large_scanned),
+        "doubling the number of publishes grew the ref-listing work \
+         (listed {small_listed}->{large_listed}, scanned {small_scanned}->{large_scanned}): \
+         the index is re-listed on every publish"
+    );
+}
+
+// --- a real second writer racing the index's compare-and-swap ---
+
+/// A one-shot hook run at the start of an `apply_batch`, shared so arming it
+/// through one clone of a [`RacingRefs`] fires it through another.
+type FireOnce = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
+
+/// One in-memory ref store shared by cooperating [`Store`]s, with an optional
+/// one-shot hook that runs another writer's publish at the moment an
+/// `apply_batch` begins — the window between a reader's index read and its
+/// compare-and-swap. Lets two same-kind publishes race deterministically on
+/// one thread.
+#[derive(Clone)]
+struct RacingRefs {
+    inner: Rc<MemoryRefStore>,
+    fire: FireOnce,
+}
+
+impl RacingRefs {
+    fn new(inner: Rc<MemoryRefStore>) -> Self {
+        Self {
+            inner,
+            fire: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    fn arm(&self, fire: impl FnOnce() + 'static) {
+        *self.fire.borrow_mut() = Some(Box::new(fire));
+    }
+}
+
+impl RefStore for RacingRefs {
+    type Error = Infallible;
+
+    fn read(&self, name: &RefName) -> Result<Option<ObjectId>, Self::Error> {
+        self.inner.read(name)
+    }
+
+    fn prefixed(&self, prefix: &RefPrefix) -> Result<Vec<(RefName, ObjectId)>, Self::Error> {
+        self.inner.prefixed(prefix)
+    }
+
+    fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>> {
+        if let Some(fire) = self.fire.borrow_mut().take() {
+            fire();
+        }
+        self.inner.apply_batch(edits)
+    }
+}
+
+impl Committer for RacingRefs {
+    type Error = Infallible;
+
+    fn signature(&self) -> Result<gix::actor::Signature, Self::Error> {
+        self.inner.signature()
+    }
+}
+
+/// Two writers publishing different names to the same kind: the second lands
+/// in the window between the first writer's index read and its index
+/// compare-and-swap, so the first loses that compare-and-swap and retries.
+/// The retry must re-derive the index from the winner's, or the winner's entry
+/// would be dropped.
+#[test]
+fn a_concurrent_writers_entry_is_not_lost_from_the_kind_index() {
+    let refs = Rc::new(MemoryRefStore::new());
+    let objects = Rc::new(ObjectStore::default());
+    let racing = RacingRefs::new(Rc::clone(&refs));
+    let store = Store::new(racing.clone(), Rc::clone(&objects));
+    let counter = store.dynamic(seg("counter"));
+    counter
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+    counter.put(&entity("a"), &value!({ "n": 1 })).unwrap();
+
+    // Writer B publishes "b" to the same kind — shared refs and objects, its
+    // own `Store` — exactly when A first tries to apply.
+    let (refs_b, objects_b) = (Rc::clone(&refs), Rc::clone(&objects));
+    racing.arm(move || {
+        let writer = Store::new(RacingRefs::new(refs_b), objects_b);
+        writer
+            .dynamic(seg("counter"))
+            .put(&entity("b"), &value!({ "n": 2 }))
+            .unwrap();
+    });
+
+    counter.put(&entity("c"), &value!({ "n": 3 })).unwrap();
+
+    let names: Vec<RefPath> = counter
+        .list_entries()
+        .unwrap()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![entity("a"), entity("b"), entity("c")],
+        "A's retry dropped a concurrent writer's index entry"
+    );
+
+    // Inspect the maintained index directly: `list_entries` validates against
+    // the entity refs and would silently fall back, masking a dropped entry.
+    let cache = RefPrefix::new("refs/cache").unwrap();
+    let (_, index_tree) = store
+        .refs()
+        .prefixed(&cache)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let entries = store.objects().get_tree(&index_tree).unwrap().unwrap();
+    assert_eq!(
+        entries.len(),
+        3,
+        "the maintained index dropped a concurrent writer's entry"
+    );
 }

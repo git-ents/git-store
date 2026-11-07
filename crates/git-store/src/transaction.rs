@@ -147,22 +147,18 @@ impl<'s, R: RefStore + Committer, O: Find + Write> Transaction<'s, R, O> {
 
         for (kind, deltas) in index_deltas {
             let entities = self.store.layout().data.child(&kind);
-            let mut entries = index::source_entries(self.store, &entities)?;
-            for (name, commit) in deltas {
-                match entries.iter_mut().find(|(existing, _)| *existing == name) {
-                    Some((_, current)) => *current = commit,
-                    None => {
-                        entries.push((name, commit));
-                        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-                    }
-                }
-            }
+            let changes: Vec<index::Change> = deltas
+                .into_iter()
+                .map(|(name, commit)| index::Change::Set(name, commit))
+                .collect();
             let current_index = self
                 .store
                 .refs()
                 .read(&index::reference(&kind))
                 .map_err(Error::backend)?;
-            if let Some(edit) = index::edit(self.store, &kind, current_index, &entries)? {
+            if let Some(edit) =
+                index::update(self.store, &kind, &entities, current_index, &changes)?
+            {
                 edits.push(edit);
             }
         }

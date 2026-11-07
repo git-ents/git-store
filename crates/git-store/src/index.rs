@@ -1,4 +1,16 @@
 //! The persisted per-kind materialized entity index.
+//!
+//! The index is a cache, never a source of truth: a reader serves it only when
+//! it matches the entity refs exactly, and a writer advances it as a delta on
+//! the current index whenever that is readable, so maintaining it does not
+//! rescan the kind on every write. Entity refs remain authoritative
+//! throughout.
+//!
+//! Because a write is a delta, a ref moved out-of-band — one that bypasses
+//! this crate's writers and so never touches the index — leaves the index
+//! stale rather than self-healing on the next write. Readers already reject a
+//! stale index and fall back to the refs; the explicit
+//! [`Kind::rebuild_index`](crate::Kind::rebuild_index) repairs it.
 
 use std::fmt::Write as _;
 
@@ -44,10 +56,63 @@ where
     Ok(entries)
 }
 
+/// One change to a kind's materialized index: set an entity's entry to a
+/// commit (a publication or a tombstone), or drop its entry.
+pub(crate) enum Change {
+    /// The named entity's ref now points at this commit.
+    Set(RefPath, ObjectId),
+    /// The named entity's ref is gone; drop its index entry.
+    Remove(RefPath),
+}
+
+/// The materialized-index [`RefEdit`](gix_refstore::RefEdit) that advances
+/// `kind`'s index (currently at `current`) toward the result of applying
+/// `changes`, or `None` when the index already holds that result.
+///
+/// When `current` names a readable, non-empty index tree it is the base, and
+/// `changes` is applied to it as a delta — no ref listing. When the index is
+/// absent, unreadable, or empty, the base is a full listing of `entities`, so
+/// a missing or corrupt index is rebuilt rather than compounded. Either way
+/// the expectation is `current`, so a concurrent writer that moves the index
+/// makes this edit lose its compare-and-swap and the caller retries against
+/// the winner's index rather than overwriting it.
+pub(crate) fn update<R, O>(
+    store: &Store<R, O>,
+    kind: &RefSegment,
+    entities: &RefPrefix,
+    current: Option<ObjectId>,
+    changes: &[Change],
+) -> Result<Option<gix_refstore::RefEdit>, Error>
+where
+    R: RefStore,
+    O: Find + Write,
+{
+    let base = current.and_then(|tree| read_tree(store, tree).ok());
+    let mut entries = match base.filter(|entries| !entries.is_empty()) {
+        Some(entries) => entries,
+        None => source_entries(store, entities)?,
+    };
+    for change in changes {
+        match change {
+            Change::Set(name, commit) => {
+                match entries.iter_mut().find(|(existing, _)| existing == name) {
+                    Some((_, slot)) => *slot = *commit,
+                    None => {
+                        entries.push((name.clone(), *commit));
+                        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                    }
+                }
+            }
+            Change::Remove(name) => entries.retain(|(existing, _)| existing != name),
+        }
+    }
+    edit(store, kind, current, &entries)
+}
+
 /// The materialized-index [`RefEdit`](gix_refstore::RefEdit) that brings
-/// `kind`'s index ref (currently at `current`) to reflect `entries`, or
-/// `None` when it already does.
-pub(crate) fn edit<R, O>(
+/// `kind`'s index ref (currently at `current`) to reflect the complete set
+/// `entries`, or `None` when it already does.
+fn edit<R, O>(
     store: &Store<R, O>,
     kind: &RefSegment,
     current: Option<ObjectId>,
@@ -78,10 +143,19 @@ where
     }))
 }
 
+/// The index entries for `kind`, validated against `source` — the kind's own
+/// entity refs, which the caller has already listed — or `None` when the index
+/// is missing, malformed, or stale.
+///
+/// Validation is exactly "the decoded index equals `source`": the index is a
+/// cache, so anything that does not match the authoritative ref listing is
+/// rejected and the caller falls back to `source`. This costs the caller a
+/// listing, a tree read, and the decode of every index entry, so the index can
+/// never make a read cheaper than the listing it must be checked against; its
+/// only remaining job is to be maintained cheaply on the write side.
 pub(crate) fn read_validated<R, O>(
     store: &Store<R, O>,
     kind: &RefSegment,
-    entities: &RefPrefix,
     source: &[(RefPath, ObjectId)],
 ) -> Result<Option<Vec<(RefPath, ObjectId)>>, Error>
 where
@@ -93,16 +167,12 @@ where
         return Ok(None);
     };
 
-    // The index is a cache. Any malformed, non-canonical, or stale object is
-    // rejected and the caller uses the entity refs as the source of truth.
+    // Any malformed, non-canonical, or stale object is rejected and the
+    // caller uses the entity refs as the source of truth.
     let Ok(entries) = read_tree(store, tree) else {
         return Ok(None);
     };
-    if entries == source
-        && entries
-            .iter()
-            .all(|(name, _)| entities.join_path(name).is_under(entities))
-    {
+    if entries == source {
         Ok(Some(entries))
     } else {
         Ok(None)

@@ -478,19 +478,19 @@ where
                 edits.push(edit);
             }
 
+            // The index advances with the ref in the same batch. Its base is
+            // the index this batch's compare-and-swap expects, so a concurrent
+            // writer that moves the index first makes this edit lose the race
+            // and the retry re-reads — never dropping the winner's entry.
             let current_index = self
                 .store
                 .refs()
                 .read(&index::reference(&self.name))
                 .map_err(Error::backend)?;
-            let mut next = self.source_entries()?;
-            if let Some((_, current)) = next.iter_mut().find(|(entry, _)| entry == &resolved.name) {
-                *current = resolved.commit;
-            } else {
-                next.push((resolved.name.clone(), resolved.commit));
-                next.sort_by(|(a, _), (b, _)| a.cmp(b));
-            }
-            if let Some(edit) = self.index_edit(current_index, &next)? {
+            if let Some(edit) = self.index_update(
+                current_index,
+                &[index::Change::Set(resolved.name.clone(), resolved.commit)],
+            )? {
                 edits.push(edit);
             }
 
@@ -641,10 +641,9 @@ where
                 .refs()
                 .read(&index::reference(&self.name))
                 .map_err(Error::backend)?;
-            let mut next = self.source_entries()?;
-            next.push((name.clone(), commit));
-            next.sort_by(|(a, _), (b, _)| a.cmp(b));
-            if let Some(edit) = self.index_edit(current_index, &next)? {
+            if let Some(edit) =
+                self.index_update(current_index, &[index::Change::Set(name.clone(), commit)])?
+            {
                 edits.push(edit);
             }
             match self.store.refs().apply_batch(edits) {
@@ -669,15 +668,18 @@ where
         })
     }
 
-    fn index_edit(
+    /// The [`RefEdit`] advancing this kind's index from `current` by `changes`,
+    /// or `None` when it already reflects them. Applied with the entity ref in
+    /// one batch, so the two advance together or not at all.
+    fn index_update(
         &self,
         current: Option<ObjectId>,
-        entries: &[(RefPath, ObjectId)],
+        changes: &[index::Change],
     ) -> Result<Option<RefEdit>, Error>
     where
         O: Write,
     {
-        index::edit(self.store, &self.name, current, entries)
+        index::update(self.store, &self.name, &self.entities, current, changes)
     }
 
     /// The entity names published under this kind, ascending. Nesting is
@@ -688,12 +690,13 @@ where
 
     /// Every entity name and publication commit, ascending, including names
     /// whose tip is a tombstone.
+    ///
+    /// The entity refs are listed and the materialized index is served only
+    /// when it matches that listing exactly, so a read is never cheaper than
+    /// the listing it validates against.
     pub fn list_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
         let source = self.source_entries()?;
-        Ok(
-            index::read_validated(self.store, &self.name, &self.entities, &source)?
-                .unwrap_or(source),
-        )
+        Ok(index::read_validated(self.store, &self.name, &source)?.unwrap_or(source))
     }
 
     /// Rebuild this kind's materialized index from the entity refs.
@@ -891,14 +894,9 @@ where
                 .refs()
                 .read(&index::reference(&self.name))
                 .map_err(Error::backend)?;
-            let mut next = self.source_entries()?;
-            if let Some((_, target)) = next.iter_mut().find(|(entry, _)| entry == name) {
-                *target = commit;
-            } else {
-                next.push((name.clone(), commit));
-                next.sort_by(|(a, _), (b, _)| a.cmp(b));
-            }
-            if let Some(edit) = self.index_edit(current_index, &next)? {
+            if let Some(edit) =
+                self.index_update(current_index, &[index::Change::Set(name.clone(), commit)])?
+            {
                 edits.push(edit);
             }
 
@@ -940,12 +938,9 @@ where
                 .refs()
                 .read(&index::reference(&self.name))
                 .map_err(Error::backend)?;
-            let next: Vec<_> = self
-                .source_entries()?
-                .into_iter()
-                .filter(|(entry, _)| entry != name)
-                .collect();
-            if let Some(edit) = self.index_edit(current_index, &next)? {
+            if let Some(edit) =
+                self.index_update(current_index, &[index::Change::Remove(name.clone())])?
+            {
                 edits.push(edit);
             }
             match self.store.refs().apply_batch(edits) {
