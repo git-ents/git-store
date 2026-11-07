@@ -1185,6 +1185,110 @@ fn hard_deleted_canonical_refs_remain_absent_not_deleted() {
     ));
 }
 
+/// A hard-deleted name is gone, not corrupt: the ref is absent, so every
+/// address reads `Absent` and neither listing path errors. The lenient
+/// classification that keeps tombstones off [`Kind::list`] must never turn a
+/// legitimate absence into a failure.
+#[test]
+fn hard_deleted_name_stays_absent_across_listing_and_read() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let name = entity("gone");
+    kind.put_with_alias(&name, &value!({ "n": 1 })).unwrap();
+    assert!(kind.remove(&name).unwrap());
+
+    assert!(matches!(
+        kind.read(name.clone()).unwrap(),
+        EntityState::Absent
+    ));
+    assert_eq!(kind.list().unwrap(), Vec::<RefPath>::new());
+    assert!(kind.entries().unwrap().is_empty());
+    assert!(kind.list_entries().unwrap().is_empty());
+}
+
+/// A ref whose tip is not a decodable bound document — here a commit id that
+/// is not in the object database — is corruption, not a live entity. `read`
+/// surfaces it; the listing must agree rather than silently presenting the
+/// name as a live entry with no value.
+#[test]
+fn listing_surfaces_a_ref_pointing_at_a_missing_object() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let name = entity("orphan");
+    kind.put_with_alias(&name, &value!({ "n": 1 })).unwrap();
+
+    let reference = kind.reference(&name);
+    let current = store.refs().read(&reference).unwrap().unwrap();
+    let missing = ObjectId::from_hex(b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+    store
+        .refs()
+        .apply(RefEdit::Update {
+            name: reference,
+            expected: current,
+            new: missing,
+        })
+        .unwrap();
+
+    assert!(
+        kind.read(name.clone()).is_err(),
+        "read should reject a ref pointing at a missing object"
+    );
+    assert!(
+        kind.list().is_err(),
+        "list hid a ref pointing at a missing object: {:?}",
+        kind.list()
+    );
+}
+
+/// A genuine tombstone published under a *different* kind is a foreign ref;
+/// `read` rejects it as a kind mismatch, so the listing must not report the
+/// name as live.
+#[test]
+fn listing_surfaces_a_ref_whose_tip_is_a_foreign_kind_tombstone() {
+    let store = store();
+    let counter = store.dynamic(seg("counter"));
+    counter
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+    let name = entity("borrowed");
+    counter.put_with_alias(&name, &value!({ "n": 1 })).unwrap();
+
+    let gadget = store.dynamic(seg("gadget"));
+    gadget
+        .schema()
+        .put(&schema_of::<Counter>().unwrap())
+        .unwrap();
+    let gid = gadget.put_entity(&value!({ "n": 2 })).unwrap();
+    let foreign = match gadget.delete_entity(gid).unwrap() {
+        DeleteResult::Deleted(entry) => entry.commit,
+        other => panic!("expected a new tombstone, got {other:?}"),
+    };
+
+    let reference = counter.reference(&name);
+    let current = store.refs().read(&reference).unwrap().unwrap();
+    store
+        .refs()
+        .apply(RefEdit::Update {
+            name: reference,
+            expected: current,
+            new: foreign,
+        })
+        .unwrap();
+
+    assert!(
+        matches!(counter.read(name.clone()), Err(Error::KindMismatch { .. })),
+        "read should reject a foreign-kind tombstone"
+    );
+    assert!(
+        counter.list().is_err(),
+        "list hid a foreign-kind tombstone: {:?}",
+        counter.list()
+    );
+}
+
 // --- typed API ---
 
 #[test]
@@ -2103,6 +2207,10 @@ struct CountingRefs {
     inner: MemoryRefStore,
     listed: Cell<usize>,
     scanned: Cell<usize>,
+    /// Every prefix handed to [`RefStore::prefixed`], in order — a subtree
+    /// read that scans the whole kind is visible here as the kind's own
+    /// namespace rather than the requested subtree's.
+    prefixes: RefCell<Vec<String>>,
 }
 
 impl CountingRefs {
@@ -2111,6 +2219,7 @@ impl CountingRefs {
             inner: MemoryRefStore::new(),
             listed: Cell::new(0),
             scanned: Cell::new(0),
+            prefixes: RefCell::new(Vec::new()),
         }
     }
 }
@@ -2123,6 +2232,7 @@ impl RefStore for CountingRefs {
     }
 
     fn prefixed(&self, prefix: &RefPrefix) -> Result<Vec<(RefName, ObjectId)>, Self::Error> {
+        self.prefixes.borrow_mut().push(prefix.as_str().to_owned());
         let refs = self.inner.prefixed(prefix)?;
         self.listed.set(self.listed.get() + 1);
         self.scanned.set(self.scanned.get() + refs.len());
@@ -2171,6 +2281,37 @@ fn publishing_many_entities_does_not_relist_the_kind() {
         "doubling the number of publishes grew the ref-listing work \
          (listed {small_listed}->{large_listed}, scanned {small_scanned}->{large_scanned}): \
          the index is re-listed on every publish"
+    );
+}
+
+/// A subtree listing must scan only that subtree's refs, not every entity of
+/// the kind: `list_under` is documented as scanning the given subtree, so the
+/// ref store must be asked for the subtree prefix and nothing broader.
+#[test]
+fn list_under_scans_only_the_requested_subtree() {
+    let store = Store::new(CountingRefs::new(), ObjectStore::default());
+    let note = store.dynamic(seg("note"));
+    note.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    // Insert out of order to prove the result is ordered, and include a name
+    // that shares a text prefix across a segment boundary (`ab` vs `a`) plus a
+    // sibling subtree (`b`) that must not appear.
+    for name in ["a/y", "b/z", "ab/q", "a/x"] {
+        note.put(&entity(name), &value!({ "n": 1 })).unwrap();
+    }
+    store.refs().prefixes.borrow_mut().clear();
+
+    let found = note.list_under(&entity("a")).unwrap();
+    assert_eq!(
+        found,
+        ["a/x", "a/y"].map(entity),
+        "subtree listing returned the wrong set"
+    );
+
+    let prefixes = store.refs().prefixes.borrow().clone();
+    assert_eq!(
+        prefixes,
+        vec!["refs/store/note/a".to_owned()],
+        "list_under listed {prefixes:?}, not just the subtree `refs/store/note/a`"
     );
 }
 

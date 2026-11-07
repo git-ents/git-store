@@ -384,17 +384,29 @@ where
     }
 
     fn source_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
-        index::source_entries(self.store, &self.entities)
+        self.entries_in(&self.entities)
     }
 
-    /// Decode only enough of a bound document to recognize a tombstone. This
-    /// is deliberately independent of the current schema ref/history.
-    fn tombstone_for(&self, commit: ObjectId) -> Option<EntityId> {
-        let (root, _schema, doc, _message) = self.read_bound(commit).ok()?;
-        tombstone::read(self.store, &root, &doc)
-            .ok()?
-            .filter(|marker| marker.kind == self.name.as_str())
-            .and_then(|marker| marker.entity_id())
+    /// Classify one bound commit as a tombstone of this kind. This is
+    /// deliberately independent of the current schema ref/history.
+    ///
+    /// `Ok(None)` means the commit is an ordinary (live) document.
+    /// `Ok(Some(_))` means it is this kind's tombstone. Any other outcome is a
+    /// real error — a ref pointing at a missing object, a non-bound tree, an
+    /// undecodable schema, a malformed tombstone, or a tombstone naming
+    /// another kind — and is propagated rather than folded into `Ok(None)`.
+    /// Callers that list entities must surface it so that a corrupt or
+    /// foreign ref is never silently presented as a live entry; only the
+    /// absence of a ref (never reaching here) means "not a deletion".
+    fn tombstone_for(&self, commit: ObjectId) -> Result<Option<EntityId>, Error> {
+        let (root, _schema, doc, _message) = self.read_bound(commit)?;
+        match tombstone::read(self.store, &root, &doc)? {
+            Some(marker) => {
+                self.ensure_kind(&marker.kind)?;
+                Ok(marker.entity_id())
+            }
+            None => Ok(None),
+        }
     }
 
     /// Publish one complete document under a caller-selected name, defaulting
@@ -828,35 +840,55 @@ where
 
     fn list_in(&self, prefix: RefPrefix) -> Result<Vec<RefPath>, Error> {
         let mut entries: Vec<_> = self
-            .live_entries()?
+            .live_entries_in(&prefix)?
             .into_iter()
-            .filter(|(name, _)| self.entities.join_path(name).is_under(&prefix))
             .map(|(name, _)| name)
             .collect();
         entries.sort();
         Ok(entries)
     }
 
-    /// Every named ref under this kind whose tip is not a tombstone.
-    fn live_entries(&self) -> Result<Vec<(RefPath, ObjectId)>, Error> {
-        Ok(self
-            .source_entries()?
+    /// Every named ref under `prefix`, relative to this kind's entity
+    /// namespace and ascending by name, whose tip is not a tombstone.
+    ///
+    /// The listing is scoped to `prefix`, so a subtree scan touches only that
+    /// subtree's refs; the prefix is a segment boundary, so `a` never matches
+    /// a sibling `ab`. A ref that cannot be classified is surfaced as an
+    /// error, never folded into the live set.
+    fn live_entries_in(&self, prefix: &RefPrefix) -> Result<Vec<(RefPath, ObjectId)>, Error> {
+        self.entries_in(prefix)?
             .into_iter()
-            .filter(|(_, commit)| self.tombstone_for(*commit).is_none())
-            .collect())
+            .filter_map(|(name, commit)| match self.tombstone_for(commit) {
+                Ok(None) => Some(Ok((name, commit))),
+                Ok(Some(_)) => None,
+                Err(err) => Some(Err(err)),
+            })
+            .collect()
+    }
+
+    /// Every named ref under `prefix`, relative to this kind's entity
+    /// namespace and ascending by name, including names whose tip is a
+    /// tombstone.
+    fn entries_in(&self, prefix: &RefPrefix) -> Result<Vec<(RefPath, ObjectId)>, Error> {
+        let mut entries: Vec<_> = self
+            .store
+            .refs()
+            .prefixed(prefix)
+            .map_err(Error::backend)?
+            .into_iter()
+            .filter_map(|(name, commit)| {
+                name.relative_to(&self.entities).map(|name| (name, commit))
+            })
+            .collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Ok(entries)
     }
 
     fn list_entries_in(&self, prefix: RefPrefix) -> Result<Vec<(RefPath, ObjectId)>, Error> {
         if prefix == self.entities {
             return self.list_entries();
         }
-        let mut entries: Vec<_> = self
-            .source_entries()?
-            .into_iter()
-            .filter(|(name, _)| self.entities.join_path(name).is_under(&prefix))
-            .collect();
-        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-        Ok(entries)
+        self.entries_in(&prefix)
     }
 
     /// Publish a typed tombstone at the named entity ref.

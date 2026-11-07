@@ -34,9 +34,10 @@ pub(crate) fn reference(kind: &RefSegment) -> RefName {
 }
 
 /// Every ref directly under `entities`, named relative to that prefix,
-/// ascending by name. Shared by [`crate::Kind`]'s own publications and by
+/// ascending by name. Used by [`update`]'s rebuild base, and by
 /// [`crate::Transaction`], which stages edits for entities across several
-/// kinds at once.
+/// kinds at once; [`crate::Kind`]'s own listing shares the same shape through
+/// its `entries_in`.
 pub(crate) fn source_entries<R, O>(
     store: &Store<R, O>,
     entities: &RefPrefix,
