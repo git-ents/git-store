@@ -139,10 +139,11 @@ Their on-disk form is a public contract: any change to the encoded shape of the
 schema types is a breaking change and MUST be released as a semver-major
 version, per link:#compatibility.update[compatibility with prior releases].
 
-A schema document also carries its embedded `kind` name. The name is part of
-the schema document and is validated as a Git ref-name segment; it MUST NOT be
-inferred from a publication ref. A publication ref is an authoring/history
-index, not the type definition of an existing bound data document.
+A schema document also carries its embedded `kind` label. The label is part of
+the schema document; the encoding defines it as opaque and does not use it to
+decode the value. The kind MUST NOT be inferred from a publication ref: a
+publication ref is an authoring/history index, not the type definition of an
+existing bound data document.
 
 The schema types are defined as follows.
 

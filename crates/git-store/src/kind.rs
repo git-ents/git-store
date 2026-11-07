@@ -391,9 +391,11 @@ where
     ///
     /// The document tree is validated before any ref is read or commit is
     /// written. Its identity is the object id of the complete bound document
-    /// tree — the value's own entries beside the reserved `.schema` entry —
-    /// and the schema embedded in that tree must name this kind. The name ref
-    /// and the materialized index advance in one ref-store batch.
+    /// tree — the value's own entries beside the reserved `.schema` entry.
+    /// Publication is a ref-level operation that consults no kind schema, so a
+    /// document bound over the kind's current schema, an older one from its
+    /// history, or a schema published under another kind is equally accepted.
+    /// The name ref and the materialized index advance in one ref-store batch.
     ///
     /// An explicit [`Expectation`](gix_refstore::Expectation) is a one-shot
     /// compare-and-swap on that ref: a stale expectation is returned as an

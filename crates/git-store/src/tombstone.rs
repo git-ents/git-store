@@ -154,9 +154,11 @@ where
 /// Return `None` for an ordinary document and decode a tombstone document
 /// before any kind schema-history lookup can occur.
 ///
-/// A schema no longer carries an embedded kind, so a tombstone is recognized
+/// The schema does carry an embedded `kind` label — the effective name of the
+/// shape it was derived from, `Tombstone` here — so a tombstone is recognized
 /// by its schema being exactly the canonical [`Tombstone`] schema this library
-/// compiles in. Any other schema names an ordinary value.
+/// compiles in, that label included. Any other schema, even one differing only
+/// in the label, names an ordinary value.
 pub(crate) fn read<R, O>(
     store: &Store<R, O>,
     root: &ObjectId,
