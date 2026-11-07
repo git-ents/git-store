@@ -18,6 +18,7 @@ use crate::envelope;
 use crate::error::Error;
 use crate::identity::{EntityId, canonical_document_id};
 use crate::index;
+use crate::retry::Budget;
 use crate::store::{Publication, PublishOptions, Store};
 use crate::tombstone::{self, DeleteResult, EntityState, Tombstone, TombstoneEntry};
 
@@ -344,6 +345,7 @@ where
         O: Write,
         Er: From<Error>,
     {
+        let mut budget = Budget::new();
         loop {
             // One read of the ref serves both roles: the state `rebuild`
             // sees, and the commit the compare-and-swap expects. A second
@@ -375,7 +377,8 @@ where
                 true,
             )? {
                 Some((_, commit)) => return Ok(commit),
-                None => continue,
+                None if budget.retry() => continue,
+                None => return Err(Er::from(budget.exhausted())),
             }
         }
     }
@@ -464,6 +467,7 @@ where
         R: Committer,
         O: Write,
     {
+        let mut budget = Budget::new();
         loop {
             let resolved =
                 match self.resolve_publish(alias, message, tree, parent, expected_alias)? {
@@ -507,7 +511,10 @@ where
             }
             match self.store.refs().apply_batch(edits) {
                 Ok(()) => return Ok(Some((resolved.id, resolved.commit))),
-                Err(ApplyError::LostRace { .. }) if retry_on_race => continue,
+                Err(ApplyError::LostRace { .. }) if retry_on_race && budget.retry() => continue,
+                Err(ApplyError::LostRace { .. }) if retry_on_race => {
+                    return Err(budget.exhausted());
+                }
                 Err(lost @ ApplyError::LostRace { .. }) => {
                     return Err(Error::backend(lost));
                 }
@@ -636,6 +643,7 @@ where
         let commit = self.store.write_commit(message, tree, None)?;
         let name = name(commit);
         let reference = self.reference(&name);
+        let mut budget = Budget::new();
         loop {
             if self.store.refs().read(&reference).map_err(Error::backend)? == Some(commit) {
                 return Ok(commit);
@@ -656,7 +664,8 @@ where
             }
             match self.store.refs().apply_batch(edits) {
                 Ok(()) => return Ok(commit),
-                Err(ApplyError::LostRace { .. }) => continue,
+                Err(ApplyError::LostRace { .. }) if budget.retry() => continue,
+                Err(ApplyError::LostRace { .. }) => return Err(budget.exhausted()),
                 Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
             }
         }
@@ -717,6 +726,7 @@ where
         O: Write,
     {
         let index_ref = index::reference(&self.name);
+        let mut budget = Budget::new();
         loop {
             let source = self.source_entries()?;
             let current = self.store.refs().read(&index_ref).map_err(Error::backend)?;
@@ -744,7 +754,8 @@ where
             };
             match self.store.refs().apply(edit) {
                 Ok(()) => return Ok(()),
-                Err(ApplyError::LostRace { .. }) => continue,
+                Err(ApplyError::LostRace { .. }) if budget.retry() => continue,
+                Err(ApplyError::LostRace { .. }) => return Err(budget.exhausted()),
                 Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
             }
         }
@@ -878,6 +889,7 @@ where
         O: Write,
     {
         let reference = self.reference(name);
+        let mut budget = Budget::new();
         loop {
             let Some(current) = self.store.refs().read(&reference).map_err(Error::backend)? else {
                 return Ok(DeleteResult::Absent);
@@ -916,7 +928,8 @@ where
                         message: message.trim_end().to_owned(),
                     }));
                 }
-                Err(ApplyError::LostRace { .. }) => continue,
+                Err(ApplyError::LostRace { .. }) if budget.retry() => continue,
+                Err(ApplyError::LostRace { .. }) => return Err(budget.exhausted()),
                 Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
             }
         }
@@ -933,6 +946,7 @@ where
         O: Write,
     {
         let reference = self.reference(name);
+        let mut budget = Budget::new();
         loop {
             let Some(expected) = self.store.refs().read(&reference).map_err(Error::backend)? else {
                 return Ok(false);
@@ -953,7 +967,8 @@ where
             }
             match self.store.refs().apply_batch(edits) {
                 Ok(()) => return Ok(true),
-                Err(ApplyError::LostRace { .. }) => continue,
+                Err(ApplyError::LostRace { .. }) if budget.retry() => continue,
+                Err(ApplyError::LostRace { .. }) => return Err(budget.exhausted()),
                 Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
             }
         }

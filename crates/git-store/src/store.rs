@@ -18,6 +18,7 @@ use crate::envelope::{self, SCHEMA_ENTRY, ensure_struct_root};
 use crate::error::Error;
 use crate::identity::{DocumentTree, EntityId, SchemaTree, ValueTree};
 use crate::kind::Kind;
+use crate::retry::Budget;
 use crate::transaction::Transaction;
 
 /// Options controlling publication of a prepared document.
@@ -490,6 +491,7 @@ where
         R: Committer,
         O: Write,
     {
+        let mut budget = Budget::new();
         loop {
             let parent = self.refs.read(name).map_err(Error::backend)?;
             let tree = build_tree(parent)?;
@@ -507,7 +509,8 @@ where
             };
             match self.refs.apply(edit) {
                 Ok(()) => return Ok(commit),
-                Err(ApplyError::LostRace { .. }) => continue,
+                Err(ApplyError::LostRace { .. }) if budget.retry() => continue,
+                Err(ApplyError::LostRace { .. }) => return Err(budget.exhausted()),
                 Err(ApplyError::Backend(err)) => return Err(Error::backend(err)),
             }
         }

@@ -19,6 +19,7 @@ mod error;
 mod identity;
 mod index;
 mod kind;
+mod retry;
 
 mod store;
 mod tombstone;

@@ -577,6 +577,9 @@ fn error_exit_code(error: &anyhow::Error) -> i32 {
 
 fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
     match error {
+        // An exhausted compare-and-swap budget is a CAS conflict the caller
+        // can retry later, not a generic backend failure.
+        git_store::Error::Contention { .. } => ExitClass::Cas,
         git_store::Error::NoSchema { .. }
         | git_store::Error::MissingObject { .. }
         | git_store::Error::SubtreeMissing { .. } => ExitClass::NotFound,

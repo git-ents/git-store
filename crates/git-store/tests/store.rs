@@ -2291,3 +2291,118 @@ fn a_concurrent_writers_entry_is_not_lost_from_the_kind_index() {
         "the maintained index dropped a concurrent writer's entry"
     );
 }
+
+// --- fault-injecting RefStore: a publish that never wins its race ---
+
+/// The number of `apply_batch` calls the wrapper below tolerates before it
+/// declares the caller's loop unbounded. Comfortably above any sane retry
+/// cap, so a bounded loop stops well short while an unbounded one fails the
+/// test here instead of hanging the suite.
+const ALWAYS_LOSES_LIMIT: usize = 64;
+
+/// A [`RefStore`] that reports a lost race for a *watched* ref on every
+/// `apply_batch`, counting those attempts. Every other ref (the index, the
+/// schema) delegates to a [`MemoryRefStore`], so a kind can be set up
+/// normally and only the watched publish is made to lose forever.
+struct AlwaysLosesRefStore {
+    inner: MemoryRefStore,
+    watched: RefCell<Option<RefName>>,
+    attempts: Cell<usize>,
+}
+
+impl AlwaysLosesRefStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryRefStore::new(),
+            watched: RefCell::new(None),
+            attempts: Cell::new(0),
+        }
+    }
+
+    fn watch(&self, name: RefName) {
+        *self.watched.borrow_mut() = Some(name);
+    }
+
+    fn attempts(&self) -> usize {
+        self.attempts.get()
+    }
+}
+
+impl RefStore for AlwaysLosesRefStore {
+    type Error = Infallible;
+
+    fn read(&self, name: &RefName) -> Result<Option<ObjectId>, Self::Error> {
+        self.inner.read(name)
+    }
+
+    fn prefixed(&self, prefix: &RefPrefix) -> Result<Vec<(RefName, ObjectId)>, Self::Error> {
+        self.inner.prefixed(prefix)
+    }
+
+    fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>> {
+        let watched = self.watched.borrow();
+        let Some(name) = watched.as_ref() else {
+            return self.inner.apply_batch(edits);
+        };
+        let Some(edit) = edits.iter().find(|edit| edit.name() == name) else {
+            return self.inner.apply_batch(edits);
+        };
+        let count = self.attempts.get() + 1;
+        self.attempts.set(count);
+        assert!(
+            count <= ALWAYS_LOSES_LIMIT,
+            "unbounded retry: >{ALWAYS_LOSES_LIMIT} attempts without giving up"
+        );
+        Err(ApplyError::LostRace {
+            name: edit.name().clone(),
+            expected: edit.expectation(),
+        })
+    }
+}
+
+impl Committer for AlwaysLosesRefStore {
+    type Error = Infallible;
+
+    fn signature(&self) -> Result<gix::actor::Signature, Self::Error> {
+        self.inner.signature()
+    }
+}
+
+/// A publish whose compare-and-swap loses forever must give up with a typed
+/// contention error after a bounded number of attempts, never loop
+/// unboundedly. Pre-fix the loop spins past [`ALWAYS_LOSES_LIMIT`] and the
+/// wrapper's assert fires.
+#[test]
+fn always_losing_publish_is_bounded_and_reports_contention() {
+    let store = Store::new(AlwaysLosesRefStore::new(), ObjectStore::default());
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    store.refs().watch(kind.reference(&entity("c")));
+
+    let err = kind
+        .put(&entity("c"), &value!({ "n": 1 }))
+        .expect_err("a permanently lost race must not succeed");
+    assert!(matches!(err, Error::Contention { .. }), "{err:?}");
+    assert!(
+        store.refs().attempts() <= 8,
+        "gave up only after {} attempts, past the retry cap",
+        store.refs().attempts()
+    );
+}
+
+/// The uncontended path must not pay retry latency: a single publish against a
+/// healthy store completes without the retry helper ever sleeping.
+#[test]
+fn uncontended_publish_does_not_sleep() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+
+    let start = std::time::Instant::now();
+    kind.put(&entity("c"), &value!({ "n": 1 })).unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(20),
+        "uncontended publish took {elapsed:?}; the retry path must not sleep on the happy path"
+    );
+}

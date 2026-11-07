@@ -209,6 +209,15 @@ pub enum Error {
         /// whitespace in an email.
         reason: &'static str,
     },
+    /// A ref write kept losing its compare-and-swap to concurrent writers and
+    /// exhausted its bounded retry budget, so it gave up rather than retrying
+    /// forever. Distinguished from [`Error::Backend`] so a caller can tell
+    /// "someone else keeps winning, try again later" from a genuine failure.
+    #[error("ref store contended: lost the compare-and-swap {attempts} times in a row")]
+    Contention {
+        /// The number of compare-and-swap attempts made before giving up.
+        attempts: u32,
+    },
     /// A backend failure from the ref store or object store.
     #[error(transparent)]
     Backend(Box<dyn std::error::Error + Send + Sync + 'static>),
