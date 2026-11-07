@@ -337,16 +337,23 @@ where
         Er: From<Error>,
     {
         loop {
-            let current = self.read(name.clone())?.present();
-            let (summary, value) = rebuild(current.as_ref())?;
-            let (message, tree) = commit_body(self, &value, summary)?;
-            // Keep the tombstone's commit as the CAS expectation when the
-            // caller elects to recreate through the old Option-based API.
+            // One read of the ref serves both roles: the state `rebuild`
+            // sees, and the commit the compare-and-swap expects. A second
+            // read for the expectation would arm the CAS with a commit
+            // `rebuild` never saw, silently clobbering a write that landed
+            // in between. The tombstone's commit still becomes the CAS
+            // expectation, keeping the caller's Option-based recreation.
             let expected = self
                 .store
                 .refs()
                 .read(&self.reference(name))
                 .map_err(Error::backend)?;
+            let current = match expected {
+                Some(commit) => self.read_commit(commit)?.present(),
+                None => None,
+            };
+            let (summary, value) = rebuild(current.as_ref())?;
+            let (message, tree) = commit_body(self, &value, summary)?;
             let expectation = match expected {
                 Some(old) => gix_refstore::Expectation::Exactly(old),
                 None => gix_refstore::Expectation::Absent,

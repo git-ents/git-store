@@ -1737,6 +1737,62 @@ fn try_update_lets_rebuild_refuse_an_absent_entry() {
     );
 }
 
+/// A write that lands between the read feeding `rebuild` and the read arming
+/// the compare-and-swap must not be clobbered: `rebuild` must see — and land
+/// over — the very commit the CAS expects, never one read before a concurrent
+/// write landed.
+#[test]
+fn try_update_does_not_clobber_a_write_that_lands_during_rebuild() {
+    let store = store();
+    let counter = store.kind::<Counter>(seg("counter"));
+    counter.publish().unwrap();
+
+    let original = counter.put(&entity("c"), &Counter { n: 1 }).unwrap();
+
+    // A legitimately schema-bound competing commit, parented on the same tip,
+    // built without ever touching "c"'s ref directly.
+    let scratch = entity("scratch");
+    store
+        .refs()
+        .apply(RefEdit::Create {
+            name: counter.reference(&scratch),
+            new: original,
+        })
+        .unwrap();
+    let winner = counter.write(&Counter { n: 50 }).at(&scratch).unwrap();
+
+    // Land the concurrent write exactly between the read that produced
+    // `current` (n=1) and the read that arms the compare-and-swap — the only
+    // window in which `rebuild` sees state the CAS does not.
+    let injected = std::cell::Cell::new(false);
+    let commit = counter
+        .try_update::<Error>(&entity("c"), |current| {
+            if !injected.replace(true) {
+                store
+                    .refs()
+                    .apply(RefEdit::Update {
+                        name: counter.reference(&entity("c")),
+                        expected: original,
+                        new: winner,
+                    })
+                    .unwrap();
+            }
+            let n = current.map_or(0, |entry| entry.value.n);
+            Ok((format!("bump to {}", n + 1), Counter { n: n + 1 }))
+        })
+        .unwrap();
+
+    assert_eq!(
+        counter.read(commit).unwrap().value().unwrap(),
+        Counter { n: 51 },
+        "rebuilt off the concurrent winner's n=50, not the stale n=1 read before it landed"
+    );
+    assert_eq!(
+        counter.history(&entity("c")).unwrap(),
+        vec![commit, winner, original]
+    );
+}
+
 /// A [`Put::anonymous`] whose first `Create` loses to spurious backend
 /// contention — nothing actually landed — retries the very same create
 /// rather than reporting [`Error::NameTaken`]: the name is still free, so
