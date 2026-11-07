@@ -58,6 +58,10 @@ pub trait RefStore {
     /// identifies the ref whose expectation failed, and leaves the batch
     /// unchanged. Implementations must not emulate this with sequential calls
     /// to [`RefStore::apply`].
+    ///
+    /// The promise is atomicity against concurrent readers and writers, not
+    /// durability: it says nothing about crash safety, and a successful return
+    /// does not imply the result has been fsynced.
     fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>>;
 }
 

@@ -52,6 +52,68 @@ impl<'r> GixRefStore<'r> {
         )
         .map_err(GixError::git)
     }
+
+    /// Refuse a batch the ref store cannot publish atomically.
+    ///
+    /// gix commits a multi-ref transaction one `rename(2)` at a time and its
+    /// own docs say the commit "may have been performed partially". A ref
+    /// that is a path prefix of another — `refs/x` and `refs/x/y` — must be a
+    /// file and a directory at once, so whichever rename runs second fails
+    /// once the first has created the clashing name, leaving earlier refs of
+    /// the batch already published. git cannot represent the pair, so reject
+    /// the whole batch up front rather than commit part of it.
+    fn ensure_namespace_representable(&self, edits: &[RefEdit]) -> Result<(), ApplyError<GixError>> {
+        let renamed: Vec<&RefName> = edits
+            .iter()
+            .filter(|edit| matches!(edit, RefEdit::Create { .. } | RefEdit::Update { .. }))
+            .map(RefEdit::name)
+            .collect();
+
+        // Two edits whose names nest cannot both be renamed into place.
+        for &outer in &renamed {
+            let prefix =
+                RefPrefix::new(outer.as_str()).expect("a validated ref name is a valid prefix");
+            for &inner in &renamed {
+                if outer != inner && inner.is_under(&prefix) {
+                    return Err(ApplyError::Backend(GixError::DirFileConflict {
+                        name: outer.clone(),
+                        nested: inner.to_string(),
+                    }));
+                }
+            }
+        }
+
+        // A ref already nested under a name being renamed into place makes
+        // that rename land on a directory. The reverse — a name nested under
+        // an existing ref — is caught by gix's own prepare, which rolls back
+        // before committing anything.
+        for &outer in &renamed {
+            if let Some(nested) = self.first_ref_under(outer).map_err(ApplyError::Backend)? {
+                return Err(ApplyError::Backend(GixError::DirFileConflict {
+                    name: outer.clone(),
+                    nested,
+                }));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The first ref strictly under `name`, if any — the evidence that
+    /// `name` is a directory a rename onto it cannot replace.
+    fn first_ref_under(&self, name: &RefName) -> Result<Option<String>, GixError> {
+        let namespace = format!("{name}/");
+        let platform = self.repo.references().map_err(GixError::git)?;
+        let mut refs = platform
+            .prefixed(namespace.as_str())
+            .map_err(GixError::git)?;
+        Ok(match refs.next() {
+            Some(Ok(reference)) => {
+                Some(String::from_utf8_lossy(reference.name().as_bstr()).into_owned())
+            }
+            Some(Err(_)) | None => None,
+        })
+    }
 }
 
 /// A flat, filesystem-safe lock filename for a ref: `%` and `/` are
@@ -72,6 +134,20 @@ pub enum GixError {
     /// write cannot be attributed.
     #[error("no author identity configured; set user.name and user.email")]
     NoAuthor,
+    /// A batch names two refs that git cannot both store, because one is a
+    /// path prefix of the other: `refs/x` alongside `refs/x/y` would be a
+    /// file and a directory at once. gix commits a multi-ref transaction one
+    /// rename at a time, so it could publish the nested ref and then fail on
+    /// the outer one; the batch is refused before anything is written instead.
+    #[error(
+        "ref {name} conflicts with the nested ref {nested}: a ref store cannot hold a ref and a directory of the same name"
+    )]
+    DirFileConflict {
+        /// The ref the batch would rename into place.
+        name: RefName,
+        /// The ref nested beneath `name`, from the same batch or already on disk.
+        nested: String,
+    },
     /// Any other `gix` failure, kept as the source.
     #[error(transparent)]
     Git(Box<dyn std::error::Error + Send + Sync + 'static>),
@@ -225,6 +301,11 @@ impl RefStore for GixRefStore<'_> {
                 });
             }
         }
+
+        // Every expectation holds and we hold this batch's locks, so the
+        // namespace is ours to judge: refuse a batch gix could only commit
+        // partially (see `ensure_namespace_representable`) before touching disk.
+        self.ensure_namespace_representable(&edits)?;
 
         let gix_edits: Vec<_> = edits
             .iter()

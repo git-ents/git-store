@@ -339,6 +339,103 @@ fn prefixed_empty_when_nothing_under_prefix<S: RefStore>(store: &S, oid: impl Fn
     assert_eq!(store.prefixed(&prefix).expect("prefixed"), vec![]);
 }
 
+/// A batch naming a ref and a ref nested beneath it (`refs/x` and
+/// `refs/x/y`) cannot be a file and a directory at once, so a
+/// filesystem backend cannot publish both. A flat-key backend can. Either
+/// way the batch is all-or-nothing: a backend that refuses it must refuse all
+/// of it, never publish the nested ref and then fail on the outer one.
+fn nested_ref_batch_is_all_or_nothing<S: RefStore>(store: &S, oid: impl Fn(u32) -> ObjectId) {
+    let outer = RefName::new("refs/store/nestedbatch").expect("valid name");
+    let inner = RefName::new("refs/store/nestedbatch/leaf").expect("valid name");
+
+    let result = store.apply_batch(vec![
+        RefEdit::Create {
+            name: inner.clone(),
+            new: oid(1),
+        },
+        RefEdit::Create {
+            name: outer.clone(),
+            new: oid(2),
+        },
+    ]);
+
+    match result {
+        Ok(()) => {
+            // A flat-key backend has no file/directory conflict, so both hold.
+            assert_eq!(store.read(&outer).expect("read"), Some(oid(2)));
+            assert_eq!(store.read(&inner).expect("read"), Some(oid(1)));
+        }
+        Err(err) => {
+            assert!(
+                !matches!(err, ApplyError::LostRace { .. }),
+                "a name conflict is permanent, not a retryable lost race: {err}"
+            );
+            assert_eq!(
+                store.read(&outer).expect("read"),
+                None,
+                "a refused batch must publish no part of itself"
+            );
+            assert_eq!(
+                store.read(&inner).expect("read"),
+                None,
+                "a refused batch must publish no part of itself"
+            );
+        }
+    }
+}
+
+/// The same all-or-nothing rule when the nested ref already exists on disk
+/// and the batch would create the outer ref over it: the outer rename lands
+/// on a directory, so the whole batch must be refused rather than leave the
+/// batch's other refs published.
+fn nested_ref_already_on_disk_batch_is_all_or_nothing<S: RefStore>(
+    store: &S,
+    oid: impl Fn(u32) -> ObjectId,
+) {
+    let outer = RefName::new("refs/store/overdisk").expect("valid name");
+    let inner = RefName::new("refs/store/overdisk/leaf").expect("valid name");
+    let sibling = RefName::new("refs/store/cobatch").expect("valid name");
+
+    store
+        .apply(RefEdit::Create {
+            name: inner.clone(),
+            new: oid(1),
+        })
+        .expect("seed the nested ref");
+
+    let result = store.apply_batch(vec![
+        RefEdit::Create {
+            name: sibling.clone(),
+            new: oid(2),
+        },
+        RefEdit::Create {
+            name: outer.clone(),
+            new: oid(3),
+        },
+    ]);
+
+    match result {
+        Ok(()) => {
+            // A flat-key backend can shadow the nested ref with the outer one.
+            assert_eq!(store.read(&sibling).expect("read"), Some(oid(2)));
+            assert_eq!(store.read(&outer).expect("read"), Some(oid(3)));
+        }
+        Err(err) => {
+            assert!(
+                !matches!(err, ApplyError::LostRace { .. }),
+                "a name conflict is permanent, not a retryable lost race: {err}"
+            );
+            assert_eq!(
+                store.read(&sibling).expect("read"),
+                None,
+                "a refused batch must publish no part of itself"
+            );
+            assert_eq!(store.read(&outer).expect("read"), None);
+            assert_eq!(store.read(&inner).expect("read"), Some(oid(1)));
+        }
+    }
+}
+
 fn committer_signature_is_usable<S: RefStore + Committer>(
     store: &S,
     _oid: impl Fn(u32) -> ObjectId,
@@ -393,6 +490,8 @@ conformance_tests! {
     prefixed_returns_ascending_order,
     prefixed_respects_segment_boundary,
     prefixed_empty_when_nothing_under_prefix,
+    nested_ref_batch_is_all_or_nothing,
+    nested_ref_already_on_disk_batch_is_all_or_nothing,
     committer_signature_is_usable,
     author_signature_is_usable,
 }
