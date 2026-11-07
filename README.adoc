@@ -77,8 +77,9 @@ schema/value/document failures.
 
 `document publish` requires `--expected absent` or `--expected <full-oid>`. The
 expectation applies to the canonical ref unless `--alias` is supplied, in which
-case it applies to that alias. The canonical ref, alias, and materialized index
-advance in one CAS batch. A stale expectation fails without retry; objects
+case it applies to that alias. The selected ref — the alias when one is given,
+otherwise the content-derived canonical ref — and the materialized index advance
+in one CAS batch. A stale expectation fails without retry; objects
 written before a lost CAS may remain unreachable. Scripts own retry, resume,
 and conflict policy.
 
@@ -88,8 +89,7 @@ ref. `get <kind> <name>` resolves a name first, and accepts Git revision
 suffixes on it (`carbonara~1`, `carbonara@{yesterday}`, `carbonara@<oid>`); it
 also reports the publication commit, so a caller holds the compare-and-swap
 token for the value it just read. The `rm <kind> <name>` command publishes a
-typed tombstone over the canonical ref and any alias that points at that
-publication; it does not hard-delete the refs. `get` reports a tombstoned entity as deleted and a missing ref as absent,
+typed tombstone over that name's ref; it does not hard-delete the ref. `get` reports a tombstoned entity as deleted and a missing ref as absent,
 while repeated `rm` reports `already deleted` and `rm` of an absent ref fails.
 
 New commits do not write `Schema:`, `Schema-Version:`, or `Ents-Ref:` trailers,
@@ -111,10 +111,13 @@ materialized index. `read` returns that state; project it with `value()` when
 `Absent` and `Deleted` may both collapse to `None`, and match on
 `EntityState` when the distinction matters.
 
-Writing the same bound content after deletion restores the original canonical
-entity: a normal value commit is appended after the tombstone, and aliases that
-were pointing at that tombstone are restored atomically. Writing different
-content creates a new `EntityId`; the old ID remains deleted. There is no CLI
+Writing the same bound content after deletion recreates the same entity: the
+content hashes to the same `EntityId`, so republishing it appends a normal value
+commit after the tombstone at the same ref, and that ref and the materialized
+index advance together in one CAS batch. Writing different content at that name
+creates a new `EntityId`; the old ID remains deleted. Alias restoration is not
+implemented — republishing does not scan for other refs left pointing at the
+tombstone and repoint them. There is no CLI
 restore command—recreation/restoration is performed through the library write
 APIs.
 
