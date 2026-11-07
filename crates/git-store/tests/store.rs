@@ -119,6 +119,26 @@ struct Colliding {
     schema: String,
 }
 
+/// A user type whose name *and* structure are identical to
+/// [`git_store::Tombstone`] — a plausible domain name in a forge. It must not
+/// be reclassified as a deletion marker by schema coincidence (claim S3).
+mod user_tombstone {
+    use facet::Facet;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+    #[repr(u8)]
+    pub enum TombstoneState {
+        Deleted,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Facet)]
+    pub struct Tombstone {
+        pub state: TombstoneState,
+        pub kind: String,
+        pub entity: String,
+    }
+}
+
 #[test]
 fn embedded_document_decodes_without_a_kind_or_publication_ref() {
     let store = store();
@@ -1088,6 +1108,30 @@ fn typed_delete_is_distinct_idempotent_and_restorable() {
         }
         other => panic!("expected restored value, got {other:?}"),
     }
+}
+
+/// A user schema that happens to be structurally identical to the compiled-in
+/// [`git_store::Tombstone`] schema must not make ordinary documents read as
+/// deleted: a live value of a user type named `Tombstone` stays a live value.
+#[test]
+fn a_user_type_named_like_the_tombstone_is_not_a_deletion() {
+    let store = store();
+    let kind = store.kind::<user_tombstone::Tombstone>(seg("counter"));
+    kind.publish().unwrap();
+
+    let doc = user_tombstone::Tombstone {
+        state: user_tombstone::TombstoneState::Deleted,
+        kind: "counter".to_owned(),
+        entity: "0123456789012345678901234567890123456789".to_owned(),
+    };
+    let id = kind.put_entity(&doc).unwrap();
+
+    match kind.read(id).unwrap() {
+        EntityState::Present(entry) => assert_eq!(entry.value, doc),
+        other => panic!("live user document was read as {other:?}"),
+    }
+    assert_eq!(kind.list().unwrap(), vec![entity_id_name(id)]);
+    assert_eq!(kind.entries().unwrap().len(), 1);
 }
 
 #[test]

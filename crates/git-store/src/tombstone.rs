@@ -135,8 +135,21 @@ impl<V> EntityState<V> {
     }
 }
 
+/// The reserved `kind` label written into every canonical tombstone schema.
+///
+/// It is deliberately *not* the shape name `Tombstone`. A schema produced by
+/// `facet` from a user type always carries `kind` equal to its root
+/// definition's `ref` name — the shape's effective name — so a label that
+/// differs from that root name cannot be produced by *deriving* `Facet` on any
+/// user type, not even one literally named `Tombstone`. Breaking that
+/// `kind == root-ref-name` invariant is what keeps an ordinary user document
+/// from being misread as a deletion by schema coincidence.
+const TOMBSTONE_SCHEMA_LABEL: &str = "git-store.tombstone";
+
 pub(crate) fn schema() -> Result<Schema, Error> {
-    Ok(schema_of::<Tombstone>()?)
+    let mut doc = schema_of::<Tombstone>()?;
+    doc.kind = TOMBSTONE_SCHEMA_LABEL.to_owned();
+    Ok(doc)
 }
 
 pub(crate) fn write<R, O>(store: &Store<R, O>, tombstone: &Tombstone) -> Result<ObjectId, Error>
@@ -154,11 +167,13 @@ where
 /// Return `None` for an ordinary document and decode a tombstone document
 /// before any kind schema-history lookup can occur.
 ///
-/// The schema does carry an embedded `kind` label — the effective name of the
-/// shape it was derived from, `Tombstone` here — so a tombstone is recognized
-/// by its schema being exactly the canonical [`Tombstone`] schema this library
-/// compiles in, that label included. Any other schema, even one differing only
-/// in the label, names an ordinary value.
+/// A tombstone is recognized by its schema being exactly the canonical
+/// [`Tombstone`] schema this library compiles in, byte for byte. That schema
+/// carries a reserved `kind` label ([`TOMBSTONE_SCHEMA_LABEL`]) that is *not*
+/// the shape name: a schema derived from a user type always carries `kind`
+/// equal to its own root definition's name, so no `Facet`-derived user schema —
+/// not even one from a user type named `Tombstone` with the same fields — can
+/// reproduce the canonical one. Any other schema names an ordinary value.
 pub(crate) fn read<R, O>(
     store: &Store<R, O>,
     root: &ObjectId,

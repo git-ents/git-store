@@ -387,6 +387,14 @@ caller-chosen name to its content-derived id. The tombstone MUST use the bound
 document frame (link:#envelope) and carry an explicit deleted state, kind, and
 the `EntityId` the ref addressed when it was deleted. A repeated deletion MUST
 be distinguishable from an absent entity.
+
+A tombstone MUST be recognized by exact equality with a canonical tombstone
+schema whose embedded `kind` label (link:#schema.representation) is a reserved
+wire name — not the `Tombstone` shape name. A schema derived by `facet` from a
+user type carries `kind` equal to that type's own root definition name, so a
+reserved label that differs from the root name is not producible by deriving
+`Facet` on any user type, even one named `Tombstone`; this MUST keep an ordinary
+user document from being misread as a deletion by schema coincidence.
 --
 
 [role="requirement", id="plumbing.inspect"]
