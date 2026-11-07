@@ -86,15 +86,16 @@ impl<'s, R, O> Transaction<'s, R, O> {
     /// Publish the document just staged by [`publish`](Self::publish) at
     /// `name` instead of its canonical entity ref.
     ///
-    /// # Panics
-    ///
-    /// Panics if no [`publish`](Self::publish) call immediately precedes it.
-    pub fn alias(mut self, name: RefPath) -> Self {
+    /// Returns [`Error::AliasWithoutPublish`] if the most recently staged
+    /// operation is not the [`publish`](Self::publish) it would redirect — a
+    /// `publish` must immediately precede `alias`. The builder is returned
+    /// unchanged so the caller can recover and continue.
+    pub fn alias(mut self, name: RefPath) -> Result<Self, Error> {
         match self.staged.last_mut() {
             Some(Staged::Publish(publish)) => publish.alias = Some(name),
-            _ => panic!("Transaction::alias must immediately follow Transaction::publish"),
+            _ => return Err(Error::AliasWithoutPublish),
         }
-        self
+        Ok(self)
     }
 
     /// Stage a typed tombstone over `id`'s canonical ref under `kind`,

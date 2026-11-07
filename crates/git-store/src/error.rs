@@ -257,6 +257,12 @@ pub enum Error {
         /// The number of compare-and-swap attempts made before giving up.
         attempts: u32,
     },
+    /// [`Transaction::alias`](crate::Transaction::alias) was called when the
+    /// last operation staged by the [`Transaction`](crate::Transaction) is not
+    /// a [`publish`](crate::Transaction::publish), so there is no publication
+    /// to redirect. `alias` must immediately follow the `publish` it renames.
+    #[error("Transaction::alias must immediately follow Transaction::publish")]
+    AliasWithoutPublish,
     /// A backend failure from the ref store or object store.
     #[error(transparent)]
     Backend(Box<dyn std::error::Error + Send + Sync + 'static>),

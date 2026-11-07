@@ -2309,6 +2309,45 @@ fn transaction_stale_expectation_leaves_every_staged_ref_untouched() {
     assert_eq!(a.read(existing).unwrap().value(), Some(value!({ "n": 1 })));
 }
 
+#[test]
+fn transaction_alias_without_publish_is_a_typed_error() {
+    let store = store();
+    // No publish precedes the alias, so there is nothing to redirect. This
+    // used to abort the caller's process; it is now a recoverable error.
+    let err = store
+        .transaction("alias")
+        .alias(entity("name"))
+        .err()
+        .expect("alias without a preceding publish must fail");
+    assert!(matches!(err, Error::AliasWithoutPublish), "{err:?}");
+}
+
+#[test]
+fn transaction_alias_redirects_the_preceding_publish() {
+    let store = store();
+    let a = store.dynamic(seg("a"));
+    a.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    let doc = DocumentTree::from(a.compile(&value!({ "n": 7 })).unwrap());
+
+    let publications = store
+        .transaction("aliased publish")
+        .publish(&seg("a"), doc, Expectation::Absent)
+        .alias(entity("custom-name"))
+        .unwrap()
+        .commit()
+        .unwrap();
+
+    assert_eq!(publications.len(), 1);
+    // The document landed under the alias, not its content-derived name.
+    let entries = a.list_entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, entity("custom-name"));
+    assert_eq!(
+        a.read(entity("custom-name")).unwrap().value(),
+        Some(value!({ "n": 7 }))
+    );
+}
+
 // --- fault-injecting RefStore: the no-op publication's compare-and-swap ---
 
 /// A competing write to land the moment a watched ref is read, plus the

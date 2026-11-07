@@ -605,7 +605,8 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         | git_store::Error::UnsupportedObjectFormat { .. } => ExitClass::Other,
         git_store::Error::DuplicateParent { .. }
         | git_store::Error::InvalidIdentity { .. }
-        | git_store::Error::DocumentRootNotStruct { .. } => ExitClass::Invalid,
+        | git_store::Error::DocumentRootNotStruct { .. }
+        | git_store::Error::AliasWithoutPublish => ExitClass::Invalid,
         git_store::Error::Doctor(_) => ExitClass::Other,
     }
 }
@@ -1056,7 +1057,7 @@ fn document_publish_batch(
             parse_expectation(&record.expected)?,
         );
         if let Some(alias) = &record.alias {
-            transaction = transaction.alias(entity(alias)?);
+            transaction = transaction.alias(entity(alias)?)?;
         }
         kinds.push(record.kind.clone());
     }
