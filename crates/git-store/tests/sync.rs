@@ -28,9 +28,15 @@ fn schema_is_send_and_sync() {
 
 #[test]
 fn store_is_sync_when_backends_are_sync() {
-    // No production object store in this workspace is itself `Sync`:
-    // `facet_git_tree::ObjectStore` and `gix::OdbHandle` are both
-    // `RefCell`-backed. `SyncObjectStore` is a test-local `Mutex` wrapper
+    // No production object store in this workspace can serve a `Sync` store,
+    // for two different reasons. `facet_git_tree::ObjectStore` is
+    // `RefCell`-backed and so `!Sync`, but it is still `Send` — which is why
+    // the `Mutex` wrapper below works: `Mutex<T>` is `Sync` whenever `T: Send`.
+    // `gix::OdbHandle` is not fixable the same way. Built without `gix-odb`'s
+    // `parallel` feature it holds its pack store behind an `Rc`, so it is
+    // `!Send`, and no `Mutex` around a `!Send` type can be `Sync`. A
+    // repo-backed `Store` therefore stays `!Sync` without a dependency change
+    // or a backend change. `SyncObjectStore` is a test-local `Mutex` wrapper
     // around the in-memory object store; it is the concrete `Sync` backend
     // used to exercise the concurrency path below.
     assert_sync::<Store<MemoryRefStore, SyncObjectStore>>();
