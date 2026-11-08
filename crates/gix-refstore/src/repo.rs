@@ -192,7 +192,10 @@ impl<'r> GixRefStore<'r> {
     /// once the first has created the clashing name, leaving earlier refs of
     /// the batch already published. git cannot represent the pair, so reject
     /// the whole batch up front rather than commit part of it.
-    fn ensure_namespace_representable(&self, edits: &[RefEdit]) -> Result<(), ApplyError<GixError>> {
+    fn ensure_namespace_representable(
+        &self,
+        edits: &[RefEdit],
+    ) -> Result<(), ApplyError<GixError>> {
         let renamed: Vec<&RefName> = edits
             .iter()
             .filter(|edit| matches!(edit, RefEdit::Create { .. } | RefEdit::Update { .. }))
