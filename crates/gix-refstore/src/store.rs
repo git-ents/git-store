@@ -96,6 +96,25 @@ pub trait RefStore {
     fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>>;
 }
 
+/// Forward a [`RefStore`] through a shared reference, so a decorator such as
+/// [`AsOfRefStore`](crate::AsOfRefStore) can borrow the store it wraps instead
+/// of taking ownership of it.
+impl<S: RefStore + ?Sized> RefStore for &S {
+    type Error = S::Error;
+
+    fn read(&self, name: &RefName) -> Result<Option<ObjectId>, Self::Error> {
+        (**self).read(name)
+    }
+
+    fn prefixed(&self, prefix: &RefPrefix) -> Result<Vec<(RefName, ObjectId)>, Self::Error> {
+        (**self).prefixed(prefix)
+    }
+
+    fn apply_batch(&self, edits: Vec<RefEdit>) -> Result<(), ApplyError<Self::Error>> {
+        (**self).apply_batch(edits)
+    }
+}
+
 /// The identity to attribute writes to.
 ///
 /// Separate from [`RefStore`] because a store's refs and a repository's

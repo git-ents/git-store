@@ -712,6 +712,34 @@ fn read_addresses_include_entity_id() {
     );
 }
 
+/// Reading a named entity through an as-of view answers the override — a ref
+/// pointed at a different publication — while the underlying store keeps its
+/// real state.
+#[test]
+fn as_of_view_answers_overrides_without_touching_the_store() {
+    let store = store();
+    let kind = store.dynamic(seg("counter"));
+    kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
+    kind.put(&entity("c"), &value!({ "n": 1 })).unwrap();
+    let elsewhere = kind.put(&entity("d"), &value!({ "n": 2 })).unwrap();
+
+    // Read `c` as though it pointed at the publication under `d`.
+    let view = store.as_of([(kind.reference(&entity("c")), Some(elsewhere))]);
+    assert_eq!(
+        view.dynamic(seg("counter"))
+            .read(entity("c"))
+            .unwrap()
+            .value(),
+        Some(value!({ "n": 2 }))
+    );
+
+    // The view's read left the real store's ref exactly where it was.
+    assert_eq!(
+        kind.read(entity("c")).unwrap().value(),
+        Some(value!({ "n": 1 }))
+    );
+}
+
 #[test]
 fn tombstone_reads_without_the_schema_publication_ref() {
     let store = store();

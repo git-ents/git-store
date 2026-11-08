@@ -9,8 +9,8 @@ use facet_git_tree::{Schema, deserialize, validate_with_schema};
 use facet_value::Value;
 use gix::objs::{Find, Write, WriteTo};
 use gix_refstore::{
-    ApplyError, Committer, ErasedSigner, Expectation, GixRefStore, RefEdit, RefName, RefPath,
-    RefPrefix, RefSegment, RefStore, SignatureBytes, Signer,
+    ApplyError, AsOfRefStore, Committer, ErasedSigner, Expectation, GixRefStore, RefEdit, RefName,
+    RefPath, RefPrefix, RefSegment, RefStore, SignatureBytes, Signer,
 };
 
 use crate::document::{DocumentInspection, DocumentShapeError, PreparedDocument};
@@ -234,6 +234,29 @@ where
     /// The object database backing this store.
     pub fn objects(&self) -> &O {
         &self.objects
+    }
+
+    /// A read-only view of this store's refs as though `overrides` held,
+    /// sharing this store's object database and layout.
+    ///
+    /// An override maps a ref [`RefName`] to `Some(id)` — as if it held `id` —
+    /// or `None` — as if it did not exist. Reads through the returned store
+    /// see the overrides folded over this store's real refs and, everywhere
+    /// else, this store's state unchanged; this store is not written and no
+    /// ref moves. The view is read-only: a publication through it fails rather
+    /// than writing.
+    pub fn as_of(
+        &self,
+        overrides: impl IntoIterator<Item = (RefName, Option<ObjectId>)>,
+    ) -> Store<AsOfRefStore<&R>, &O> {
+        Store::with_layout(
+            AsOfRefStore::new(&self.refs, overrides),
+            &self.objects,
+            Layout {
+                data: self.layout.data.clone(),
+                schema: self.layout.schema.clone(),
+            },
+        )
     }
 
     pub(crate) fn schema(&self, tree: ObjectId) -> Result<Arc<Schema>, Error> {
