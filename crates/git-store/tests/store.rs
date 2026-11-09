@@ -700,7 +700,8 @@ fn read_addresses_include_entity_id() {
         other => panic!("expected a commit, got {other:?}"),
     };
     let name = entity("alias");
-    kind.put_with_alias(&name, &value!({ "n": 1 })).unwrap();
+    kind.put_entity_with_alias(&name, &value!({ "n": 1 }))
+        .unwrap();
     let expected = Some(value!({ "n": 1 }));
 
     assert_eq!(kind.read(At::Name(name)).unwrap().value(), expected);
@@ -908,7 +909,7 @@ fn legacy_schema_and_provenance_trailers_are_ignored() {
 }
 
 /// A commit whose tree is not a `.schema`-bound document — anything not
-/// written by [`git_store::Kind::put`]/[`git_store::kind::Put::anonymous`],
+/// written by [`git_store::Kind::put`]/[`git_store::kind::Put::by_commit`],
 /// including every commit predating subtree binding — is diagnosable instead
 /// of collapsing through the catch-all `Error::Backend`.
 #[test]
@@ -1039,11 +1040,11 @@ fn retrieve_at_reports_a_subtree_object_that_is_not_present() {
     );
 }
 
-/// [`git_store::kind::Put::anonymous`] binds the schema by subtree exactly as
+/// [`git_store::kind::Put::by_commit`] binds the schema by subtree exactly as
 /// [`git_store::Kind::put`] does — its commit is written before any ref, so a
 /// regression there would be invisible to the ref-based tests.
 #[test]
-fn store_anonymous_binds_the_schema_by_subtree() {
+fn by_commit_binds_the_schema_by_subtree() {
     let store = store();
 
     store
@@ -1064,7 +1065,7 @@ fn store_anonymous_binds_the_schema_by_subtree() {
     let commit = store
         .dynamic(seg("counter"))
         .write(&counter)
-        .anonymous()
+        .by_commit()
         .unwrap();
 
     // Bound to the very same schema tree object, not a copy of it.
@@ -1075,7 +1076,7 @@ fn store_anonymous_binds_the_schema_by_subtree() {
     let bound_schema = root.iter().find(|e| e.filename == ".schema").unwrap().oid;
     assert_eq!(
         bound_schema, schema_tree,
-        "store_anonymous must share the schema tree, not duplicate it"
+        "by_commit must share the schema tree, not duplicate it"
     );
     // And self-contained: readable with no consultation of refs/schema/*.
     assert_eq!(
@@ -1572,7 +1573,7 @@ fn republishing_over_a_tombstone_restores_the_name_and_materialized_views() {
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let name = entity("legacy/counter");
     let value = value!({ "n": 1 });
-    let id = kind.put_with_alias(&name, &value).unwrap();
+    let id = kind.put_entity_with_alias(&name, &value).unwrap();
 
     let tombstone_commit = match kind.delete_name(&name).unwrap() {
         DeleteResult::Deleted(entry) => entry.commit,
@@ -1581,7 +1582,7 @@ fn republishing_over_a_tombstone_restores_the_name_and_materialized_views() {
     assert!(kind.list().unwrap().is_empty());
     assert!(kind.entries().unwrap().is_empty());
 
-    assert_eq!(kind.put_with_alias(&name, &value).unwrap(), id);
+    assert_eq!(kind.put_entity_with_alias(&name, &value).unwrap(), id);
     let restored_commit = match kind.read(name.clone()).unwrap() {
         EntityState::Present(entry) => {
             assert_eq!(entry.value, value);
@@ -1625,7 +1626,8 @@ fn hard_deleted_name_stays_absent_across_listing_and_read() {
     let kind = store.dynamic(seg("counter"));
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let name = entity("gone");
-    kind.put_with_alias(&name, &value!({ "n": 1 })).unwrap();
+    kind.put_entity_with_alias(&name, &value!({ "n": 1 }))
+        .unwrap();
     assert!(kind.remove(&name).unwrap());
 
     assert!(matches!(
@@ -1647,7 +1649,8 @@ fn listing_surfaces_a_ref_pointing_at_a_missing_object() {
     let kind = store.dynamic(seg("counter"));
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let name = entity("orphan");
-    kind.put_with_alias(&name, &value!({ "n": 1 })).unwrap();
+    kind.put_entity_with_alias(&name, &value!({ "n": 1 }))
+        .unwrap();
 
     let reference = kind.reference(&name);
     let current = store.refs().read(&reference).unwrap().unwrap();
@@ -1684,7 +1687,9 @@ fn listing_surfaces_a_ref_whose_tip_is_a_foreign_kind_tombstone() {
         .put(&schema_of::<Counter>().unwrap())
         .unwrap();
     let name = entity("borrowed");
-    counter.put_with_alias(&name, &value!({ "n": 1 })).unwrap();
+    counter
+        .put_entity_with_alias(&name, &value!({ "n": 1 }))
+        .unwrap();
 
     let gadget = store.dynamic(seg("gadget"));
     gadget
@@ -1790,12 +1795,12 @@ fn typed_and_dynamic_kinds_interoperate_over_the_same_refs() {
     let typed_commit = store
         .kind::<Recipe>(seg("recipe"))
         .write(&carbonara)
-        .anonymous()
+        .by_commit()
         .unwrap();
     let dynamic_commit = store
         .dynamic(seg("recipe"))
         .write(&carbonara_value)
-        .anonymous()
+        .by_commit()
         .unwrap();
     assert_eq!(
         typed_commit, dynamic_commit,
@@ -1935,9 +1940,6 @@ fn a_read_entry_carries_the_commit_and_message_it_was_written_with() {
     assert_eq!(earlier.message, "store counter/c");
 }
 
-/// [`git_store::kind::Put::anonymous`] derives the canonical entity ref from
-/// the complete document tree, so writing identical content twice is
-/// idempotent even though it returns a commit id.
 /// Identity is derived from the complete bound document, so the same content
 /// published under two names has one id and two independent refs.
 #[test]
@@ -1950,12 +1952,12 @@ fn content_identity_is_shared_across_names() {
     let first = kind
         .write(&value)
         .message("first metadata")
-        .with_alias(&entity("first"))
+        .entity_with_alias(&entity("first"))
         .unwrap();
     let second = kind
         .write(&value)
         .message("different metadata")
-        .with_alias(&entity("second"))
+        .entity_with_alias(&entity("second"))
         .unwrap();
 
     assert_eq!(first, second, "the bound document is the identity input");
@@ -2029,7 +2031,7 @@ fn republishing_identical_content_under_a_name_is_idempotent() {
     assert_eq!(kind.history(&name).unwrap(), vec![first_commit]);
 }
 #[test]
-fn anonymous_write_of_identical_content_twice_is_idempotent() {
+fn by_commit_write_of_identical_content_twice_is_idempotent() {
     let store = store();
     store
         .dynamic(seg("counter"))
@@ -2041,21 +2043,21 @@ fn anonymous_write_of_identical_content_twice_is_idempotent() {
     let first = store
         .dynamic(seg("counter"))
         .write(&value)
-        .anonymous()
+        .by_commit()
         .unwrap();
     let second = store
         .dynamic(seg("counter"))
         .write(&value)
-        .anonymous()
+        .by_commit()
         .unwrap();
     assert_eq!(first, second);
 }
 
-/// The compatibility `entity_name` helper still resolves the old anonymous
-/// commit-named alias, while the canonical ref is based on the complete bound
+/// The compatibility `entity_name` helper still resolves the old commit-named
+/// alias, while the canonical ref is based on the complete bound
 /// document tree rather than the publication commit.
 #[test]
-fn anonymous_names_an_entity_by_its_whole_commit_id() {
+fn by_commit_names_an_entity_by_its_whole_commit_id() {
     let store = store();
     store
         .dynamic(seg("counter"))
@@ -2066,7 +2068,7 @@ fn anonymous_names_an_entity_by_its_whole_commit_id() {
     let commit = store
         .dynamic(seg("counter"))
         .write(&value!({ "n": 1 }))
-        .anonymous()
+        .by_commit()
         .unwrap();
 
     let name = entity_name(commit);
@@ -2074,11 +2076,11 @@ fn anonymous_names_an_entity_by_its_whole_commit_id() {
     assert_eq!(store.dynamic(seg("counter")).list().unwrap(), vec![name]);
 }
 
-/// [`git_store::kind::Put::anonymous_under`] retains the old grouped
+/// [`git_store::kind::Put::by_commit_under`] retains the old grouped
 /// commit-named alias, so compatibility reads and `entity_name_under` continue
 /// to work while the canonical identity remains content-derived.
 #[test]
-fn anonymous_under_names_an_entity_by_group_and_whole_commit_id() {
+fn by_commit_under_names_an_entity_by_group_and_whole_commit_id() {
     let store = store();
     store
         .dynamic(seg("counter"))
@@ -2090,7 +2092,7 @@ fn anonymous_under_names_an_entity_by_group_and_whole_commit_id() {
     let commit = store
         .dynamic(seg("counter"))
         .write(&value!({ "n": 1 }))
-        .anonymous_under(&group)
+        .by_commit_under(&group)
         .unwrap();
 
     let name = entity_name_under(&group, commit);
@@ -2372,12 +2374,12 @@ fn try_update_does_not_clobber_a_write_that_lands_during_rebuild() {
     );
 }
 
-/// A [`Put::anonymous`] whose first `Create` loses to spurious backend
+/// A [`Put::by_commit`] whose first `Create` loses to spurious backend
 /// contention — nothing actually landed — retries the very same create
 /// rather than reporting a collision: the name is still free, so there is
 /// nothing to have collided with.
 #[test]
-fn anonymous_retries_to_success_on_pure_contention() {
+fn by_commit_retries_to_success_on_pure_contention() {
     let store = flaky_store();
     store
         .dynamic(seg("counter"))
@@ -2389,7 +2391,7 @@ fn anonymous_retries_to_success_on_pure_contention() {
     let commit = store
         .dynamic(seg("counter"))
         .write(&value!({ "n": 1 }))
-        .anonymous()
+        .by_commit()
         .unwrap();
     assert_eq!(
         store

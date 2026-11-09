@@ -125,7 +125,7 @@ APIs.
 
 `Kind::read` takes an `At` address — a name, an `EntityId`, a commit, or a
 bound tree — so the content-derived identity and the caller-chosen name reach
-the same reads. Prefer `put_entity`, `put_with_alias`, `compile_entity`, and
+the same reads. Prefer `put_entity`, `put_entity_with_alias`, `compile_entity`, and
 `entity_reference` when the content-derived identity is part of the
 contract. `refs/schema/<publication>` remains a
 schema publication/history ref, not the type definition of an existing

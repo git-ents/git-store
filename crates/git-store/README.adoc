@@ -293,13 +293,13 @@ let recipes = store.kind::<Recipe>(RefSegment::new("recipe")?);
 // the type definition: stored documents carry their own schema tree.
 recipes.publish()?;
 
-// The name is the ref. `put_with_alias` returns the content-derived
-// `EntityId` instead of the publication commit.
-let id = recipes.put_with_alias(
-    &RefPath::new("carbonara")?,
-    &Recipe { title: "Carbonara".into(), serves: 4 },
-)?;
-match recipes.read(id)? {
+// The name is the ref. `put_entity_with_alias` returns the content-derived
+// `EntityId` instead of the publication commit, and creates only that one
+// ref — so the value is read back by its name, not by the id.
+let carbonara = Recipe { title: "Carbonara".into(), serves: 4 };
+let id = recipes.put_entity_with_alias(&RefPath::new("carbonara")?, &carbonara)?;
+assert_eq!(id, recipes.compile_entity(&carbonara)?);
+match recipes.read(&RefPath::new("carbonara")?)? {
     EntityState::Present(entry) => assert_eq!(entry.value.serves, 4),
     EntityState::Absent | EntityState::Deleted(_) => unreachable!(),
 }

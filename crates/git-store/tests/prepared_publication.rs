@@ -122,14 +122,16 @@ fn stale_explicit_expectation_is_not_retried_or_published() {
         .put(&facet_git_tree::schema_of::<Counter>().unwrap())
         .unwrap();
     let alias = path("friendly");
-    kind.put_with_alias(&alias, &value!({ "n": 1 })).unwrap();
+    kind.put_entity_with_alias(&alias, &value!({ "n": 1 }))
+        .unwrap();
     let old_commit = kind
         .read(&alias)
         .map(|state| state.present())
         .unwrap()
         .unwrap()
         .commit;
-    kind.put_with_alias(&alias, &value!({ "n": 2 })).unwrap();
+    kind.put_entity_with_alias(&alias, &value!({ "n": 2 }))
+        .unwrap();
     let tree = kind.compile(&value!({ "n": 3 })).unwrap();
     let prepared = prepared(&store, tree);
 
