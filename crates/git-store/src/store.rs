@@ -287,13 +287,13 @@ where
     }
 
     /// A handle on the kind `name`, whose values are `T`.
-    pub fn kind<T: for<'a> Facet<'a>>(&self, name: RefSegment) -> Kind<'_, Typed<T>, R, O> {
+    pub fn kind<T: for<'a> Facet<'a>>(&self, name: RefSegment) -> Kind<'_, Typed<T>, Self> {
         self.kind_with(name)
     }
 
     /// A handle on the kind `name`, whose values are read and written as
     /// [`facet_value::Value`] under the kind's published schema.
-    pub fn dynamic(&self, name: RefSegment) -> Kind<'_, Dynamic, R, O> {
+    pub fn dynamic(&self, name: RefSegment) -> Kind<'_, Dynamic, Self> {
         self.kind_with(name)
     }
 
@@ -468,7 +468,7 @@ where
     }
 
     /// A handle on the kind `name` under a caller-supplied tree [`Encoding`].
-    pub fn kind_with<E: Encoding>(&self, name: RefSegment) -> Kind<'_, E, R, O> {
+    pub fn kind_with<E: Encoding>(&self, name: RefSegment) -> Kind<'_, E, Self> {
         Kind::new(self, name)
     }
 

@@ -49,15 +49,15 @@ pub(crate) struct ResolvedPublish {
 }
 
 /// One kind: its schema ref and the entities beneath it.
-pub struct Kind<'s, E, R, O> {
-    store: &'s Store<R, O>,
+pub struct Kind<'s, E, S> {
+    store: &'s S,
     name: RefSegment,
     schema_ref: RefName,
     entities: RefPrefix,
     encoding: PhantomData<fn() -> E>,
 }
 
-impl<'s, E, R, O> Kind<'s, E, R, O>
+impl<'s, E, R, O> Kind<'s, E, Store<R, O>>
 where
     R: RefStore,
     O: Find,
@@ -75,7 +75,7 @@ where
     }
 }
 
-impl<'s, E: Encoding, R, O> Kind<'s, E, R, O>
+impl<'s, E: Encoding, R, O> Kind<'s, E, Store<R, O>>
 where
     R: RefStore,
     O: Find,
@@ -96,7 +96,7 @@ where
     }
 
     /// This kind's schema.
-    pub fn schema(&self) -> KindSchema<'s, R, O> {
+    pub fn schema(&self) -> KindSchema<'s, Store<R, O>> {
         KindSchema {
             store: self.store,
             kind: self.name.clone(),
@@ -156,7 +156,7 @@ where
 
     /// The general form of [`put`](Self::put): set a message, then choose a
     /// name.
-    pub fn write<'k>(&'k self, value: &'k E::Value) -> Put<'k, E, R, O>
+    pub fn write<'k>(&'k self, value: &'k E::Value) -> Put<'k, E, Store<R, O>>
     where
         R: Committer,
         O: Write,
@@ -1056,7 +1056,7 @@ where
     }
 }
 
-impl<'s, T: for<'a> Facet<'a>, R, O> Kind<'s, Typed<T>, R, O>
+impl<'s, T: for<'a> Facet<'a>, R, O> Kind<'s, Typed<T>, Store<R, O>>
 where
     R: RefStore,
     O: Find,
@@ -1090,13 +1090,13 @@ pub struct Entry<V> {
 pub type NamedEntries<V> = Vec<(RefPath, Entry<V>)>;
 
 /// A kind's schema ref.
-pub struct KindSchema<'s, R, O> {
-    pub(crate) store: &'s Store<R, O>,
+pub struct KindSchema<'s, S> {
+    pub(crate) store: &'s S,
     pub(crate) kind: RefSegment,
     pub(crate) reference: RefName,
 }
 
-impl<'s, R, O> KindSchema<'s, R, O>
+impl<'s, R, O> KindSchema<'s, Store<R, O>>
 where
     R: RefStore,
     O: Find,
@@ -1211,13 +1211,13 @@ pub fn entity_name_under(group: &RefPath, commit: ObjectId) -> RefPath {
 
 /// A pending write of one value. Consumed by [`at`](Self::at),
 /// [`canonical`](Self::canonical), or [`by_commit`](Self::by_commit).
-pub struct Put<'k, E: Encoding, R, O> {
-    kind: &'k Kind<'k, E, R, O>,
+pub struct Put<'k, E: Encoding, S> {
+    kind: &'k Kind<'k, E, S>,
     value: &'k E::Value,
     message: Option<String>,
 }
 
-impl<'k, E: Encoding, R, O> Put<'k, E, R, O>
+impl<'k, E: Encoding, R, O> Put<'k, E, Store<R, O>>
 where
     R: RefStore,
     O: Find,
@@ -1356,7 +1356,7 @@ fn update_fingerprint_bytes(hasher: &mut gix::hash::Hasher, bytes: &[u8]) {
 /// The tree and commit message a value builds down to, under `kind`'s
 /// current schema — shared by `Put`'s builders and [`Kind::update`].
 fn commit_body<E: Encoding, R, O>(
-    kind: &Kind<'_, E, R, O>,
+    kind: &Kind<'_, E, Store<R, O>>,
     value: &E::Value,
     summary: String,
 ) -> Result<(String, ObjectId), Error>

@@ -56,7 +56,7 @@ pub use gix_refstore::{
     RefName, RefPath, RefPrefix, RefSegment, RefStore, SignatureBytes, Signer,
 };
 
-impl<'s, R, O> KindSchema<'s, R, O>
+impl<'s, R, O> KindSchema<'s, Store<R, O>>
 where
     R: RefStore,
     O: gix::objs::Find,

@@ -43,7 +43,7 @@ use git_store::{
 };
 
 /// A handle on one kind, over the CLI's own repo-backed store.
-pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, GixRefStore<'r>, &'r gix::OdbHandle>;
+pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, RepoStore<'r>>;
 
 /// clap does not group subcommands natively, so the "Commands:" section is
 /// replaced wholesale by this layered listing: everyday porcelain, the
