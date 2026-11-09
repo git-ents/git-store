@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use facet_git_tree::ObjectId;
+use facet_git_tree::{HashFormat, ObjectId, Sha1, Tagged};
 use gix::objs::{Find, Write};
 use gix_refstore::{ApplyError, Committer, Expectation, RefEdit, RefPath, RefSegment, RefStore};
 
@@ -45,18 +45,24 @@ enum Staged {
 /// atomicity [`Kind::publish_prepared`](crate::Kind::publish_prepared) gives
 /// one entity, extended across entities and kinds. Build one with
 /// [`Store::transaction`](crate::Store::transaction).
-pub struct Transaction<'s, R, O> {
-    store: &'s Store<R, O>,
+pub struct Transaction<'s, R, O, F: HashFormat = Sha1> {
+    store: &'s Store<R, O, F>,
     message: String,
     staged: Vec<Staged>,
+    _format: std::marker::PhantomData<F>,
 }
 
-impl<'s, R, O> Transaction<'s, R, O> {
-    pub(crate) fn new(store: &'s Store<R, O>, message: String) -> Self {
+impl<'s, R, O, F> Transaction<'s, R, O, F>
+where
+    O: Find + Tagged<F>,
+    F: HashFormat,
+{
+    pub(crate) fn new(store: &'s Store<R, O, F>, message: String) -> Self {
         Self {
             store,
             message,
             staged: Vec::new(),
+            _format: std::marker::PhantomData,
         }
     }
 
@@ -110,7 +116,9 @@ impl<'s, R, O> Transaction<'s, R, O> {
     }
 }
 
-impl<'s, R: RefStore + Committer, O: Find + Write> Transaction<'s, R, O> {
+impl<'s, R: RefStore + Committer, O: Find + Write + Tagged<F>, F: HashFormat>
+    Transaction<'s, R, O, F>
+{
     /// Check every staged expectation, build one ref edit per touched entity
     /// plus one materialized-index update per touched kind, and apply them
     /// as a single [`RefStore::apply_batch`].

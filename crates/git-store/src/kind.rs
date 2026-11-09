@@ -4,7 +4,8 @@ use std::{marker::PhantomData, sync::Arc};
 
 use facet::Facet;
 use facet_git_tree::{
-    ObjectId, Schema, Sha1, check_universe, identity_subtrees, schema_of, serialize_into,
+    HashFormat, ObjectId, Schema, Tagged, check_universe, identity_subtrees, schema_of,
+    serialize_into,
 };
 use gix::objs::{Find, Write};
 use gix_refstore::{
@@ -57,12 +58,13 @@ pub struct Kind<'s, E, S> {
     encoding: PhantomData<fn() -> E>,
 }
 
-impl<'s, E, R, O> Kind<'s, E, Store<R, O>>
+impl<'s, E, R, O, F> Kind<'s, E, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
-    pub(crate) fn new(store: &'s Store<R, O>, name: RefSegment) -> Self {
+    pub(crate) fn new(store: &'s Store<R, O, F>, name: RefSegment) -> Self {
         let schema_ref = store.layout().schema.join(&name);
         let entities = store.layout().data.child(&name);
         Kind {
@@ -75,10 +77,11 @@ where
     }
 }
 
-impl<'s, E: Encoding, R, O> Kind<'s, E, Store<R, O>>
+impl<'s, E: Encoding, R, O, F> Kind<'s, E, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     /// This kind's name.
     pub fn name(&self) -> &RefSegment {
@@ -96,7 +99,7 @@ where
     }
 
     /// This kind's schema.
-    pub fn schema(&self) -> KindSchema<'s, Store<R, O>> {
+    pub fn schema(&self) -> KindSchema<'s, Store<R, O, F>> {
         KindSchema {
             store: self.store,
             kind: self.name.clone(),
@@ -156,7 +159,7 @@ where
 
     /// The general form of [`put`](Self::put): set a message, then choose a
     /// name.
-    pub fn write<'k>(&'k self, value: &'k E::Value) -> Put<'k, E, Store<R, O>>
+    pub fn write<'k>(&'k self, value: &'k E::Value) -> Put<'k, E, Store<R, O, F>>
     where
         R: Committer,
         O: Write,
@@ -235,7 +238,7 @@ where
                 message,
             }));
         }
-        let value = envelope::read_value::<Sha1, E, _>(root, &doc, &self.store.tagged())?;
+        let value = envelope::read_value::<F, E, _>(root, &doc, self.store.objects())?;
         Ok(EntityState::Present(Entry {
             value,
             commit,
@@ -281,7 +284,7 @@ where
     {
         let (schema_commit, doc) = self.current_schema()?;
         envelope::ensure_struct_root(&doc)?;
-        let value_tree = E::write(value, &doc, &self.store.tagged())?;
+        let value_tree = E::write(value, &doc, self.store.objects())?;
         let schema_tree = self.store.commit_tree(schema_commit)?;
         Ok((
             schema_commit,
@@ -1056,10 +1059,11 @@ where
     }
 }
 
-impl<'s, T: for<'a> Facet<'a>, R, O> Kind<'s, Typed<T>, Store<R, O>>
+impl<'s, T: for<'a> Facet<'a>, R, O, F> Kind<'s, Typed<T>, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     /// Publish the schema derived from `T`.
     pub fn publish(&self) -> Result<ObjectId, Error>
@@ -1096,10 +1100,11 @@ pub struct KindSchema<'s, S> {
     pub(crate) reference: RefName,
 }
 
-impl<'s, R, O> KindSchema<'s, Store<R, O>>
+impl<'s, R, O, F> KindSchema<'s, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     /// The ref this schema is published at.
     pub fn reference(&self) -> &RefName {
@@ -1131,7 +1136,7 @@ where
         let message = format!("schema {}\n", self.kind);
         self.store
             .commit_forward(&self.reference, &message, |_parent| {
-                Ok(serialize_into(doc, &self.store.tagged())?.into_raw())
+                Ok(serialize_into(doc, self.store.objects())?.into_raw())
             })
     }
 
@@ -1217,10 +1222,11 @@ pub struct Put<'k, E: Encoding, S> {
     message: Option<String>,
 }
 
-impl<'k, E: Encoding, R, O> Put<'k, E, Store<R, O>>
+impl<'k, E: Encoding, R, O, F> Put<'k, E, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     /// Use `summary` as the commit message instead of the default.
     ///
@@ -1355,14 +1361,15 @@ fn update_fingerprint_bytes(hasher: &mut gix::hash::Hasher, bytes: &[u8]) {
 
 /// The tree and commit message a value builds down to, under `kind`'s
 /// current schema — shared by `Put`'s builders and [`Kind::update`].
-fn commit_body<E: Encoding, R, O>(
-    kind: &Kind<'_, E, Store<R, O>>,
+fn commit_body<E: Encoding, R, O, F>(
+    kind: &Kind<'_, E, Store<R, O, F>>,
     value: &E::Value,
     summary: String,
 ) -> Result<(String, ObjectId), Error>
 where
     R: RefStore,
-    O: Find + Write,
+    F: HashFormat,
+    O: Find + Write + Tagged<F>,
 {
     let (_, tree) = kind.compile_with_schema(value)?;
     let message = format!("{summary}\n");

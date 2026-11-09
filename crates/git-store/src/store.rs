@@ -1,6 +1,7 @@
 //! [`Store`]: kinds, schemas, and entities as Git refs and commits.
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 use facet::Facet;
@@ -122,7 +123,7 @@ impl Default for Layout {
 ///
 /// Stored values retain the schema against which they were validated. Reads
 /// use that bound schema without consulting publication history.
-pub struct Store<R, O> {
+pub struct Store<R, O, F: HashFormat = Sha1> {
     refs: R,
     objects: O,
     layout: Layout,
@@ -135,6 +136,8 @@ pub struct Store<R, O> {
     /// content-addressed, so the duplicate is harmless and needs no
     /// invalidation.
     schemas: RwLock<HashMap<ObjectId, Arc<Schema>>>,
+    /// The object hash format every id this store handles uses.
+    _format: PhantomData<F>,
 }
 
 /// The extra commit header a signed write's bytes land in.
@@ -171,10 +174,11 @@ pub(crate) fn validate_commit_message(message: &str) -> Result<(), Error> {
     Ok(())
 }
 
-impl<R, O> Store<R, O>
+impl<R, O, F> Store<R, O, F>
 where
     R: RefStore,
-    O: Find,
+    O: Find + Tagged<F>,
+    F: HashFormat,
 {
     /// Open a store with the default `refs/store`/`refs/schema` [`Layout`].
     pub fn new(refs: R, objects: O) -> Self {
@@ -189,6 +193,7 @@ where
             layout,
             signer: None,
             schemas: RwLock::new(HashMap::new()),
+            _format: PhantomData,
         }
     }
 
@@ -206,7 +211,7 @@ where
     /// land as one all-or-nothing compare-and-swap batch. `message` is used
     /// as the commit message for every publication and tombstone the
     /// transaction writes.
-    pub fn transaction(&self, message: impl Into<String>) -> Transaction<'_, R, O>
+    pub fn transaction(&self, message: impl Into<String>) -> Transaction<'_, R, O, F>
     where
         R: Committer,
         O: Write,
@@ -249,26 +254,15 @@ where
     pub fn as_of(
         &self,
         overrides: impl IntoIterator<Item = (RefName, Option<ObjectId>)>,
-    ) -> Store<AsOfRefStore<&R>, &O> {
+    ) -> Store<AsOfRefStore<&R>, Backend<F, &O>, F> {
         Store::with_layout(
             AsOfRefStore::new(&self.refs, overrides),
-            &self.objects,
+            Backend::new(&self.objects),
             Layout {
                 data: self.layout.data.clone(),
                 schema: self.layout.schema.clone(),
             },
         )
-    }
-
-    /// This store's object database, wrapped in facet-git-tree's format-claiming
-    /// adapter for the duration of one schema-directed call.
-    ///
-    /// The store addresses objects by untyped [`ObjectId`]; facet-git-tree's
-    /// schema-directed entry points take a `Tagged<F>` backend so an id of one
-    /// format cannot be read out of an object database of the other. This crate
-    /// supports SHA-1 only, so the claim is [`Sha1`].
-    pub(crate) fn tagged(&self) -> Backend<Sha1, &O> {
-        Backend::new(&self.objects)
     }
 
     pub(crate) fn schema(&self, tree: ObjectId) -> Result<Arc<Schema>, Error> {
@@ -285,9 +279,9 @@ where
         // Decode outside the cache lock: a miss must not hold a read lock
         // while another thread computes the same schema, and a hit returns
         // the cached `Arc` without ever touching the object store.
-        let schema = Arc::new(deserialize::<Schema, Sha1, _>(
-            &typed::<Sha1>(tree)?,
-            &self.tagged(),
+        let schema = Arc::new(deserialize::<Schema, F, _>(
+            &typed::<F>(tree)?,
+            self.objects(),
         )?);
         self.schemas
             .write()
@@ -332,7 +326,7 @@ where
         schema_tree: SchemaTree,
     ) -> Result<Value, Error> {
         let doc = self.schema(schema_tree.object_id())?;
-        Dynamic::read::<Sha1, _>(&value_tree.object_id(), &doc, &self.tagged())
+        Dynamic::read::<F, _>(&value_tree.object_id(), &doc, self.objects())
     }
 
     /// Encode a dynamic value under an explicitly supplied schema subtree.
@@ -344,10 +338,10 @@ where
         O: Write,
     {
         let doc = self.schema(schema_tree.object_id())?;
-        Ok(ValueTree::from(Dynamic::write::<Sha1, _>(
+        Ok(ValueTree::from(Dynamic::write::<F, _>(
             value,
             &doc,
-            &self.tagged(),
+            self.objects(),
         )?))
     }
 
@@ -380,7 +374,7 @@ where
         }
         let doc = self.schema(schema_oid)?;
         ensure_struct_root(&doc)?;
-        validate_with_schema(&typed::<Sha1>(value_oid)?, &doc.checked()?, &self.tagged())?;
+        validate_with_schema(&typed::<F>(value_oid)?, &doc.checked()?, self.objects())?;
         let document_tree = self.bind_schema(value_oid, schema_oid)?;
         Ok(PreparedDocument {
             document_tree: DocumentTree::from(document_tree),
@@ -479,7 +473,7 @@ where
     }
 
     pub(crate) fn decode_with<E: Encoding>(&self, tree: ObjectId) -> Result<E::Value, Error> {
-        decode_with::<Sha1, E, _>(tree, &self.tagged())
+        decode_with::<F, E, _>(tree, self.objects())
     }
 
     /// A handle on the kind `name` under a caller-supplied tree [`Encoding`].
@@ -750,7 +744,7 @@ pub(crate) fn typed<F: HashFormat>(oid: ObjectId) -> Result<Oid<F>, Error> {
 
 /// Every ref name directly under `prefix` that is a single valid
 /// [`RefSegment`], ascending. A nested ref under the namespace is skipped
-/// rather than mis-reported.
+/// rather than misreported.
 pub(crate) fn list_segments<R: RefStore>(
     refs: &R,
     prefix: &RefPrefix,
@@ -764,18 +758,18 @@ pub(crate) fn list_segments<R: RefStore>(
 }
 
 /// A [`Store`] over a `gix` repository's own refs and object database.
-pub type RepoStore<'r> = Store<GixRefStore<'r>, &'r gix::OdbHandle>;
+pub type RepoStore<'r> = Store<GixRefStore<'r>, Backend<Sha1, &'r gix::OdbHandle>, Sha1>;
 
 impl<'r> RepoStore<'r> {
     /// Open a store over `repo`'s own refs and objects, with the default
     /// [`Layout`].
     pub fn open(repo: &'r gix::Repository) -> Self {
-        Store::new(GixRefStore::new(repo), &repo.objects)
+        Store::new(GixRefStore::new(repo), Backend::new(&repo.objects))
     }
 
     /// Open a store over `repo`'s own refs and objects, with a caller-supplied
     /// [`Layout`].
     pub fn open_with_layout(repo: &'r gix::Repository, layout: Layout) -> Self {
-        Store::with_layout(GixRefStore::new(repo), &repo.objects, layout)
+        Store::with_layout(GixRefStore::new(repo), Backend::new(&repo.objects), layout)
     }
 }

@@ -56,10 +56,11 @@ pub use gix_refstore::{
     RefName, RefPath, RefPrefix, RefSegment, RefStore, SignatureBytes, Signer,
 };
 
-impl<'s, R, O> KindSchema<'s, Store<R, O>>
+impl<'s, R, O, F> KindSchema<'s, Store<R, O, F>>
 where
     R: RefStore,
-    O: gix::objs::Find,
+    F: HashFormat,
+    O: gix::objs::Find + Tagged<F>,
 {
     /// Read the schema document stored by `commit` into an owned snapshot.
     ///

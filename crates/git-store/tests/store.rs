@@ -11,7 +11,8 @@ use std::rc::Rc;
 
 use facet::Facet;
 use facet_git_tree::{
-    GitObject, Node, ObjectStore, Oid, Schema, Sha1, TreeEntry, schema_of, serialize_into,
+    Backend, GitObject, HashFormat, Node, ObjectStore, Oid, Schema, Sha1, Tagged, TreeEntry,
+    schema_of, serialize_into,
 };
 use facet_value::value;
 use git_store::{
@@ -2615,15 +2616,16 @@ impl Committer for InjectOnReadRefStore {
 
 /// Write a commit object directly into `store`'s object database, without
 /// touching any ref — a fixture for a competing writer's commit.
-fn manual_commit<R, O>(
-    store: &Store<R, O>,
+fn manual_commit<R, O, F>(
+    store: &Store<R, O, F>,
     tree: ObjectId,
     parent: Option<ObjectId>,
     message: &str,
 ) -> ObjectId
 where
     R: RefStore + Committer,
-    O: gix::prelude::Find + gix::objs::Write,
+    F: HashFormat,
+    O: gix::prelude::Find + gix::objs::Write + Tagged<F>,
 {
     let signature = store.refs().signature().expect("fixed signature");
     let commit = gix::objs::Commit {
@@ -2888,7 +2890,7 @@ fn a_concurrent_writers_entry_is_not_lost_from_the_kind_index() {
     let refs = Rc::new(MemoryRefStore::new());
     let objects = Rc::new(ObjectStore::default());
     let racing = RacingRefs::new(Rc::clone(&refs));
-    let store = Store::new(racing.clone(), Rc::clone(&objects));
+    let store = Store::new(racing.clone(), Backend::<Sha1, _>::new(Rc::clone(&objects)));
     let counter = store.dynamic(seg("counter"));
     counter
         .schema()
@@ -2900,7 +2902,7 @@ fn a_concurrent_writers_entry_is_not_lost_from_the_kind_index() {
     // own `Store` — exactly when A first tries to apply.
     let (refs_b, objects_b) = (Rc::clone(&refs), Rc::clone(&objects));
     racing.arm(move || {
-        let writer = Store::new(RacingRefs::new(refs_b), objects_b);
+        let writer = Store::new(RacingRefs::new(refs_b), Backend::<Sha1, _>::new(objects_b));
         writer
             .dynamic(seg("counter"))
             .put(&entity("b"), &value!({ "n": 2 }))
@@ -2931,11 +2933,7 @@ fn a_concurrent_writers_entry_is_not_lost_from_the_kind_index() {
         .into_iter()
         .next()
         .unwrap();
-    let entries = store
-        .objects()
-        .get_tree(&typed(index_tree))
-        .unwrap()
-        .unwrap();
+    let entries = objects.get_tree(&typed(index_tree)).unwrap().unwrap();
     assert_eq!(
         entries.len(),
         3,

@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::thread;
 
 use facet::Facet;
-use facet_git_tree::{ObjectStore, Schema, schema_of};
+use facet_git_tree::{ObjectStore, Schema, Sha1, Tagged, schema_of};
 use git_store::{MemoryRefStore, RefPath, RefSegment, Store};
 
 fn assert_sync<T: Sync>() {}
@@ -54,6 +54,9 @@ impl SyncObjectStore {
         Self(Mutex::new(ObjectStore::default()))
     }
 }
+
+// The wrapper is SHA-1, matching the in-memory `ObjectStore` it mutexes.
+impl Tagged<Sha1> for SyncObjectStore {}
 
 impl gix::objs::Find for SyncObjectStore {
     fn try_find<'a>(
