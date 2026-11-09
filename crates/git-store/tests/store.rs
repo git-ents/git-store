@@ -360,13 +360,14 @@ fn classification_and_the_read_path_agree_on_every_root_shape() {
             .unwrap()
             .kind()
     };
-    // The split-backed read path refuses every non-envelope with the commit
-    // being the tree itself (as `decode` passes `tree` for both root and
-    // commit).
+    // The split-backed read path refuses every non-envelope, naming the tree
+    // it was handed as the document root.
     let read_refuses = |tree: ObjectId| {
         matches!(
             decode(tree, store.objects()),
-            Err(Error::NotSubtreeBound { commit, .. }) if commit == tree
+            Err(Error::Document(
+                facet_git_tree::DocumentError::NotSubtreeBound { root, .. }
+            )) if root == tree
         )
     };
 
@@ -475,7 +476,7 @@ fn a_non_struct_root_schema_is_refused_at_registration() {
 
     let err = kind.schema().put(&doc).unwrap_err();
     match err {
-        Error::DocumentRootNotStruct { kind, node } => {
+        Error::Document(facet_git_tree::DocumentError::DocumentRootNotStruct { kind, node }) => {
             assert_eq!(kind, "Vec", "the error names the refused schema");
             assert_eq!(node, "list");
         }
@@ -946,7 +947,8 @@ fn retrieve_at_reports_a_commit_that_is_not_subtree_bound() {
     assert!(
         matches!(
             err,
-            Error::NotSubtreeBound { commit, .. } if commit == bogus
+            Error::Document(facet_git_tree::DocumentError::NotSubtreeBound { root, .. })
+                if root == empty_tree
         ),
         "{err:?}"
     );
@@ -987,7 +989,8 @@ fn a_pre_binding_commit_whose_value_has_value_and_schema_fields_is_not_mistaken_
     assert!(
         matches!(
             err,
-            Error::NotSubtreeBound { commit, .. } if commit == old
+            Error::Document(facet_git_tree::DocumentError::NotSubtreeBound { root, .. })
+                if root == value_tree
         ),
         "a pre-binding commit must not be read as if bound: {err:?}"
     );
@@ -1054,8 +1057,11 @@ fn retrieve_at_reports_a_subtree_object_that_is_not_present() {
     assert!(
         matches!(
             err,
-            Error::SubtreeMissing { subtree: Subtree::Schema, oid, commit }
-                if oid == absent && commit == severed
+            Error::Document(facet_git_tree::DocumentError::SubtreeMissing {
+                subtree: Subtree::Schema,
+                oid,
+                root: err_root,
+            }) if oid == absent && err_root == root
         ),
         "{err:?}"
     );
@@ -1402,7 +1408,11 @@ fn delete_name_refuses_a_legacy_tip_without_recording_a_phantom_id() {
     };
     assert_eq!(commit, tip);
     assert!(
-        matches!(*source, Error::NotSubtreeBound { commit, .. } if commit == tip),
+        matches!(
+            *source,
+            Error::Document(facet_git_tree::DocumentError::NotSubtreeBound { root, .. })
+                if root == value_tree
+        ),
         "the refusal must name the pre-binding shape: {source:?}"
     );
 
@@ -1416,7 +1426,8 @@ fn delete_name_refuses_a_legacy_tip_without_recording_a_phantom_id() {
     assert_eq!(kind.history(&name).unwrap(), vec![tip]);
     assert!(matches!(
         kind.read(name.clone()).unwrap_err(),
-        Error::NotSubtreeBound { commit, .. } if commit == tip
+        Error::Document(facet_git_tree::DocumentError::NotSubtreeBound { root, .. })
+            if root == value_tree
     ));
 
     // The phantom this refusal prevents: the value-tree oid read back as an

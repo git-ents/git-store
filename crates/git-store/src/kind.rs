@@ -216,7 +216,7 @@ where
     }
 
     fn read_tree(&self, tree: ObjectId) -> Result<EntityState<E::Value>, Error> {
-        let (root, schema_tree) = self.store.split(tree, tree)?;
+        let (root, schema_tree) = self.store.split(tree)?;
         let doc = self.store.schema(schema_tree)?;
         self.bound_state(root, doc, tree, String::new())
     }
@@ -238,7 +238,9 @@ where
                 message,
             }));
         }
-        let value = envelope::read_value::<F, E, _>(root, &doc, self.store.objects())?;
+        let value = envelope::read_value(root, &doc, self.store.objects(), |root, doc, view| {
+            E::read::<F, _>(root, doc, view)
+        })?;
         Ok(EntityState::Present(Entry {
             value,
             commit,
@@ -297,7 +299,7 @@ where
         commit: ObjectId,
     ) -> Result<(ObjectId, ObjectId, Arc<Schema>, String), Error> {
         let (root, message) = self.store.commit_tree_and_summary(commit)?;
-        let (root, schema_tree) = self.store.split(root, commit)?;
+        let (root, schema_tree) = self.store.split(root)?;
         let doc = self.store.schema(schema_tree)?;
         Ok((root, schema_tree, doc, message))
     }
@@ -569,7 +571,7 @@ where
     {
         // Publication is only defined for a complete bound document, not for
         // an arbitrary tree that happens to have an object id.
-        self.store.split(tree, tree)?;
+        self.store.split(tree)?;
         let id = canonical_document_id(tree);
         // The caller-selected name is the ref. Callers that want a
         // content-derived name ask for one explicitly; the store does not
@@ -658,7 +660,7 @@ where
         R: Committer,
         O: Write,
     {
-        self.store.split(tree, tree)?;
+        self.store.split(tree)?;
         let commit = self.store.write_commit(message, tree, None)?;
         let name = name(commit);
         let reference = self.reference(&name);

@@ -580,17 +580,25 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         // An exhausted compare-and-swap budget is a CAS conflict the caller
         // can retry later, not a generic backend failure.
         git_store::Error::Contention { .. } => ExitClass::Cas,
-        git_store::Error::NoSchema { .. }
-        | git_store::Error::MissingObject { .. }
-        | git_store::Error::SubtreeMissing { .. } => ExitClass::NotFound,
+        git_store::Error::NoSchema { .. } | git_store::Error::MissingObject { .. } => {
+            ExitClass::NotFound
+        }
+        git_store::Error::Document(error) => match error {
+            facet_git_tree::DocumentError::MissingObject { .. }
+            | facet_git_tree::DocumentError::SubtreeMissing { .. } => ExitClass::NotFound,
+            facet_git_tree::DocumentError::NotSubtreeBound { .. }
+            | facet_git_tree::DocumentError::SchemaRootUnresolved { .. } => ExitClass::Schema,
+            facet_git_tree::DocumentError::NotATree { .. }
+            | facet_git_tree::DocumentError::DocumentRootNotStruct { .. } => ExitClass::Invalid,
+            facet_git_tree::DocumentError::Backend(_)
+            | facet_git_tree::DocumentError::Decode { .. } => ExitClass::Other,
+        },
         git_store::Error::NotACommit { .. } | git_store::Error::NotATree { .. } => {
             ExitClass::Invalid
         }
-        git_store::Error::NotSubtreeBound { .. }
-        | git_store::Error::NotDeletable { .. }
+        git_store::Error::NotDeletable { .. }
         | git_store::Error::KindMismatch { .. }
         | git_store::Error::IdentityUniverse { .. }
-        | git_store::Error::SchemaRootUnresolved { .. }
         | git_store::Error::Schema(_)
         | git_store::Error::SchemaWrite(_)
         | git_store::Error::SchemaRead(_) => ExitClass::Schema,
@@ -605,7 +613,6 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         | git_store::Error::UnsupportedObjectFormat { .. } => ExitClass::Other,
         git_store::Error::DuplicateParent { .. }
         | git_store::Error::InvalidIdentity { .. }
-        | git_store::Error::DocumentRootNotStruct { .. }
         | git_store::Error::AliasWithoutPublish => ExitClass::Invalid,
         git_store::Error::Doctor(_) => ExitClass::Other,
     }

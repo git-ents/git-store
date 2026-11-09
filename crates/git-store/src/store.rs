@@ -387,8 +387,8 @@ where
     /// This is a *classifier*, not a validating parser: it answers "does this
     /// tree carry the `.schema` envelope entry?" and never fails on shape.
     /// `envelope::split` — the read path — is the *validating parser*: it
-    /// accepts only a well-formed envelope and rejects every shape below as
-    /// [`Error::NotSubtreeBound`] or [`Error::SubtreeMissing`]. The two
+    /// accepts only a well-formed envelope and rejects every shape below with
+    /// an [`Error::Document`] envelope error. The two
     /// therefore answer "is this a document envelope?" identically — this
     /// method reports `Bound` exactly when `envelope::split` succeeds — while
     /// `decode` adds the schema deserialization and read on top.
@@ -542,17 +542,12 @@ where
     /// entry of the value's own. Requiring the whole shape, rather than looking
     /// up `.schema` in isolation, is what makes a bare value tree — or a
     /// pre-binding commit, whose tree *was* the value — fail as one diagnosable
-    /// [`Error::NotSubtreeBound`] rather than being half-matched and
-    /// misreported.
+    /// envelope error rather than being half-matched and misreported.
     ///
     /// The first element is the *document* root, not a bare value tree: reading
     /// its value goes through [`UnboundValue`](crate::envelope::UnboundValue).
-    pub(crate) fn split(
-        &self,
-        root: ObjectId,
-        commit: ObjectId,
-    ) -> Result<(ObjectId, ObjectId), Error> {
-        envelope::split(root, commit, self.objects())
+    pub(crate) fn split(&self, root: ObjectId) -> Result<(ObjectId, ObjectId), Error> {
+        Ok(envelope::split(root, self.objects())?)
     }
 
     /// Build and commit a tree forward over the current tip of `name`,
@@ -726,9 +721,11 @@ fn decode_with<F: HashFormat, E: Encoding, S: Find + Tagged<F> + ?Sized>(
     tree: ObjectId,
     objects: &S,
 ) -> Result<E::Value, Error> {
-    let (root, schema_tree) = envelope::split(tree, tree, objects)?;
+    let (root, schema_tree) = envelope::split(tree, objects)?;
     let doc = deserialize::<Schema, F, _>(&typed::<F>(schema_tree)?, objects)?;
-    envelope::read_value::<F, E, _>(root, &doc, objects)
+    envelope::read_value(root, &doc, objects, |root, doc, view| {
+        E::read::<F, _>(root, doc, view)
+    })
 }
 
 /// Re-tag a bare object id with a store's hash format.

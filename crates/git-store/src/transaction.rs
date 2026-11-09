@@ -237,7 +237,7 @@ impl<'s, R: RefStore + Committer, O: Find + Write + Tagged<F>, F: HashFormat>
         };
 
         let root = self.store.commit_tree(current)?;
-        let (root, schema_tree) = self.store.split(root, current)?;
+        let (root, schema_tree) = self.store.split(root)?;
         let doc = self.store.schema(schema_tree)?;
         if let Some(existing) = tombstone::read(self.store, &root, &doc)? {
             if existing.kind != delete.kind.as_str() {
