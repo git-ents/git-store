@@ -64,7 +64,7 @@ fn main() {
 }
 
 fn schema_for(kind: &str) -> Result<Schema, SchemaError> {
-    let mut doc = match kind {
+    let doc = match kind {
         "recipe" => schema_of::<Recipe>(),
         "book" => schema_of::<Book>(),
         "task" => schema_of::<Task>(),
@@ -75,7 +75,10 @@ fn schema_for(kind: &str) -> Result<Schema, SchemaError> {
     }?;
     // `schema_of` labels the schema with its Rust type name; the schema
     // document carries the kind it is published under, so name it for the ref
-    // the caller will use.
-    doc.kind = kind.to_owned();
-    Ok(doc)
+    // the caller will use. Rebuilding only relabels the opaque kind, so the
+    // well-formedness just proven by `schema_of` still holds.
+    Ok(
+        Schema::new(kind.to_owned(), doc.root().clone(), doc.defs().clone())
+            .expect("relabelling a well-formed schema keeps it well-formed"),
+    )
 }

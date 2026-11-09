@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use facet::Facet;
 use facet_git_tree::{
-    ObjectId, Schema, deserialize, schema_of, serialize_into, validate_with_schema,
+    ObjectId, Oid, Schema, Sha1, deserialize, schema_of, serialize_into, validate_with_schema,
 };
 use gix::objs::{Find, Write};
 use gix_refstore::{RefSegment, RefStore};
@@ -147,9 +147,12 @@ impl<V> EntityState<V> {
 const TOMBSTONE_SCHEMA_LABEL: &str = "git-store.tombstone";
 
 pub(crate) fn schema() -> Result<Schema, Error> {
-    let mut doc = schema_of::<Tombstone>()?;
-    doc.kind = TOMBSTONE_SCHEMA_LABEL.to_owned();
-    Ok(doc)
+    let derived = schema_of::<Tombstone>()?;
+    Ok(Schema::new(
+        TOMBSTONE_SCHEMA_LABEL.to_owned(),
+        derived.root().clone(),
+        derived.defs().clone(),
+    )?)
 }
 
 pub(crate) fn write<R, O>(store: &Store<R, O>, tombstone: &Tombstone) -> Result<ObjectId, Error>
@@ -158,9 +161,10 @@ where
     O: Find + Write,
 {
     let doc = schema()?;
-    let value = serialize_into(tombstone, store.objects())?;
-    validate_with_schema(&value, &doc, store.objects())?;
-    let schema = serialize_into(&doc, store.objects())?;
+    let value = serialize_into(tombstone, &store.tagged())?.into_raw();
+    let typed_value = Oid::<Sha1>::new(value).map_err(Error::backend)?;
+    validate_with_schema(&typed_value, &doc.checked()?, &store.tagged())?;
+    let schema = serialize_into(&doc, &store.tagged())?.into_raw();
     store.bind_schema(value, schema)
 }
 
@@ -189,8 +193,10 @@ where
     }
     // `root` is a bound document root: its own entries are the tombstone's
     // fields, beside the reserved `.schema` entry.
-    let value = UnboundValue::new(*root, store.objects())?;
-    let tombstone: Tombstone = deserialize(root, &value)?;
+    let typed_root = Oid::<Sha1>::new(*root).map_err(Error::backend)?;
+    let tagged = store.tagged();
+    let value = UnboundValue::new(*root, &tagged)?;
+    let tombstone: Tombstone = deserialize(&typed_root, &value)?;
     if tombstone.state != TombstoneState::Deleted
         || tombstone.entity_id().is_none()
         || tombstone.kind.is_empty()

@@ -14,7 +14,7 @@
 //! bare value codec knows nothing of this entry, so a reader of a document
 //! works through [`UnboundValue`], a view that hides `.schema`.
 
-use facet_git_tree::ObjectId;
+use facet_git_tree::{HashFormat, ObjectId, Tagged};
 use facet_git_tree::{Node, Schema};
 use gix::objs::{Data, Find, Kind, Tree, TreeRef, WriteTo, tree::Entry};
 
@@ -35,11 +35,11 @@ pub(crate) fn ensure_struct_root(doc: &Schema) -> Result<(), Error> {
     match doc.resolved_root() {
         Ok(Node::Struct(_)) => Ok(()),
         Ok(node) => Err(Error::DocumentRootNotStruct {
-            kind: doc.kind.clone(),
+            kind: doc.kind().to_owned(),
             node: node.keyword(),
         }),
         Err(source) => Err(Error::SchemaRootUnresolved {
-            kind: doc.kind.clone(),
+            kind: doc.kind().to_owned(),
             source,
         }),
     }
@@ -130,14 +130,19 @@ pub(crate) fn split<S: Find + ?Sized>(
 ///
 /// The schema root must resolve to a struct; the root's own entries, with the
 /// reserved `.schema` entry hidden, are then read by `E`.
-pub(crate) fn read_value<E, S>(root: ObjectId, doc: &Schema, objects: &S) -> Result<E::Value, Error>
+pub(crate) fn read_value<F, E, S>(
+    root: ObjectId,
+    doc: &Schema,
+    objects: &S,
+) -> Result<E::Value, Error>
 where
+    F: HashFormat,
     E: crate::encoding::Encoding,
-    S: Find + ?Sized,
+    S: Find + Tagged<F> + ?Sized,
 {
     ensure_struct_root(doc)?;
     let value = UnboundValue::new(root, objects)?;
-    E::read(&root, doc, &value)
+    E::read::<F, _>(&root, doc, &value)
 }
 
 /// A document root presented to a bare-value codec as the value it encloses.
@@ -192,6 +197,10 @@ impl<'a, S: Find + ?Sized> UnboundValue<'a, S> {
         })
     }
 }
+
+/// The view stands in for its inner store, so a schema-directed reader that
+/// requires a hash-format tag accepts it exactly when it accepts the store.
+impl<F: HashFormat, S: Tagged<F> + ?Sized> Tagged<F> for UnboundValue<'_, S> {}
 
 impl<S: Find + ?Sized> Find for UnboundValue<'_, S> {
     fn try_find<'b>(

@@ -47,7 +47,7 @@ pub use tombstone::{
 };
 pub use transaction::Transaction;
 
-pub use facet_git_tree::{ObjectId, Schema, schema_of};
+pub use facet_git_tree::{Backend, HashFormat, ObjectId, Oid, Schema, Sha1, Tagged, schema_of};
 
 /// The tree and schema format used by `git-store`.
 pub use facet_git_tree as tree;

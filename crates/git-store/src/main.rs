@@ -34,7 +34,7 @@ use crate::cli::{
 };
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
+use facet_git_tree::{Backend, Node, Oid, Schema, Sha1, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use git_store::{
     ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId, EntityState,
@@ -1531,7 +1531,9 @@ fn check(
                 format!("no schema published for {schema:?}"),
             )
         })?;
-    validate_with_schema(&tree, &doc, store.objects()).with_context(|| {
+    let typed = Oid::<Sha1>::new(tree).map_err(|error| anyhow::anyhow!(error))?;
+    let objects = Backend::<Sha1, _>::new(store.objects());
+    validate_with_schema(&typed, &doc.checked()?, &objects).with_context(|| {
         cli_context(
             ExitClass::Schema,
             format!("{tree_ish} does not conform to {schema:?}"),
@@ -1838,7 +1840,7 @@ fn log_commits(repo: &gix::Repository, commits: Vec<ObjectId>, format: OutputFor
 /// A pretty-printed JSON skeleton for a kind's schema, or `{}` if it cannot be
 /// rendered.
 fn pretty_skeleton(doc: &Schema) -> String {
-    let compact = skeleton(&doc.root, doc);
+    let compact = skeleton(doc.root(), doc);
     match facet_json::from_str::<Value>(&compact) {
         Ok(value) => to_json(&value).unwrap_or(compact),
         Err(_) => "{}\n".to_owned(),
@@ -1911,7 +1913,7 @@ fn to_json<T: facet::Facet<'static>>(value: &T) -> Result<String> {
 /// `print_type` used to print directly.
 fn type_layout(kind: &str, doc: &Schema) -> String {
     let mut out = kind.to_string();
-    match resolve(&doc.root, doc) {
+    match resolve(doc.root(), doc) {
         Node::Struct(fields) => {
             for (name, field) in fields {
                 out.push_str(&format!("\n  {name}: {}", label(field)));
@@ -1925,7 +1927,7 @@ fn type_layout(kind: &str, doc: &Schema) -> String {
 /// Follow a `Ref` to the definition it names; any other node is returned as-is.
 pub(crate) fn resolve<'d>(schema: &'d Node, doc: &'d Schema) -> &'d Node {
     match schema {
-        Node::Ref(name) => doc.defs.get(name).map_or(schema, |s| resolve(s, doc)),
+        Node::Ref(name) => doc.defs().get(name).map_or(schema, |s| resolve(s, doc)),
         other => other,
     }
 }

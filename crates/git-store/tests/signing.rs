@@ -17,7 +17,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
 use facet::Facet;
-use facet_git_tree::ObjectStore;
+use facet_git_tree::{ObjectStore, Oid, Sha1};
 use git_store::{MemoryRefStore, RefPath, RefSegment, SignatureBytes, Signer, Store, schema_of};
 
 #[derive(Facet, Debug, PartialEq)]
@@ -135,7 +135,7 @@ fn the_signer_covers_the_unsigned_commit_bytes() {
 
     let written = store
         .objects()
-        .get(&commit)
+        .get(&Oid::<Sha1>::new(commit).expect("sha1 id"))
         .expect("object lookup")
         .expect("the commit");
     let gix::objs::Object::Commit(written) = written else {

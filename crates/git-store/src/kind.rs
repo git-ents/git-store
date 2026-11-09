@@ -4,7 +4,7 @@ use std::{marker::PhantomData, sync::Arc};
 
 use facet::Facet;
 use facet_git_tree::{
-    ObjectId, Schema, check_universe, identity_subtrees, schema_of, serialize_into,
+    ObjectId, Schema, Sha1, check_universe, identity_subtrees, schema_of, serialize_into,
 };
 use gix::objs::{Find, Write};
 use gix_refstore::{
@@ -235,7 +235,7 @@ where
                 message,
             }));
         }
-        let value = envelope::read_value::<E, _>(root, &doc, self.store.objects())?;
+        let value = envelope::read_value::<Sha1, E, _>(root, &doc, &self.store.tagged())?;
         Ok(EntityState::Present(Entry {
             value,
             commit,
@@ -281,7 +281,7 @@ where
     {
         let (schema_commit, doc) = self.current_schema()?;
         envelope::ensure_struct_root(&doc)?;
-        let value_tree = E::write(value, &doc, self.store.objects())?;
+        let value_tree = E::write(value, &doc, &self.store.tagged())?;
         let schema_tree = self.store.commit_tree(schema_commit)?;
         Ok((
             schema_commit,
@@ -1131,7 +1131,7 @@ where
         let message = format!("schema {}\n", self.kind);
         self.store
             .commit_forward(&self.reference, &message, |_parent| {
-                Ok(serialize_into(doc, self.store.objects())?)
+                Ok(serialize_into(doc, &self.store.tagged())?.into_raw())
             })
     }
 
@@ -1145,7 +1145,7 @@ where
     /// schema is in hand and nothing has been published yet.
     fn check_identity_subtrees(&self, doc: &Schema) -> Result<(), Error> {
         for (subtree, node) in identity_subtrees(doc) {
-            check_universe(node, &doc.defs).map_err(|source| Error::IdentityUniverse {
+            check_universe(node, doc.defs()).map_err(|source| Error::IdentityUniverse {
                 kind: self.kind.clone(),
                 subtree: subtree.to_owned(),
                 source,

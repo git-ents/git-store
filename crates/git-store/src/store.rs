@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use facet::Facet;
-use facet_git_tree::ObjectId;
-use facet_git_tree::{Schema, deserialize, validate_with_schema};
+use facet_git_tree::{
+    Backend, HashFormat, ObjectId, Oid, Schema, Sha1, Tagged, deserialize, validate_with_schema,
+};
 use facet_value::Value;
 use gix::objs::{Find, Write, WriteTo};
 use gix_refstore::{
@@ -259,6 +260,17 @@ where
         )
     }
 
+    /// This store's object database, wrapped in facet-git-tree's format-claiming
+    /// adapter for the duration of one schema-directed call.
+    ///
+    /// The store addresses objects by untyped [`ObjectId`]; facet-git-tree's
+    /// schema-directed entry points take a `Tagged<F>` backend so an id of one
+    /// format cannot be read out of an object database of the other. This crate
+    /// supports SHA-1 only, so the claim is [`Sha1`].
+    pub(crate) fn tagged(&self) -> Backend<Sha1, &O> {
+        Backend::new(&self.objects)
+    }
+
     pub(crate) fn schema(&self, tree: ObjectId) -> Result<Arc<Schema>, Error> {
         {
             let cache = self
@@ -273,7 +285,10 @@ where
         // Decode outside the cache lock: a miss must not hold a read lock
         // while another thread computes the same schema, and a hit returns
         // the cached `Arc` without ever touching the object store.
-        let schema = Arc::new(deserialize::<Schema>(&tree, self.objects())?);
+        let schema = Arc::new(deserialize::<Schema, Sha1, _>(
+            &typed::<Sha1>(tree)?,
+            &self.tagged(),
+        )?);
         self.schemas
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -317,7 +332,7 @@ where
         schema_tree: SchemaTree,
     ) -> Result<Value, Error> {
         let doc = self.schema(schema_tree.object_id())?;
-        Dynamic::read(&value_tree.object_id(), &doc, self.objects())
+        Dynamic::read::<Sha1, _>(&value_tree.object_id(), &doc, &self.tagged())
     }
 
     /// Encode a dynamic value under an explicitly supplied schema subtree.
@@ -329,10 +344,10 @@ where
         O: Write,
     {
         let doc = self.schema(schema_tree.object_id())?;
-        Ok(ValueTree::from(Dynamic::write(
+        Ok(ValueTree::from(Dynamic::write::<Sha1, _>(
             value,
             &doc,
-            self.objects(),
+            &self.tagged(),
         )?))
     }
 
@@ -365,7 +380,7 @@ where
         }
         let doc = self.schema(schema_oid)?;
         ensure_struct_root(&doc)?;
-        validate_with_schema(&value_oid, &doc, self.objects())?;
+        validate_with_schema(&typed::<Sha1>(value_oid)?, &doc.checked()?, &self.tagged())?;
         let document_tree = self.bind_schema(value_oid, schema_oid)?;
         Ok(PreparedDocument {
             document_tree: DocumentTree::from(document_tree),
@@ -464,7 +479,7 @@ where
     }
 
     pub(crate) fn decode_with<E: Encoding>(&self, tree: ObjectId) -> Result<E::Value, Error> {
-        decode_with::<E, _>(tree, self.objects())
+        decode_with::<Sha1, E, _>(tree, &self.tagged())
     }
 
     /// A handle on the kind `name` under a caller-supplied tree [`Encoding`].
@@ -706,17 +721,31 @@ where
 /// function does not need a [`Store`], a kind name, a schema ref, or schema
 /// history, which makes it suitable for decoding a document reached by any
 /// content-addressed path.
-pub fn decode<S: Find + ?Sized>(tree: ObjectId, objects: &S) -> Result<Value, Error> {
-    decode_with::<Dynamic, _>(tree, objects)
+pub fn decode<F: HashFormat, S: Find + Tagged<F> + ?Sized>(
+    tree: ObjectId,
+    objects: &S,
+) -> Result<Value, Error> {
+    decode_with::<F, Dynamic, _>(tree, objects)
 }
 
-fn decode_with<E: Encoding, S: Find + ?Sized>(
+fn decode_with<F: HashFormat, E: Encoding, S: Find + Tagged<F> + ?Sized>(
     tree: ObjectId,
     objects: &S,
 ) -> Result<E::Value, Error> {
     let (root, schema_tree) = envelope::split(tree, tree, objects)?;
-    let doc = deserialize::<Schema>(&schema_tree, objects)?;
-    envelope::read_value::<E, _>(root, &doc, objects)
+    let doc = deserialize::<Schema, F, _>(&typed::<F>(schema_tree)?, objects)?;
+    envelope::read_value::<F, E, _>(root, &doc, objects)
+}
+
+/// Re-tag a bare object id with a store's hash format.
+///
+/// The store addresses objects by untyped [`ObjectId`]; facet-git-tree's
+/// schema-directed entry points take an [`Oid<F>`] so the type system can keep
+/// ids of one format out of an object database of the other. Every id read back
+/// through a `Tagged<F>` backend has format `F`, so a mismatch here means that
+/// backend claimed the wrong format.
+pub(crate) fn typed<F: HashFormat>(oid: ObjectId) -> Result<Oid<F>, Error> {
+    Oid::new(oid).map_err(Error::backend)
 }
 
 /// Every ref name directly under `prefix` that is a single valid

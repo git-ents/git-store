@@ -467,7 +467,7 @@ dependencies = [
 [[package]]
 name = "facet-git-tree"
 version = "0.1.0-alpha.3"
-source = "git+https://github.com/git-ents/facet-git-tree#0d07456dfdc3e470f2c05953ae476927cf8abe4f"
+source = "git+https://github.com/git-ents/facet-git-tree?rev=ef7d52c52353e9f4bd1d2c55704c8695d6565a16#ef7d52c52353e9f4bd1d2c55704c8695d6565a16"
 dependencies = [
  "facet",
  "facet-value",

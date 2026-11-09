@@ -196,7 +196,7 @@ impl<'s> DocumentBuilder<'s> {
     /// A builder over `doc`'s root struct fields, resolving [`Node::Ref`]
     /// through `doc.defs`.
     pub fn for_schema(doc: &'s Schema) -> Result<Self, DocumentError> {
-        Self::for_node(&doc.root, doc)
+        Self::for_node(doc.root(), doc)
     }
 
     /// A builder over `node`'s struct fields, resolved through `doc.defs`.
@@ -250,7 +250,7 @@ impl<'s> DocumentBuilder<'s> {
 /// Follow a [`Node::Ref`] to the definition it names, through `doc.defs`.
 fn resolve<'s>(node: &'s Node, doc: &'s Schema) -> &'s Node {
     match node {
-        Node::Ref(name) => doc.defs.get(name).map_or(node, |n| resolve(n, doc)),
+        Node::Ref(name) => doc.defs().get(name).map_or(node, |n| resolve(n, doc)),
         other => other,
     }
 }

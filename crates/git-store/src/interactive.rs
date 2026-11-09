@@ -26,7 +26,7 @@ pub fn value_for_kind(kind: &DynKind<'_, '_>) -> Result<Value> {
         .schema()
         .get()?
         .with_context(|| format!("no schema published for kind {name:?}"))?;
-    build_value(&doc.root, &doc, name, prompter().as_mut())
+    build_value(doc.root(), &doc, name, prompter().as_mut())
 }
 
 /// Build a schema document for `kind` by prompting for the root type. `defs`
@@ -34,11 +34,7 @@ pub fn value_for_kind(kind: &DynKind<'_, '_>) -> Result<Value> {
 /// directly.
 pub fn build_schema(kind: &str) -> Result<Schema> {
     let root = build_schema_node(prompter().as_mut(), "root type")?;
-    Ok(Schema {
-        kind: kind.to_owned(),
-        root,
-        defs: Default::default(),
-    })
+    Ok(Schema::new(kind.to_owned(), root, Default::default())?)
 }
 
 /// The three questions every prompt in this module reduces to.

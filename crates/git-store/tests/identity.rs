@@ -2,7 +2,7 @@
 //! identity- or key-bearing subtree leaves the universe cannot be published.
 
 use facet::Facet;
-use facet_git_tree::{ObjectStore, UniverseError};
+use facet_git_tree::{ObjectStore, Oid, Sha1, UniverseError};
 use git_store::{Error, MemoryRefStore, RefSegment, Store, schema_of};
 
 #[path = "../src/identity.rs"]
@@ -81,8 +81,18 @@ fn identical_canonical_typed_content_deduplicates() {
         identity::canonical_document_id(first_id).object_id(),
         first_id
     );
-    assert!(first_objects.get(&first_id).unwrap().is_some());
-    assert!(second_objects.get(&second_id).unwrap().is_some());
+    assert!(
+        first_objects
+            .get(&Oid::<Sha1>::new(first_id).expect("sha1 id"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        second_objects
+            .get(&Oid::<Sha1>::new(second_id).expect("sha1 id"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]

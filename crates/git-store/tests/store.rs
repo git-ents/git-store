@@ -10,7 +10,9 @@ use std::convert::Infallible;
 use std::rc::Rc;
 
 use facet::Facet;
-use facet_git_tree::{GitObject, Node, ObjectStore, Schema, TreeEntry, schema_of, serialize_into};
+use facet_git_tree::{
+    GitObject, Node, ObjectStore, Oid, Schema, Sha1, TreeEntry, schema_of, serialize_into,
+};
 use facet_value::value;
 use git_store::{
     ApplyError, At, Committer, DeleteResult, DocumentInspection, DocumentKind, DocumentShapeError,
@@ -29,6 +31,11 @@ fn entity(s: &str) -> RefPath {
     RefPath::new(s).unwrap()
 }
 
+/// Re-tag a bare object id for the format-checked object-store accessors.
+fn typed(id: ObjectId) -> Oid<Sha1> {
+    Oid::new(id).expect("an id written by this store uses SHA-1")
+}
+
 fn store() -> Store<MemoryRefStore, ObjectStore> {
     Store::new(MemoryRefStore::new(), ObjectStore::default())
 }
@@ -38,9 +45,15 @@ fn bound_document(
     value: &facet_value::Value,
     doc: &facet_git_tree::Schema,
 ) -> ObjectId {
-    let schema_tree = serialize_into(doc, store.objects()).expect("write schema");
-    let value_tree = facet_git_tree::serialize_value_with_schema(value, doc, store.objects())
-        .expect("write value");
+    let schema_tree = serialize_into(doc, store.objects())
+        .expect("write schema")
+        .into_raw();
+    let value_tree = facet_git_tree::serialize_value_with_schema(
+        value,
+        &doc.checked().expect("well-formed schema"),
+        store.objects(),
+    )
+    .expect("write value");
     // A bound document is the value's own entries beside the reserved
     // `.schema` entry.
     let mut entries = store
@@ -155,7 +168,7 @@ fn embedded_document_decodes_without_a_kind_or_publication_ref() {
 fn explicit_schema_value_codecs_round_trip_without_a_kind_handle() {
     let store = store();
     let doc = schema_of::<Counter>().unwrap();
-    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap().into_raw();
     let expected = value!({ "n": 7 });
 
     let value_tree = store
@@ -177,7 +190,7 @@ fn explicit_schema_value_codecs_round_trip_without_a_kind_handle() {
 fn binding_and_inspection_describe_a_prepared_document() {
     let store = store();
     let doc = schema_of::<Counter>().unwrap();
-    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap().into_raw();
     let value_tree = store
         .encode_value(&value!({ "n": 7 }), SchemaTree::from(schema_tree))
         .unwrap();
@@ -203,7 +216,7 @@ fn binding_and_inspection_describe_a_prepared_document() {
 fn inspection_reports_malformed_envelopes_without_guessing() {
     let store = store();
     let doc = schema_of::<Counter>().unwrap();
-    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap().into_raw();
     let value_tree = store
         .encode_value(&value!({ "n": 7 }), SchemaTree::from(schema_tree))
         .unwrap();
@@ -301,7 +314,7 @@ fn classification_and_the_read_path_agree_on_every_root_shape() {
 
     let store = store();
     let doc = schema_of::<Counter>().unwrap();
-    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap().into_raw();
 
     // (a) A `.schema`-only root: an envelope with no value entries beside it.
     //     A struct contributes at least the `none` marker, so this format can
@@ -329,9 +342,13 @@ fn classification_and_the_read_path_agree_on_every_root_shape() {
 
     // (d) A genuine legacy value root: a bare value tree with real entries, the
     //     shape every pre-envelope commit carried.
-    let legacy =
-        facet_git_tree::serialize_value_with_schema(&value!({ "n": 7 }), &doc, store.objects())
-            .unwrap();
+    let legacy = facet_git_tree::serialize_value_with_schema(
+        &value!({ "n": 7 }),
+        &doc.checked().expect("well-formed schema"),
+        store.objects(),
+    )
+    .unwrap()
+    .into_raw();
 
     // (e) A bound document, for contrast.
     let bound = bound_document(&store, &value!({ "n": 7 }), &doc);
@@ -482,30 +499,21 @@ fn a_non_struct_root_schema_is_refused_at_registration() {
 }
 
 /// A root `ref` that names no definition — a hand-authored schema's most
-/// likely defect — can never resolve to a struct, so it is refused at
-/// registration too, not published and failing every later write.
+/// likely defect — can never resolve to a struct. `facet-git-tree` now rejects
+/// it while building the `Schema`, so it is refused before any `Store` sees it:
+/// no `put` can publish it and fail every later write.
 #[test]
-fn a_root_ref_that_cannot_resolve_is_refused_at_registration() {
-    let store = store();
-    let kind = store.dynamic(seg("broken"));
-    let doc = Schema {
-        kind: "broken".to_owned(),
-        root: Node::Ref("Missing".to_owned()),
-        defs: Default::default(),
-    };
-
-    let err = kind.schema().put(&doc).unwrap_err();
+fn a_root_ref_that_cannot_resolve_is_refused_at_construction() {
+    let err = Schema::new(
+        "broken".to_owned(),
+        Node::Ref("Missing".to_owned()),
+        Default::default(),
+    )
+    .unwrap_err();
     match err {
-        Error::SchemaRootUnresolved { kind, source } => {
-            assert_eq!(kind, "broken");
-            match source {
-                facet_git_tree::RefError::Dangling { name } => assert_eq!(name, "Missing"),
-                other => panic!("expected a dangling ref, got {other:?}"),
-            }
-        }
-        other => panic!("expected SchemaRootUnresolved, got {other:?}"),
+        facet_git_tree::SchemaReadError::UnknownRef(name) => assert_eq!(name, "Missing"),
+        other => panic!("expected a dangling ref, got {other:?}"),
     }
-    assert_eq!(kind.schema().get().unwrap(), None);
 }
 
 #[test]
@@ -678,7 +686,7 @@ fn old_versions_stay_readable_after_schema_evolves() {
         v1
     );
 
-    let document_tree = match store.objects().get(&old_commit).unwrap().unwrap() {
+    let document_tree = match store.objects().get(&typed(old_commit)).unwrap().unwrap() {
         GitObject::Commit(commit) => commit.tree,
         other => panic!("expected a commit, got {other:?}"),
     };
@@ -695,7 +703,7 @@ fn read_addresses_include_entity_id() {
         EntityState::Present(entry) => entry.commit,
         other => panic!("expected the freshly published entity to be present, got {other:?}"),
     };
-    let document_tree = match store.objects().get(&commit).unwrap().unwrap() {
+    let document_tree = match store.objects().get(&typed(commit)).unwrap().unwrap() {
         GitObject::Commit(commit) => commit.tree,
         other => panic!("expected a commit, got {other:?}"),
     };
@@ -867,7 +875,8 @@ fn new_schema_and_data_commits_have_no_schema_or_provenance_trailers() {
         .unwrap();
 
     for commit in [schema_commit, data_commit] {
-        let gix::objs::Object::Commit(commit) = store.objects().get(&commit).unwrap().unwrap()
+        let gix::objs::Object::Commit(commit) =
+            store.objects().get(&typed(commit)).unwrap().unwrap()
         else {
             panic!("not a commit");
         };
@@ -894,7 +903,8 @@ fn legacy_schema_and_provenance_trailers_are_ignored() {
     kind.schema().put(&schema_of::<Counter>().unwrap()).unwrap();
     let value = value!({ "n": 1 });
     let original = kind.put(&entity("original"), &value).unwrap();
-    let gix::objs::Object::Commit(commit) = store.objects().get(&original).unwrap().unwrap() else {
+    let gix::objs::Object::Commit(commit) = store.objects().get(&typed(original)).unwrap().unwrap()
+    else {
         panic!("not a commit");
     };
 
@@ -957,8 +967,13 @@ fn a_pre_binding_commit_whose_value_has_value_and_schema_fields_is_not_mistaken_
     let colliding = value!({ "value": "v", "schema": "s" });
 
     // The old format: commit the value's tree directly, with no wrapper.
-    let value_tree = facet_git_tree::serialize_value_with_schema(&colliding, &doc, store.objects())
-        .expect("serialize");
+    let value_tree = facet_git_tree::serialize_value_with_schema(
+        &colliding,
+        &doc.checked().expect("well-formed schema"),
+        store.objects(),
+    )
+    .expect("serialize")
+    .into_raw();
     let old = commit_ref(
         &store,
         "refs/store/colliding/old",
@@ -1010,10 +1025,15 @@ fn retrieve_at_reports_a_subtree_object_that_is_not_present() {
     // Take the just-written document root and point its `.schema` entry at a
     // tree that was never written to this store.
     let absent = ObjectId::from_hex(b"0123456789012345678901234567890123456789").unwrap();
-    let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap().unwrap() else {
+    let GitObject::Commit(commit_obj) = store.objects().get(&typed(commit)).unwrap().unwrap()
+    else {
         panic!("expected a commit");
     };
-    let mut entries = store.objects().get_tree(&commit_obj.tree).unwrap().unwrap();
+    let mut entries = store
+        .objects()
+        .get_tree(&typed(commit_obj.tree))
+        .unwrap()
+        .unwrap();
     for entry in &mut entries {
         if entry.filename == ".schema" {
             entry.oid = absent;
@@ -1055,7 +1075,7 @@ fn by_commit_binds_the_schema_by_subtree() {
     let schema_ref = RefName::new("refs/schema/counter").unwrap();
     let schema_commit = store.refs().read(&schema_ref).unwrap().unwrap();
     let GitObject::Commit(schema_commit_obj) =
-        store.objects().get(&schema_commit).unwrap().unwrap()
+        store.objects().get(&typed(schema_commit)).unwrap().unwrap()
     else {
         panic!("expected a commit");
     };
@@ -1069,10 +1089,15 @@ fn by_commit_binds_the_schema_by_subtree() {
         .unwrap();
 
     // Bound to the very same schema tree object, not a copy of it.
-    let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap().unwrap() else {
+    let GitObject::Commit(commit_obj) = store.objects().get(&typed(commit)).unwrap().unwrap()
+    else {
         panic!("expected a commit");
     };
-    let root = store.objects().get_tree(&commit_obj.tree).unwrap().unwrap();
+    let root = store
+        .objects()
+        .get_tree(&typed(commit_obj.tree))
+        .unwrap()
+        .unwrap();
     let bound_schema = root.iter().find(|e| e.filename == ".schema").unwrap().oid;
     assert_eq!(
         bound_schema, schema_tree,
@@ -1351,8 +1376,13 @@ fn delete_name_refuses_a_legacy_tip_without_recording_a_phantom_id() {
     let doc = schema_of::<Counter>().unwrap();
     kind.schema().put(&doc).unwrap();
     let value = value!({ "n": 1 });
-    let value_tree = facet_git_tree::serialize_value_with_schema(&value, &doc, store.objects())
-        .expect("write value tree");
+    let value_tree = facet_git_tree::serialize_value_with_schema(
+        &value,
+        &doc.checked().expect("well-formed schema"),
+        store.objects(),
+    )
+    .expect("write value tree")
+    .into_raw();
 
     // The pre-binding shape: the commit's tree *is* the value, with no
     // envelope around it.
@@ -1406,7 +1436,7 @@ fn delete_name_refuses_a_bound_document_whose_value_does_not_decode() {
     let kind = store.dynamic(seg("counter"));
     let doc = schema_of::<Counter>().unwrap();
     kind.schema().put(&doc).unwrap();
-    let schema_tree = serialize_into(&doc, store.objects()).unwrap();
+    let schema_tree = serialize_into(&doc, store.objects()).unwrap().into_raw();
 
     // `.schema` beside an `n` entry that is a blob, not the counter encoding.
     let garbage = gix::objs::Write::write(
@@ -1466,7 +1496,7 @@ fn delete_name_refuses_a_malformed_envelope() {
     let value_tree = store
         .encode_value(
             &value!({ "n": 1 }),
-            SchemaTree::from(serialize_into(&doc, store.objects()).unwrap()),
+            SchemaTree::from(serialize_into(&doc, store.objects()).unwrap().into_raw()),
         )
         .unwrap();
     let absent = ObjectId::from_hex(b"0123456789012345678901234567890123456789").unwrap();
@@ -1518,9 +1548,13 @@ fn a_legacy_tip_is_retired_by_removing_the_ref() {
     let kind = store.dynamic(seg("counter"));
     let doc = schema_of::<Counter>().unwrap();
     kind.schema().put(&doc).unwrap();
-    let value_tree =
-        facet_git_tree::serialize_value_with_schema(&value!({ "n": 1 }), &doc, store.objects())
-            .expect("write value tree");
+    let value_tree = facet_git_tree::serialize_value_with_schema(
+        &value!({ "n": 1 }),
+        &doc.checked().expect("well-formed schema"),
+        store.objects(),
+    )
+    .expect("write value tree")
+    .into_raw();
     let name = entity("legacy/removed");
     commit_ref(
         &store,
@@ -1843,7 +1877,8 @@ fn put_message_sets_the_commit_summary_without_schema_trailer() {
         .at(&entity("c"))
         .unwrap();
 
-    let GitObject::Commit(commit_obj) = store.objects().get(&commit).unwrap().unwrap() else {
+    let GitObject::Commit(commit_obj) = store.objects().get(&typed(commit)).unwrap().unwrap()
+    else {
         panic!("expected a commit");
     };
     let message = String::from_utf8_lossy(&commit_obj.message).into_owned();
@@ -2196,7 +2231,7 @@ fn delete_retries_over_a_concurrent_update_and_keeps_the_winner_in_history() {
         .commit;
 
     let gix::objs::Object::Commit(original_object) =
-        store.objects().get(&original).unwrap().unwrap()
+        store.objects().get(&typed(original)).unwrap().unwrap()
     else {
         panic!("expected a commit");
     };
@@ -2629,7 +2664,7 @@ fn no_op_republish_verifies_the_expectation_atomically() {
     // over a ref that no longer holds `published`.
     let tree = kind.compile(&value!({ "n": 1 })).unwrap();
     assert_eq!(
-        match store.objects().get(&published).unwrap().unwrap() {
+        match store.objects().get(&typed(published)).unwrap().unwrap() {
             GitObject::Commit(commit) => commit.tree,
             other => panic!("expected a commit, got {other:?}"),
         },
@@ -2896,7 +2931,11 @@ fn a_concurrent_writers_entry_is_not_lost_from_the_kind_index() {
         .into_iter()
         .next()
         .unwrap();
-    let entries = store.objects().get_tree(&index_tree).unwrap().unwrap();
+    let entries = store
+        .objects()
+        .get_tree(&typed(index_tree))
+        .unwrap()
+        .unwrap();
     assert_eq!(
         entries.len(),
         3,

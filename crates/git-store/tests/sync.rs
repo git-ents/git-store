@@ -93,7 +93,7 @@ impl gix::objs::Write for SyncObjectStore {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        store.write_stream(kind, size, from)
+        gix::objs::Write::write_stream(&*store, kind, size, from)
     }
 
     fn write_stream_with_known_id(

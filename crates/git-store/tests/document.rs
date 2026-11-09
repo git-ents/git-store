@@ -9,14 +9,15 @@ use facet_value::{Value, value};
 use git_store::{DocumentBuilder, DocumentError};
 
 fn schema() -> Schema {
-    Schema {
-        kind: "person".to_owned(),
-        root: Node::Struct(BTreeMap::from([
+    Schema::new(
+        "person".to_owned(),
+        Node::Struct(BTreeMap::from([
             ("name".to_owned(), Node::String),
             ("age".to_owned(), Node::U32),
         ])),
-        defs: BTreeMap::new(),
-    }
+        BTreeMap::new(),
+    )
+    .expect("well-formed test schema")
 }
 
 #[test]
