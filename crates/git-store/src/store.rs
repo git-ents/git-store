@@ -714,6 +714,26 @@ where
     }
 }
 
+impl<R, O, F> Store<R, O, F>
+where
+    R: RefStore,
+    O: Find + Write + Tagged<F>,
+    F: HashFormat,
+{
+    /// Write `bytes` as a bare blob object and return its id, touching no ref.
+    ///
+    /// This is the write half of a `RawBlob` reference: a document names the
+    /// blob by object id, so the bytes are an ordinary Git object — its id a
+    /// function of its content — rather than something carried through a value
+    /// encoding. The write is idempotent, since identical bytes hash to the
+    /// same id.
+    pub fn write_blob(&self, bytes: &[u8]) -> Result<ObjectId, Error> {
+        self.objects()
+            .write_buf(gix::objs::Kind::Blob, bytes)
+            .map_err(Error::backend)
+    }
+}
+
 /// Decode a bound document root using only the schema embedded as its
 /// `.schema` entry and the supplied object database.
 ///

@@ -134,6 +134,7 @@ git store ref list [--prefix <ref>] [--kind <kind>]
 git store ref resolve <full-ref>            # resolve a full ref to an OID
 git store object inspect <object-ish>       # object kind, OID, and size
 git store object tree <tree-ish>            # direct tree entries
+git store blob put [-F <file>]              # write a file's bytes as a blob; prints its OID
 git store value encode --schema <tree-ish> [-F <file>]
 git store value decode <value-tree> --schema <tree-ish>
 git store document inspect <document-tree>
@@ -243,6 +244,18 @@ arguments or object shape; `3` missing refs, objects, schemas, or entities;
 `4` compare-and-swap conflicts; and `5` schema, value, or document failures.
 These categories are intended for scripts; callers should still preserve stderr
 for the actionable diagnostic.
+
+=== Binary content
+
+`blob put [-F <file>]` writes a file's raw bytes (stdin when `-F` is
+omitted) as an ordinary Git blob and prints its OID; the bytes never pass
+through JSON. Because a blob's id is a function of its content, the write is
+idempotent, and the same OID addresses the object through stock plumbing
+(`git cat-file blob <oid>`). A `RawBlob` schema leaf names an existing blob by
+its id: the value carries the id, not the bytes, so `value encode`, `put`, and
+`get` round-trip the reference without ever loading the content. Reading a
+`RawBlob` leaf whose object is not a blob fails as a schema failure (exit
+`5`).
 
 === Publication, identity, and deletion
 

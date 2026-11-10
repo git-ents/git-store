@@ -67,6 +67,9 @@ The plumbing inspection surface is deliberately Git-shaped:
 `ref list [--prefix <full-prefix>] [--kind <kind>]`, `ref resolve <full-ref>`,
 `object inspect <object-ish>`, and `object tree <tree-ish>`. These expose full
 refs and stable object IDs rather than abbreviated, display-only names.
+`blob put -F <file>` writes a file's raw bytes as an ordinary Git blob and
+prints its OID; a `RawBlob` schema field references that blob by id, so binary
+content travels as an object rather than as bytes inside JSON.
 
 For additive plumbing commands, `--format text|json|ndjson` selects output;
 `--json` is compact JSON. JSON records contain stable OIDs and full refs, and

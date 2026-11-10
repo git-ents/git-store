@@ -1168,6 +1168,62 @@ fn check_validates_a_value_tree_against_a_schema() {
     assert!(ok, "check of a bound document root failed: {err}");
 }
 
+/// `blob put` writes a file's raw bytes as a blob object, is idempotent, and
+/// the id it prints names the blob a `RawBlob` field references.
+#[test]
+fn blob_put_writes_a_referenceable_blob() {
+    #[derive(Facet)]
+    struct Artifact {
+        note: String,
+        payload: facet_git_tree::RawBlob,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    // Bytes that are not valid UTF-8: a text path would corrupt them.
+    std::fs::write(path.join("payload.bin"), [0u8, 1, 2, 0xff, b'h', b'i']).unwrap();
+
+    let (out, err, ok) = run(path, None, &["blob", "put", "-F", "payload.bin"]);
+    assert!(ok, "blob put failed: {err}");
+    let oid = out.trim().to_owned();
+    assert_eq!(oid.len(), 40, "blob oid: {oid}");
+    assert!(
+        oid.chars().all(|c| c.is_ascii_hexdigit()),
+        "blob oid: {oid}"
+    );
+
+    // The same bytes are the same object: the write is idempotent.
+    let (again, err, ok) = run(path, None, &["blob", "put", "-F", "payload.bin"]);
+    assert!(ok, "second blob put failed: {err}");
+    assert_eq!(again.trim(), oid, "blob put must be idempotent");
+
+    // The id names a real blob of the bytes' length.
+    let (inspected, err, ok) = run(path, None, &["object", "inspect", &oid]);
+    assert!(ok, "object inspect failed: {err}");
+    assert!(
+        inspected.starts_with(&format!("blob {oid} 6")),
+        "object inspect: {inspected}"
+    );
+
+    // A `RawBlob` field names the blob by id and reads back as that id.
+    let schema = facet_json::to_string(&schema_of::<Artifact>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "artifact"]);
+    assert!(ok, "schema put failed: {err}");
+
+    let value = format!(r#"{{"note":"first","payload":"{oid}"}}"#);
+    let (_, err, ok) = run(path, Some(&value), &["put", "artifact", "art1"]);
+    assert!(ok, "put failed: {err}");
+
+    let (out, err, ok) = run(path, None, &["get", "artifact", "art1"]);
+    assert!(ok, "get failed: {err}");
+    assert!(
+        out.contains(&format!("\"payload\": \"{oid}\"")),
+        "get output: {out}"
+    );
+}
+
 /// Parse `json` as a generic value, panicking with the offending text on
 /// failure — the assertion `--format json` must satisfy for every command.
 fn assert_parses_as_json(json: &str) {
@@ -1421,7 +1477,9 @@ fn every_command_the_help_advertises_exists() {
 #[test]
 fn every_command_the_docs_show_exists() {
     /// The commands that nest a subcommand under themselves.
-    const GROUPS: [&str; 6] = ["value", "document", "entity", "object", "ref", "schema"];
+    const GROUPS: [&str; 7] = [
+        "value", "document", "entity", "object", "ref", "blob", "schema",
+    ];
     /// Global options that consume the token after them.
     const VALUED: [&str; 3] = ["--format", "--data-prefix", "--schema-prefix"];
 

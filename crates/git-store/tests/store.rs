@@ -41,6 +41,21 @@ fn store() -> Store<MemoryRefStore, ObjectStore> {
     Store::new(MemoryRefStore::new(), ObjectStore::default())
 }
 
+#[test]
+fn write_blob_is_idempotent_and_names_a_blob() {
+    let store = store();
+    let bytes = b"binary\x00payload\xff";
+    let first = store.write_blob(bytes).unwrap();
+    let second = store.write_blob(bytes).unwrap();
+    assert_eq!(first, second, "identical bytes must hash to the same id");
+    assert_ne!(first, store.write_blob(b"different bytes").unwrap());
+
+    match store.objects().get(&typed(first)).unwrap().unwrap() {
+        GitObject::Blob(blob) => assert_eq!(blob.data, bytes),
+        other => panic!("write_blob must write a blob, got {other:?}"),
+    }
+}
+
 fn bound_document(
     store: &Store<MemoryRefStore, ObjectStore>,
     value: &facet_value::Value,

@@ -70,6 +70,7 @@ Plumbing — composable, oid in, oid out
   entity    resolve | delete
   object    inspect | tree
   ref       list | resolve
+  blob      put
 
 Maintenance
   doctor    Check object format and schema bootstrap
@@ -189,6 +190,24 @@ enum Command {
     Entity {
         #[command(subcommand)]
         command: EntityCommand,
+    },
+    /// Write a file's bytes as a blob object, and print its object id. The
+    /// id names an existing object a `RawBlob` schema field references.
+    Blob {
+        #[command(subcommand)]
+        command: BlobCommand,
+    },
+}
+
+/// Arguments for the `blob` subgroup.
+#[derive(Subcommand)]
+enum BlobCommand {
+    /// Write a blob object from a file's raw bytes (stdin when `-F` is
+    /// omitted) and print its object id. Bytes never pass through JSON.
+    Put {
+        /// File to read; stdin is used when omitted.
+        #[arg(short = 'F', long = "file", value_name = "FILE")]
+        file: Option<PathBuf>,
     },
 }
 
@@ -474,6 +493,9 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
         Command::Object { command } => match command {
             ObjectCommand::Inspect { object_ish } => object_inspect(&repo, &object_ish, output)?,
             ObjectCommand::Tree { tree_ish } => object_tree(&repo, &tree_ish, output)?,
+        },
+        Command::Blob { command } => match command {
+            BlobCommand::Put { file } => blob_put(&store, file.as_ref(), output)?,
         },
         Command::Value { command } => match command {
             ValueCommand::Decode { value_tree, schema } => {
@@ -852,6 +874,28 @@ fn object_tree(repo: &gix::Repository, spec: &str, format: OutputFormat) -> Resu
         }
         Ok(())
     }
+}
+
+/// `blob put`: write a file's raw bytes as a blob object and print its id.
+///
+/// The bytes are read verbatim — no JSON, no text decoding — so the result is
+/// an ordinary Git blob whose id a `RawBlob` schema field can reference.
+fn blob_put(store: &RepoStore<'_>, file: Option<&PathBuf>, format: OutputFormat) -> Result<()> {
+    let bytes = match file {
+        Some(path) => std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+        None if std::io::stdin().is_terminal() => {
+            return Err(cli_error(
+                ExitClass::Invalid,
+                "refusing to read a blob from a terminal; pass -F <file> or pipe bytes to stdin",
+            ));
+        }
+        None => read_stdin_bytes()?,
+    };
+    let oid = store.write_blob(&bytes)?;
+    let mut fields = VObject::new();
+    fields.insert("oid", oid_value(oid));
+    fields.insert("size", bytes.len() as u64);
+    emit_single(format, fields, || oid.to_string())
 }
 
 fn value_decode(
@@ -1739,6 +1783,15 @@ fn read_stdin() -> Result<String> {
     let mut buf = String::new();
     std::io::stdin()
         .read_to_string(&mut buf)
+        .context("reading stdin")?;
+    Ok(buf)
+}
+
+/// Read stdin's raw bytes — no UTF-8 requirement, so binary content survives.
+fn read_stdin_bytes() -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut buf)
         .context("reading stdin")?;
     Ok(buf)
 }
