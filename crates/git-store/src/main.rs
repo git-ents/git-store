@@ -1170,7 +1170,11 @@ fn emit_publication(format: OutputFormat, kind: &str, publication: Publication) 
 /// Ref layout is application policy, so a caller must not have to spell
 /// `refs/store/<kind>/<name>` to obtain a compare-and-swap token; this is the
 /// supported way to turn a name into the `--expected` `document publish`
-/// wants, and into the `<entity-id>` `entity delete` addresses.
+/// wants. The returned id is the document-tree hash `entity delete` addresses,
+/// but `entity delete` resolves the *canonical* ref for that id, which only
+/// exists when the document was published canonically — a name or `--alias`
+/// publication lands at that name's ref and leaves no ref at the id. Use `rm`
+/// to delete by the caller-chosen name such a publication landed at.
 fn entity_resolve(
     repo: &gix::Repository,
     store: &RepoStore<'_>,
