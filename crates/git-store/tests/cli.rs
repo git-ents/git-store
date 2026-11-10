@@ -860,10 +860,10 @@ fn cat_decodes_through_a_ref_naming_a_bound_commit() {
     assert!(out.contains("\"serves\": 4"), "cat output: {out}");
 }
 
-/// `check <tree-ish> <schema>` validates a bare value tree against a schema
+/// `check <tree-ish> <schema>` validates a tree-ish's value against a schema
 /// without decoding it: it succeeds for the bare value tree a matching
-/// document compiled from, and refuses the bound `{ fields..., .schema }` root
-/// itself, whose own entries are not a bare value.
+/// document compiled from, and equally for the bound `{ fields..., .schema }`
+/// root, reading its value past the reserved `.schema` entry.
 fn refs_snapshot(path: &Path) -> String {
     let output = Command::new("git")
         .current_dir(path)
@@ -1128,8 +1128,9 @@ fn check_validates_a_value_tree_against_a_schema() {
     let (_, err, ok) = run(path, None, &["check", value_tree, "--schema", "recipe"]);
     assert!(ok, "check of a conforming value tree failed: {err}");
 
-    // A bound document's entries sit beside `.schema` and are not a bare
-    // value, so `check` refuses the whole root.
+    // A bound document carries the value's own entries beside `.schema`;
+    // `check` reads the value it encloses, so the same value still conforms
+    // when addressed through the document root the value was bound into.
     let (document, err, ok) = run(path, None, &["compile", "recipe", recipe]);
     assert!(ok, "compile failed: {err}");
     let (_, err, ok) = run(
@@ -1137,7 +1138,7 @@ fn check_validates_a_value_tree_against_a_schema() {
         None,
         &["check", document.trim(), "--schema", "recipe"],
     );
-    assert!(!ok, "check should refuse a bound document root: {err}");
+    assert!(ok, "check of a bound document root failed: {err}");
 }
 
 /// Parse `json` as a generic value, panicking with the offending text on

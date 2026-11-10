@@ -34,6 +34,7 @@ use crate::cli::{
 };
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use facet_git_tree::document::UnboundValue;
 use facet_git_tree::{Backend, Node, Oid, Schema, Sha1, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use git_store::{
@@ -1540,7 +1541,13 @@ fn check(
         })?;
     let typed = Oid::<Sha1>::new(tree).map_err(|error| anyhow::anyhow!(error))?;
     let objects = Backend::<Sha1, _>::new(store.objects());
-    validate_with_schema(&typed, &doc.checked()?, &objects).with_context(|| {
+    // `tree` may be a bare value tree or a bound document. A bound document's
+    // value entries sit in the root beside the reserved `.schema` entry — which
+    // is not a value field — so validate the value it encloses through
+    // `UnboundValue`, which hides `.schema`. A bare value tree has no entry to
+    // hide and passes through unchanged.
+    let value = UnboundValue::new(tree, &objects).map_err(|error| anyhow::anyhow!(error))?;
+    validate_with_schema(&typed, &doc.checked()?, &value).with_context(|| {
         cli_context(
             ExitClass::Schema,
             format!("{tree_ish} does not conform to {schema:?}"),
