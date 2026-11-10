@@ -1,4 +1,4 @@
-//! One behaviour, one generic fn, run against every backend: `mod memory`
+//! One behavior, one generic fn, run against every backend: `mod memory`
 //! and `mod repo` each instantiate the whole list, so a failure names which
 //! backend broke.
 //!

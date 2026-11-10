@@ -2,7 +2,7 @@
 //! dropping it leaves the lock file behind, and the ref would otherwise be
 //! unwritable forever. These tests pin the repair and its two boundaries —
 //! a live owner is never reclaimed, and concurrent multi-ref writers still
-//! serialise without deadlocking.
+//! serialize without deadlocking.
 //!
 //! The lock lives at `<git-dir>/gix-refstore-locks/<encoded-ref>.lock`, where
 //! `<encoded-ref>` percent-encodes every byte outside `[a-z0-9.-]`. It is a
@@ -12,7 +12,7 @@
 use gix_refstore::{ApplyError, GixRefStore, RefEdit, RefName, RefStore};
 
 /// Two writers that touch the same two refs in opposite order must still
-/// serialise: names are acquired in a fixed order, so neither can hold one
+/// serialize: names are acquired in a fixed order, so neither can hold one
 /// half of the pair while waiting on the other. A regression here deadlocks,
 /// which the scoped join would turn into a hang, not a passing test.
 #[test]
