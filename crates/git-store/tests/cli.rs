@@ -317,6 +317,33 @@ fn failures_have_typed_exit_codes() {
     assert_eq!(code, 0, "first publish stderr: {err}");
     let (_, err, code) = run_with_status(path, None, &publish_args);
     assert_eq!(code, 4, "CAS stderr: {err}");
+
+    // A class attached with `.with_context(cli_context(..))` must survive to
+    // the process exit code. `anyhow` hides a context value from `chain()`, so
+    // a resolver that only walks the chain silently loses every such class and
+    // reports `Other` (exit 1) instead.
+    let (_, err, code) = run_with_status(path, None, &["put", "recipe", "..", "{}"]);
+    assert_eq!(code, 2, "invalid-name stderr: {err}");
+
+    let (_, err, code) =
+        run_with_status(path, None, &["ref", "resolve", "refs/store/recipe/missing"]);
+    assert_eq!(code, 3, "ref-not-found stderr: {err}");
+
+    let (_, err, code) = run_with_status(
+        path,
+        None,
+        &["cat", "0123456789abcdef0123456789abcdef01234567"],
+    );
+    assert_eq!(code, 3, "cat-missing stderr: {err}");
+
+    // `check` reads a published schema, so an unknown one is a not-found — the
+    // same class the store itself reports, not a bare generic error.
+    let (_, err, code) = run_with_status(
+        path,
+        None,
+        &["check", document.as_str(), "--schema", "ghost"],
+    );
+    assert_eq!(code, 3, "check-missing-schema stderr: {err}");
 }
 
 /// A schema that cannot serve as a document root is refused at `schema put`,

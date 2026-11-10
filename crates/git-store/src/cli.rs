@@ -41,16 +41,6 @@ pub enum ExitClass {
 }
 
 impl ExitClass {
-    fn rank(self) -> u8 {
-        match self {
-            Self::Cas => 4,
-            Self::NotFound => 3,
-            Self::Schema => 2,
-            Self::Invalid => 1,
-            Self::Other => 0,
-        }
-    }
-
     pub fn code(self) -> i32 {
         match self {
             Self::Cas => 4,
@@ -61,8 +51,14 @@ impl ExitClass {
         }
     }
 
+    /// Combine two classes, keeping the more specific one.
+    ///
+    /// The order matches [`code`](Self::code): an error that is both, say, a
+    /// schema failure and a not-found picks the schema failure, so the reported
+    /// exit code is always the highest code present and the two orderings
+    /// cannot disagree.
     pub fn prefer(self, other: Self) -> Self {
-        if other.rank() > self.rank() {
+        if other.code() > self.code() {
             other
         } else {
             self

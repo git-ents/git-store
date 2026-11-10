@@ -534,6 +534,14 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
 
 fn exit_class_of(error: &anyhow::Error) -> ExitClass {
     let mut class = ExitClass::Other;
+    // A class attached with `.with_context(cli_context(..))` is stored behind
+    // an internal `anyhow` wrapper, so it is never itself a `chain()` element;
+    // only the top-level downcast sees through that wrapper. Without this, every
+    // `cli_context` class would be silently dropped and the error would fall
+    // back to `Other`.
+    if let Some(context) = error.downcast_ref::<ClassifiedContext>() {
+        class = class.prefer(context.class);
+    }
     for cause in error.chain() {
         if let Some(context) = cause.downcast_ref::<ClassifiedContext>() {
             class = class.prefer(context.class);
