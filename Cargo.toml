@@ -8,7 +8,7 @@ clap = { version = "4", features = ["derive"] }
 criterion = "0.5"
 dialoguer = { version = "0.12", default-features = false }
 facet = { version = "=0.50.0-rc.7", features = ["reflect"] }
-facet-git-tree = { git = "https://github.com/git-ents/facet-git-tree", rev = "ef7d52c52353e9f4bd1d2c55704c8695d6565a16", features = ["value"] }
+facet-git-tree = { git = "https://github.com/git-ents/facet-git-tree", features = ["value"] }
 facet-json = "0.50.0-rc.7"
 facet-value = "0.50.0-rc.7"
 gix = { version = "0.85.0", default-features = false }
