@@ -221,6 +221,7 @@ fn build_value(schema: &Node, doc: &Schema, label: &str, ask: &mut dyn Ask) -> R
         }
         Node::Enum(variants) => build_enum(variants, doc, label, ask)?,
         Node::RawTree => Value::from(ask.text(&format!("{label} (tree object-id)"))?.as_str()),
+        Node::RawBlob => Value::from(ask.text(&format!("{label} (blob object-id)"))?.as_str()),
         Node::Dynamic => loop {
             let raw = ask.text(&format!("{label} (JSON value)"))?;
             match facet_json::from_str::<Value>(&raw) {

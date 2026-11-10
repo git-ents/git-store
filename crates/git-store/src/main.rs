@@ -1906,7 +1906,9 @@ fn skeleton(schema: &Node, doc: &Schema) -> String {
         // A map is always string-keyed and reads back as a JSON object.
         Node::Map { .. } => "{}".into(),
         Node::List(_) => "[]".into(),
-        Node::Optional(_) | Node::Unit | Node::RawTree | Node::Dynamic => "null".into(),
+        Node::Optional(_) | Node::Unit | Node::RawTree | Node::RawBlob | Node::Dynamic => {
+            "null".into()
+        }
         Node::Enum(variants) => match variants.first_key_value() {
             Some((name, kind)) => {
                 let payload = match kind {
@@ -1989,6 +1991,7 @@ fn label(schema: &Node) -> String {
             names.join(" | ")
         }
         Node::RawTree => "tree".into(),
+        Node::RawBlob => "blob".into(),
         Node::Dynamic => "dynamic".into(),
         Node::Ref(name) => name.clone(),
     }
