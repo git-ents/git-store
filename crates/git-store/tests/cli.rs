@@ -1526,3 +1526,27 @@ fn shell_transcript(text: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// Republishing an unchanged schema is a no-op, exactly like a value `put`:
+/// the publication commit does not advance, so `schema log` records one entry.
+#[test]
+fn schema_put_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+
+    let (first, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "first schema put: {err}");
+    let (second, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "second schema put: {err}");
+    assert_eq!(
+        first.trim(),
+        second.trim(),
+        "republishing an unchanged schema must not advance the ref"
+    );
+
+    let (log, err, ok) = run(path, None, &["schema", "log", "recipe"]);
+    assert!(ok, "schema log: {err}");
+    assert_eq!(log.lines().count(), 1, "one publication expected: {log}");
+}

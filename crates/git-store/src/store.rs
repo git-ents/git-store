@@ -552,6 +552,12 @@ where
 
     /// Build and commit a tree forward over the current tip of `name`,
     /// retrying on a lost compare-and-swap race.
+    ///
+    /// Committing a tree identical to the current tip is a no-op: the tip is
+    /// returned and the ref is left untouched, so republishing unchanged
+    /// content does not append an empty commit. The check runs inside the
+    /// retry loop against the parent the edit is resolved against, so it holds
+    /// even under a concurrent writer.
     pub(crate) fn commit_forward(
         &self,
         name: &RefName,
@@ -566,6 +572,11 @@ where
         loop {
             let parent = self.refs.read(name).map_err(Error::backend)?;
             let tree = build_tree(parent)?;
+            if let Some(parent) = parent
+                && self.commit_tree(parent)? == tree
+            {
+                return Ok(parent);
+            }
             let commit = self.write_commit(message, tree, parent)?;
             let edit = match parent {
                 Some(expected) => RefEdit::Update {

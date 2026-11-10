@@ -1114,6 +1114,8 @@ where
     }
 
     /// Publish the schema, committing it forward over the current tip.
+    ///
+    /// Republishing an unchanged schema is a no-op; see [`write`](Self::write).
     pub fn put(&self, doc: &Schema) -> Result<ObjectId, Error>
     where
         R: Committer,
@@ -1123,6 +1125,11 @@ where
     }
 
     /// Write the schema document and publish it over the current tip.
+    ///
+    /// Republishing a schema whose tree is unchanged is a no-op: the current
+    /// publication commit is returned and the ref is left where it is, matching
+    /// how a value `put` treats identical content. Otherwise the publication
+    /// advances the ref.
     ///
     /// The schema is validated as a document schema first: a root that does
     /// not resolve to a struct — including one that does not resolve at all —
