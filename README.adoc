@@ -67,6 +67,9 @@ The plumbing inspection surface is deliberately Git-shaped:
 `ref list [--prefix <full-prefix>] [--kind <kind>]`, `ref resolve <full-ref>`,
 `object inspect <object-ish>`, and `object tree <tree-ish>`. These expose full
 refs and stable object IDs rather than abbreviated, display-only names.
+`blob put -F <file>` writes a file's raw bytes as an ordinary Git blob and
+prints its OID; a `RawBlob` schema field references that blob by id, so binary
+content travels as an object rather than as bytes inside JSON.
 
 For additive plumbing commands, `--format text|json|ndjson` selects output;
 `--json` is compact JSON. JSON records contain stable OIDs and full refs, and
@@ -125,7 +128,7 @@ APIs.
 
 `Kind::read` takes an `At` address — a name, an `EntityId`, a commit, or a
 bound tree — so the content-derived identity and the caller-chosen name reach
-the same reads. Prefer `put_entity`, `put_with_alias`, `compile_entity`, and
+the same reads. Prefer `put_entity`, `put_entity_with_alias`, `compile_entity`, and
 `entity_reference` when the content-derived identity is part of the
 contract. `refs/schema/<publication>` remains a
 schema publication/history ref, not the type definition of an existing

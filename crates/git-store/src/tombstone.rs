@@ -11,7 +11,8 @@ use std::str::FromStr;
 
 use facet::Facet;
 use facet_git_tree::{
-    ObjectId, Schema, deserialize, schema_of, serialize_into, validate_with_schema,
+    HashFormat, ObjectId, Oid, Schema, Tagged, deserialize, schema_of, serialize_into,
+    validate_with_schema,
 };
 use gix::objs::{Find, Write};
 use gix_refstore::{RefSegment, RefStore};
@@ -147,20 +148,28 @@ impl<V> EntityState<V> {
 const TOMBSTONE_SCHEMA_LABEL: &str = "git-store.tombstone";
 
 pub(crate) fn schema() -> Result<Schema, Error> {
-    let mut doc = schema_of::<Tombstone>()?;
-    doc.kind = TOMBSTONE_SCHEMA_LABEL.to_owned();
-    Ok(doc)
+    let derived = schema_of::<Tombstone>()?;
+    Ok(Schema::new(
+        TOMBSTONE_SCHEMA_LABEL.to_owned(),
+        derived.root().clone(),
+        derived.defs().clone(),
+    )?)
 }
 
-pub(crate) fn write<R, O>(store: &Store<R, O>, tombstone: &Tombstone) -> Result<ObjectId, Error>
+pub(crate) fn write<R, O, F>(
+    store: &Store<R, O, F>,
+    tombstone: &Tombstone,
+) -> Result<ObjectId, Error>
 where
     R: RefStore,
-    O: Find + Write,
+    F: HashFormat,
+    O: Find + Write + Tagged<F>,
 {
     let doc = schema()?;
-    let value = serialize_into(tombstone, store.objects())?;
-    validate_with_schema(&value, &doc, store.objects())?;
-    let schema = serialize_into(&doc, store.objects())?;
+    let value = serialize_into(tombstone, store.objects())?.into_raw();
+    let typed_value = Oid::<F>::new(value).map_err(Error::backend)?;
+    validate_with_schema(&typed_value, &doc.checked()?, store.objects())?;
+    let schema = serialize_into(&doc, store.objects())?.into_raw();
     store.bind_schema(value, schema)
 }
 
@@ -174,14 +183,15 @@ where
 /// equal to its own root definition's name, so no `Facet`-derived user schema —
 /// not even one from a user type named `Tombstone` with the same fields — can
 /// reproduce the canonical one. Any other schema names an ordinary value.
-pub(crate) fn read<R, O>(
-    store: &Store<R, O>,
+pub(crate) fn read<R, O, F>(
+    store: &Store<R, O, F>,
     root: &ObjectId,
     doc: &Schema,
 ) -> Result<Option<Tombstone>, Error>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     let expected = schema()?;
     if *doc != expected {
@@ -189,8 +199,9 @@ where
     }
     // `root` is a bound document root: its own entries are the tombstone's
     // fields, beside the reserved `.schema` entry.
+    let typed_root = Oid::<F>::new(*root).map_err(Error::backend)?;
     let value = UnboundValue::new(*root, store.objects())?;
-    let tombstone: Tombstone = deserialize(root, &value)?;
+    let tombstone: Tombstone = deserialize(&typed_root, &value)?;
     if tombstone.state != TombstoneState::Deleted
         || tombstone.entity_id().is_none()
         || tombstone.kind.is_empty()

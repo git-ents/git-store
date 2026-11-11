@@ -34,7 +34,8 @@ use crate::cli::{
 };
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use facet_git_tree::{Node, Schema, VariantKind, validate_with_schema};
+use facet_git_tree::document::UnboundValue;
+use facet_git_tree::{Backend, Node, Oid, Schema, Sha1, VariantKind, validate_with_schema};
 use facet_value::{VArray, VObject, Value, from_value};
 use git_store::{
     ApplyError, DeleteResult, DocumentInspection, DocumentTree, Dynamic, EntityId, EntityState,
@@ -43,7 +44,7 @@ use git_store::{
 };
 
 /// A handle on one kind, over the CLI's own repo-backed store.
-pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, GixRefStore<'r>, &'r gix::OdbHandle>;
+pub(crate) type DynKind<'s, 'r> = Kind<'s, Dynamic, RepoStore<'r>>;
 
 /// clap does not group subcommands natively, so the "Commands:" section is
 /// replaced wholesale by this layered listing: everyday porcelain, the
@@ -69,6 +70,7 @@ Plumbing — composable, oid in, oid out
   entity    resolve | delete
   object    inspect | tree
   ref       list | resolve
+  blob      put
 
 Maintenance
   doctor    Check object format and schema bootstrap
@@ -188,6 +190,24 @@ enum Command {
     Entity {
         #[command(subcommand)]
         command: EntityCommand,
+    },
+    /// Write a file's bytes as a blob object, and print its object id. The
+    /// id names an existing object a `RawBlob` schema field references.
+    Blob {
+        #[command(subcommand)]
+        command: BlobCommand,
+    },
+}
+
+/// Arguments for the `blob` subgroup.
+#[derive(Subcommand)]
+enum BlobCommand {
+    /// Write a blob object from a file's raw bytes (stdin when `-F` is
+    /// omitted) and print its object id. Bytes never pass through JSON.
+    Put {
+        /// File to read; stdin is used when omitted.
+        #[arg(short = 'F', long = "file", value_name = "FILE")]
+        file: Option<PathBuf>,
     },
 }
 
@@ -474,6 +494,9 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
             ObjectCommand::Inspect { object_ish } => object_inspect(&repo, &object_ish, output)?,
             ObjectCommand::Tree { tree_ish } => object_tree(&repo, &tree_ish, output)?,
         },
+        Command::Blob { command } => match command {
+            BlobCommand::Put { file } => blob_put(&store, file.as_ref(), output)?,
+        },
         Command::Value { command } => match command {
             ValueCommand::Decode { value_tree, schema } => {
                 value_decode(&repo, &store, &value_tree, &schema, output)?
@@ -533,6 +556,14 @@ fn run_with(cli: Cli, output: OutputFormat) -> Result<()> {
 
 fn exit_class_of(error: &anyhow::Error) -> ExitClass {
     let mut class = ExitClass::Other;
+    // A class attached with `.with_context(cli_context(..))` is stored behind
+    // an internal `anyhow` wrapper, so it is never itself a `chain()` element;
+    // only the top-level downcast sees through that wrapper. Without this, every
+    // `cli_context` class would be silently dropped and the error would fall
+    // back to `Other`.
+    if let Some(context) = error.downcast_ref::<ClassifiedContext>() {
+        class = class.prefer(context.class);
+    }
     for cause in error.chain() {
         if let Some(context) = cause.downcast_ref::<ClassifiedContext>() {
             class = class.prefer(context.class);
@@ -580,17 +611,25 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         // An exhausted compare-and-swap budget is a CAS conflict the caller
         // can retry later, not a generic backend failure.
         git_store::Error::Contention { .. } => ExitClass::Cas,
-        git_store::Error::NoSchema { .. }
-        | git_store::Error::MissingObject { .. }
-        | git_store::Error::SubtreeMissing { .. } => ExitClass::NotFound,
+        git_store::Error::NoSchema { .. } | git_store::Error::MissingObject { .. } => {
+            ExitClass::NotFound
+        }
+        git_store::Error::Document(error) => match error {
+            facet_git_tree::DocumentError::MissingObject { .. }
+            | facet_git_tree::DocumentError::SubtreeMissing { .. } => ExitClass::NotFound,
+            facet_git_tree::DocumentError::NotSubtreeBound { .. }
+            | facet_git_tree::DocumentError::SchemaRootUnresolved { .. } => ExitClass::Schema,
+            facet_git_tree::DocumentError::NotATree { .. }
+            | facet_git_tree::DocumentError::DocumentRootNotStruct { .. } => ExitClass::Invalid,
+            facet_git_tree::DocumentError::Backend(_)
+            | facet_git_tree::DocumentError::Decode { .. } => ExitClass::Other,
+        },
         git_store::Error::NotACommit { .. } | git_store::Error::NotATree { .. } => {
             ExitClass::Invalid
         }
-        git_store::Error::NotSubtreeBound { .. }
-        | git_store::Error::NotDeletable { .. }
+        git_store::Error::NotDeletable { .. }
         | git_store::Error::KindMismatch { .. }
         | git_store::Error::IdentityUniverse { .. }
-        | git_store::Error::SchemaRootUnresolved { .. }
         | git_store::Error::Schema(_)
         | git_store::Error::SchemaWrite(_)
         | git_store::Error::SchemaRead(_) => ExitClass::Schema,
@@ -605,7 +644,6 @@ fn store_error_exit_class(error: &git_store::Error) -> ExitClass {
         | git_store::Error::UnsupportedObjectFormat { .. } => ExitClass::Other,
         git_store::Error::DuplicateParent { .. }
         | git_store::Error::InvalidIdentity { .. }
-        | git_store::Error::DocumentRootNotStruct { .. }
         | git_store::Error::AliasWithoutPublish => ExitClass::Invalid,
         git_store::Error::Doctor(_) => ExitClass::Other,
     }
@@ -836,6 +874,28 @@ fn object_tree(repo: &gix::Repository, spec: &str, format: OutputFormat) -> Resu
         }
         Ok(())
     }
+}
+
+/// `blob put`: write a file's raw bytes as a blob object and print its id.
+///
+/// The bytes are read verbatim — no JSON, no text decoding — so the result is
+/// an ordinary Git blob whose id a `RawBlob` schema field can reference.
+fn blob_put(store: &RepoStore<'_>, file: Option<&PathBuf>, format: OutputFormat) -> Result<()> {
+    let bytes = match file {
+        Some(path) => std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+        None if std::io::stdin().is_terminal() => {
+            return Err(cli_error(
+                ExitClass::Invalid,
+                "refusing to read a blob from a terminal; pass -F <file> or pipe bytes to stdin",
+            ));
+        }
+        None => read_stdin_bytes()?,
+    };
+    let oid = store.write_blob(&bytes)?;
+    let mut fields = VObject::new();
+    fields.insert("oid", oid_value(oid));
+    fields.insert("size", bytes.len() as u64);
+    emit_single(format, fields, || oid.to_string())
 }
 
 fn value_decode(
@@ -1154,7 +1214,11 @@ fn emit_publication(format: OutputFormat, kind: &str, publication: Publication) 
 /// Ref layout is application policy, so a caller must not have to spell
 /// `refs/store/<kind>/<name>` to obtain a compare-and-swap token; this is the
 /// supported way to turn a name into the `--expected` `document publish`
-/// wants, and into the `<entity-id>` `entity delete` addresses.
+/// wants. The returned id is the document-tree hash `entity delete` addresses,
+/// but `entity delete` resolves the *canonical* ref for that id, which only
+/// exists when the document was published canonically — a name or `--alias`
+/// publication lands at that name's ref and leaves no ref at the id. Use `rm`
+/// to delete by the caller-chosen name such a publication landed at.
 fn entity_resolve(
     repo: &gix::Repository,
     store: &RepoStore<'_>,
@@ -1531,7 +1595,15 @@ fn check(
                 format!("no schema published for {schema:?}"),
             )
         })?;
-    validate_with_schema(&tree, &doc, store.objects()).with_context(|| {
+    let typed = Oid::<Sha1>::new(tree).map_err(|error| anyhow::anyhow!(error))?;
+    let objects = Backend::<Sha1, _>::new(store.objects());
+    // `tree` may be a bare value tree or a bound document. A bound document's
+    // value entries sit in the root beside the reserved `.schema` entry — which
+    // is not a value field — so validate the value it encloses through
+    // `UnboundValue`, which hides `.schema`. A bare value tree has no entry to
+    // hide and passes through unchanged.
+    let value = UnboundValue::new(tree, &objects).map_err(|error| anyhow::anyhow!(error))?;
+    validate_with_schema(&typed, &doc.checked()?, &value).with_context(|| {
         cli_context(
             ExitClass::Schema,
             format!("{tree_ish} does not conform to {schema:?}"),
@@ -1715,6 +1787,15 @@ fn read_stdin() -> Result<String> {
     Ok(buf)
 }
 
+/// Read stdin's raw bytes — no UTF-8 requirement, so binary content survives.
+fn read_stdin_bytes() -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut buf)
+        .context("reading stdin")?;
+    Ok(buf)
+}
+
 /// Parse a hand-authored schema JSON document into a [`Schema`].
 fn schema_doc_from_json(json: &str) -> Result<Schema> {
     let value: Value = facet_json::from_str(json)
@@ -1838,7 +1919,7 @@ fn log_commits(repo: &gix::Repository, commits: Vec<ObjectId>, format: OutputFor
 /// A pretty-printed JSON skeleton for a kind's schema, or `{}` if it cannot be
 /// rendered.
 fn pretty_skeleton(doc: &Schema) -> String {
-    let compact = skeleton(&doc.root, doc);
+    let compact = skeleton(doc.root(), doc);
     match facet_json::from_str::<Value>(&compact) {
         Ok(value) => to_json(&value).unwrap_or(compact),
         Err(_) => "{}\n".to_owned(),
@@ -1878,7 +1959,9 @@ fn skeleton(schema: &Node, doc: &Schema) -> String {
         // A map is always string-keyed and reads back as a JSON object.
         Node::Map { .. } => "{}".into(),
         Node::List(_) => "[]".into(),
-        Node::Optional(_) | Node::Unit | Node::RawTree | Node::Dynamic => "null".into(),
+        Node::Optional(_) | Node::Unit | Node::RawTree | Node::RawBlob | Node::Dynamic => {
+            "null".into()
+        }
         Node::Enum(variants) => match variants.first_key_value() {
             Some((name, kind)) => {
                 let payload = match kind {
@@ -1911,7 +1994,7 @@ fn to_json<T: facet::Facet<'static>>(value: &T) -> Result<String> {
 /// `print_type` used to print directly.
 fn type_layout(kind: &str, doc: &Schema) -> String {
     let mut out = kind.to_string();
-    match resolve(&doc.root, doc) {
+    match resolve(doc.root(), doc) {
         Node::Struct(fields) => {
             for (name, field) in fields {
                 out.push_str(&format!("\n  {name}: {}", label(field)));
@@ -1925,7 +2008,7 @@ fn type_layout(kind: &str, doc: &Schema) -> String {
 /// Follow a `Ref` to the definition it names; any other node is returned as-is.
 pub(crate) fn resolve<'d>(schema: &'d Node, doc: &'d Schema) -> &'d Node {
     match schema {
-        Node::Ref(name) => doc.defs.get(name).map_or(schema, |s| resolve(s, doc)),
+        Node::Ref(name) => doc.defs().get(name).map_or(schema, |s| resolve(s, doc)),
         other => other,
     }
 }
@@ -1961,6 +2044,7 @@ fn label(schema: &Node) -> String {
             names.join(" | ")
         }
         Node::RawTree => "tree".into(),
+        Node::RawBlob => "blob".into(),
         Node::Dynamic => "dynamic".into(),
         Node::Ref(name) => name.clone(),
     }

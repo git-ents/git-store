@@ -1,40 +1,7 @@
 //! The single error type for every [`Store`](crate::Store) operation.
 
-use std::fmt;
-
 use facet_git_tree::ObjectId;
 use gix_refstore::RefSegment;
-
-/// One of a document's two logical halves: the schema entry or the value it
-/// describes.
-///
-/// A document root stores the value's own entries directly, so the value half
-/// has no entry of its own to name; [`Subtree::Value`] carries that half's
-/// reserved name, which this format never writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Subtree {
-    /// The value half: the entries beside `.schema`.
-    Value,
-    /// The `.schema` entry: the unbound schema the value conforms to.
-    Schema,
-}
-
-impl Subtree {
-    /// The reserved tree entry name: `".schema"`, or `".value"` for the value
-    /// half, which this format reserves but never writes.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Subtree::Value => ".value",
-            Subtree::Schema => ".schema",
-        }
-    }
-}
-
-impl fmt::Display for Subtree {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 
 /// An error from a [`Store`](crate::Store) operation.
 #[derive(Debug, thiserror::Error)]
@@ -45,24 +12,15 @@ pub enum Error {
         /// The kind with no published schema.
         kind: RefSegment,
     },
-    /// A data commit's tree is not a bound document.
-    #[error("commit {commit} has no `.schema` entry beside its value entries (found [{found}])")]
-    NotSubtreeBound {
-        /// The data commit whose tree was not the expected split.
-        commit: ObjectId,
-        /// The entry names actually found, comma-separated, for diagnosis.
-        found: String,
-    },
-    /// A data commit references an object needed for reading that is not present.
-    #[error("commit {commit} references a missing {subtree} object {oid}")]
-    SubtreeMissing {
-        /// Which half of the split is absent.
-        subtree: Subtree,
-        /// The absent object.
-        oid: ObjectId,
-        /// The data commit naming it.
-        commit: ObjectId,
-    },
+    /// The `.schema` document envelope refused a tree.
+    ///
+    /// The envelope codec and its errors live in `facet_git_tree::document`,
+    /// which is a different type from this crate's own
+    /// [`DocumentError`](crate::DocumentError) — the builder-and-classifier
+    /// error over the same shapes. A read that reaches a non-envelope tree, or
+    /// a defective envelope, surfaces the format crate's error here.
+    #[error(transparent)]
+    Document(#[from] facet_git_tree::DocumentError),
     /// A deletion named a ref whose tip is not a bound document this kind can
     /// tombstone, so no content-derived [`EntityId`](crate::EntityId) can be
     /// recorded for it.
@@ -188,35 +146,6 @@ pub enum Error {
     UnsupportedObjectFormat {
         /// The object hash algorithm actually observed, e.g. `"sha256"`.
         observed: String,
-    },
-    /// A document's schema root does not resolve to a struct.
-    ///
-    /// Only a struct root has named entries that can sit beside `.schema`, so
-    /// any other resolved root describes a bare value and cannot be bound as
-    /// a document.
-    #[error(
-        "schema root for kind \"{kind}\" is {node}, not a struct; only struct schemas form documents"
-    )]
-    DocumentRootNotStruct {
-        /// The kind whose schema was rejected.
-        kind: String,
-        /// The keyword of the node the schema root resolved to, e.g. `list`.
-        node: &'static str,
-    },
-    /// A document's schema root cannot be resolved at all.
-    ///
-    /// The root is a `ref` naming a definition absent from `defs`, or a chain
-    /// of them cycling without reaching a concrete node. Because the root never
-    /// resolves, no struct's fields could sit beside `.schema`, so the schema
-    /// is refused at registration rather than published and failing every
-    /// later write.
-    #[error("schema root for kind \"{kind}\" does not resolve: {source}")]
-    SchemaRootUnresolved {
-        /// The kind whose schema was rejected.
-        kind: String,
-        /// Why the root did not resolve: a dangling `ref` or a ref cycle.
-        #[source]
-        source: facet_git_tree::RefError,
     },
     /// The schema-of-schemas fixed-point check failed.
     #[error(transparent)]

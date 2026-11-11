@@ -4,7 +4,8 @@ use std::{marker::PhantomData, sync::Arc};
 
 use facet::Facet;
 use facet_git_tree::{
-    ObjectId, Schema, check_universe, identity_subtrees, schema_of, serialize_into,
+    HashFormat, ObjectId, Schema, Tagged, check_universe, identity_subtrees, schema_of,
+    serialize_into,
 };
 use gix::objs::{Find, Write};
 use gix_refstore::{
@@ -49,20 +50,21 @@ pub(crate) struct ResolvedPublish {
 }
 
 /// One kind: its schema ref and the entities beneath it.
-pub struct Kind<'s, E, R, O> {
-    store: &'s Store<R, O>,
+pub struct Kind<'s, E, S> {
+    store: &'s S,
     name: RefSegment,
     schema_ref: RefName,
     entities: RefPrefix,
     encoding: PhantomData<fn() -> E>,
 }
 
-impl<'s, E, R, O> Kind<'s, E, R, O>
+impl<'s, E, R, O, F> Kind<'s, E, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
-    pub(crate) fn new(store: &'s Store<R, O>, name: RefSegment) -> Self {
+    pub(crate) fn new(store: &'s Store<R, O, F>, name: RefSegment) -> Self {
         let schema_ref = store.layout().schema.join(&name);
         let entities = store.layout().data.child(&name);
         Kind {
@@ -75,10 +77,11 @@ where
     }
 }
 
-impl<'s, E: Encoding, R, O> Kind<'s, E, R, O>
+impl<'s, E: Encoding, R, O, F> Kind<'s, E, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     /// This kind's name.
     pub fn name(&self) -> &RefSegment {
@@ -96,7 +99,7 @@ where
     }
 
     /// This kind's schema.
-    pub fn schema(&self) -> KindSchema<'s, R, O> {
+    pub fn schema(&self) -> KindSchema<'s, Store<R, O, F>> {
         KindSchema {
             store: self.store,
             kind: self.name.clone(),
@@ -132,27 +135,31 @@ where
         self.write(value).canonical()
     }
 
-    /// Store `value` under `name` and return its content-derived id rather
+    /// Store `value` under `alias` and return its content-derived id rather
     /// than the publication commit.
     ///
     /// The returned [`EntityId`] is the identity of the published document,
-    /// not the `name` it landed at: the only ref this creates is the alias, so
-    /// no ref addresses the id unless `name` itself spells it. A read of
+    /// not the `alias` it landed at: the only ref this creates is `alias`, so
+    /// no ref addresses the id unless `alias` itself spells it. A read of
     /// [`At::Entity`](crate::At::Entity) with the returned id therefore finds
     /// nothing (or, worse, a different document a caller later published at
     /// that colliding name) — use [`put_entity`](Self::put_entity) when the
-    /// caller needs to read the result back by its id.
-    pub fn put_with_alias(&self, alias: &RefPath, value: &E::Value) -> Result<EntityId, Error>
+    /// caller needs to read the result back by its id, or read `alias`.
+    pub fn put_entity_with_alias(
+        &self,
+        alias: &RefPath,
+        value: &E::Value,
+    ) -> Result<EntityId, Error>
     where
         R: Committer,
         O: Write,
     {
-        self.write(value).with_alias(alias)
+        self.write(value).entity_with_alias(alias)
     }
 
     /// The general form of [`put`](Self::put): set a message, then choose a
     /// name.
-    pub fn write<'k>(&'k self, value: &'k E::Value) -> Put<'k, E, R, O>
+    pub fn write<'k>(&'k self, value: &'k E::Value) -> Put<'k, E, Store<R, O, F>>
     where
         R: Committer,
         O: Write,
@@ -209,7 +216,7 @@ where
     }
 
     fn read_tree(&self, tree: ObjectId) -> Result<EntityState<E::Value>, Error> {
-        let (root, schema_tree) = self.store.split(tree, tree)?;
+        let (root, schema_tree) = self.store.split(tree)?;
         let doc = self.store.schema(schema_tree)?;
         self.bound_state(root, doc, tree, String::new())
     }
@@ -231,7 +238,9 @@ where
                 message,
             }));
         }
-        let value = envelope::read_value::<E, _>(root, &doc, self.store.objects())?;
+        let value = envelope::read_value(root, &doc, self.store.objects(), |root, doc, view| {
+            E::read::<F, _>(root, doc, view)
+        })?;
         Ok(EntityState::Present(Entry {
             value,
             commit,
@@ -290,7 +299,7 @@ where
         commit: ObjectId,
     ) -> Result<(ObjectId, ObjectId, Arc<Schema>, String), Error> {
         let (root, message) = self.store.commit_tree_and_summary(commit)?;
-        let (root, schema_tree) = self.store.split(root, commit)?;
+        let (root, schema_tree) = self.store.split(root)?;
         let doc = self.store.schema(schema_tree)?;
         Ok((root, schema_tree, doc, message))
     }
@@ -562,7 +571,7 @@ where
     {
         // Publication is only defined for a complete bound document, not for
         // an arbitrary tree that happens to have an object id.
-        self.store.split(tree, tree)?;
+        self.store.split(tree)?;
         let id = canonical_document_id(tree);
         // The caller-selected name is the ref. Callers that want a
         // content-derived name ask for one explicitly; the store does not
@@ -651,7 +660,7 @@ where
         R: Committer,
         O: Write,
     {
-        self.store.split(tree, tree)?;
+        self.store.split(tree)?;
         let commit = self.store.write_commit(message, tree, None)?;
         let name = name(commit);
         let reference = self.reference(&name);
@@ -1052,10 +1061,11 @@ where
     }
 }
 
-impl<'s, T: for<'a> Facet<'a>, R, O> Kind<'s, Typed<T>, R, O>
+impl<'s, T: for<'a> Facet<'a>, R, O, F> Kind<'s, Typed<T>, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     /// Publish the schema derived from `T`.
     pub fn publish(&self) -> Result<ObjectId, Error>
@@ -1086,16 +1096,17 @@ pub struct Entry<V> {
 pub type NamedEntries<V> = Vec<(RefPath, Entry<V>)>;
 
 /// A kind's schema ref.
-pub struct KindSchema<'s, R, O> {
-    pub(crate) store: &'s Store<R, O>,
+pub struct KindSchema<'s, S> {
+    pub(crate) store: &'s S,
     pub(crate) kind: RefSegment,
     pub(crate) reference: RefName,
 }
 
-impl<'s, R, O> KindSchema<'s, R, O>
+impl<'s, R, O, F> KindSchema<'s, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     /// The ref this schema is published at.
     pub fn reference(&self) -> &RefName {
@@ -1103,6 +1114,8 @@ where
     }
 
     /// Publish the schema, committing it forward over the current tip.
+    ///
+    /// Republishing an unchanged schema is a no-op; see [`write`](Self::write).
     pub fn put(&self, doc: &Schema) -> Result<ObjectId, Error>
     where
         R: Committer,
@@ -1112,6 +1125,11 @@ where
     }
 
     /// Write the schema document and publish it over the current tip.
+    ///
+    /// Republishing a schema whose tree is unchanged is a no-op: the current
+    /// publication commit is returned and the ref is left where it is, matching
+    /// how a value `put` treats identical content. Otherwise the publication
+    /// advances the ref.
     ///
     /// The schema is validated as a document schema first: a root that does
     /// not resolve to a struct — including one that does not resolve at all —
@@ -1127,7 +1145,7 @@ where
         let message = format!("schema {}\n", self.kind);
         self.store
             .commit_forward(&self.reference, &message, |_parent| {
-                Ok(serialize_into(doc, self.store.objects())?)
+                Ok(serialize_into(doc, self.store.objects())?.into_raw())
             })
     }
 
@@ -1141,7 +1159,7 @@ where
     /// schema is in hand and nothing has been published yet.
     fn check_identity_subtrees(&self, doc: &Schema) -> Result<(), Error> {
         for (subtree, node) in identity_subtrees(doc) {
-            check_universe(node, &doc.defs).map_err(|source| Error::IdentityUniverse {
+            check_universe(node, doc.defs()).map_err(|source| Error::IdentityUniverse {
                 kind: self.kind.clone(),
                 subtree: subtree.to_owned(),
                 source,
@@ -1198,23 +1216,26 @@ pub fn entity_id_name(id: EntityId) -> RefPath {
     id.as_segment().into()
 }
 
-/// Compatibility helper for a canonical entity path under `group`.
+/// The ref path naming an entity under `group` by an object id: a
+/// publication commit, or a document's [`EntityId`] for
+/// [`Put::canonical_under`].
 pub fn entity_name_under(group: &RefPath, commit: ObjectId) -> RefPath {
     group.join(&commit_segment(commit))
 }
 
-/// A pending write of one value. Consumed by [`at`](Self::at) or
-/// [`anonymous`](Self::anonymous).
-pub struct Put<'k, E: Encoding, R, O> {
-    kind: &'k Kind<'k, E, R, O>,
+/// A pending write of one value. Consumed by [`at`](Self::at),
+/// [`canonical`](Self::canonical), or [`by_commit`](Self::by_commit).
+pub struct Put<'k, E: Encoding, S> {
+    kind: &'k Kind<'k, E, S>,
     value: &'k E::Value,
     message: Option<String>,
 }
 
-impl<'k, E: Encoding, R, O> Put<'k, E, R, O>
+impl<'k, E: Encoding, R, O, F> Put<'k, E, Store<R, O, F>>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     /// Use `summary` as the commit message instead of the default.
     ///
@@ -1260,9 +1281,10 @@ where
     ///
     /// The [`EntityId`] identifies the document by content; the only ref
     /// created is `alias`, so the returned id is addressable only if `alias`
-    /// happens to spell it (or another write later creates that ref).
-    /// Publishing under a content-derived name is [`canonical`](Self::canonical).
-    pub fn with_alias(self, alias: &RefPath) -> Result<EntityId, Error>
+    /// happens to spell it (or another write later creates that ref). Read
+    /// `alias`, or use [`canonical`](Self::canonical) when the result must be
+    /// addressable by its id.
+    pub fn entity_with_alias(self, alias: &RefPath) -> Result<EntityId, Error>
     where
         R: Committer,
         O: Write,
@@ -1282,31 +1304,39 @@ where
         commit_body(self.kind, self.value, summary)
     }
 
-    /// Compatibility adapter for [`canonical`](Self::canonical): publish at
-    /// the content-derived ref and return the publication commit id.
+    /// Publish at a ref named by the value's whole publication commit id
+    /// ([`entity_name`]) and return that commit.
     ///
-    /// This compatibility method returns the publication commit. The canonical
-    /// ref is derived from the complete bound document tree, not this commit.
-    pub fn anonymous(self) -> Result<ObjectId, Error>
+    /// The name is derived from the commit, not from the document's content
+    /// identity, so this is the compatibility shape for refs written under
+    /// that policy. The result is addressable at
+    /// [`At::Commit`](crate::At::Commit); for a content-derived, id-addressed
+    /// write use [`canonical`](Self::canonical).
+    pub fn by_commit(self) -> Result<ObjectId, Error>
     where
         R: Committer,
         O: Write,
     {
-        self.anonymous_at(entity_name)
+        self.by_commit_at(entity_name)
     }
 
-    /// Compatibility adapter for publishing at the content-derived ref under
-    /// `group`; returns the publication commit id.
-    pub fn anonymous_under(self, group: &RefPath) -> Result<ObjectId, Error>
+    /// [`by_commit`](Self::by_commit) with the ref nested under `group`
+    /// ([`entity_name_under`]).
+    pub fn by_commit_under(self, group: &RefPath) -> Result<ObjectId, Error>
     where
         R: Committer,
         O: Write,
     {
-        self.anonymous_at(|commit| entity_name_under(group, commit))
+        self.by_commit_at(|commit| entity_name_under(group, commit))
     }
 
-    /// Publish at the canonical content-derived ref and maintain a grouped
-    /// compatibility alias under `group`, returning the [`EntityId`].
+    /// Publish at a ref named by `group` and the document's content-derived
+    /// [`EntityId`] ([`entity_name_under`]), returning that id.
+    ///
+    /// The grouped ref is the only one created: read the result at
+    /// [`At::Name`](crate::At::Name) with that path, not at
+    /// [`At::Entity`](crate::At::Entity), which resolves the ungrouped
+    /// canonical ref this call does not write.
     pub fn canonical_under(self, group: &RefPath) -> Result<EntityId, Error>
     where
         R: Committer,
@@ -1321,7 +1351,7 @@ where
         Ok(id)
     }
 
-    fn anonymous_at(self, name: impl FnOnce(ObjectId) -> RefPath) -> Result<ObjectId, Error>
+    fn by_commit_at(self, name: impl FnOnce(ObjectId) -> RefPath) -> Result<ObjectId, Error>
     where
         R: Committer,
         O: Write,
@@ -1340,14 +1370,15 @@ fn update_fingerprint_bytes(hasher: &mut gix::hash::Hasher, bytes: &[u8]) {
 
 /// The tree and commit message a value builds down to, under `kind`'s
 /// current schema — shared by `Put`'s builders and [`Kind::update`].
-fn commit_body<E: Encoding, R, O>(
-    kind: &Kind<'_, E, R, O>,
+fn commit_body<E: Encoding, R, O, F>(
+    kind: &Kind<'_, E, Store<R, O, F>>,
     value: &E::Value,
     summary: String,
 ) -> Result<(String, ObjectId), Error>
 where
     R: RefStore,
-    O: Find + Write,
+    F: HashFormat,
+    O: Find + Write + Tagged<F>,
 {
     let (_, tree) = kind.compile_with_schema(value)?;
     let message = format!("{summary}\n");

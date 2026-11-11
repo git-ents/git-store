@@ -32,7 +32,7 @@ pub use document::{
     PreparedDocument, SchemaSnapshot,
 };
 pub use encoding::{Dynamic, Encoding, Typed};
-pub use error::{Error, Subtree};
+pub use error::Error;
 pub use identity::{
     DocumentTree, EntityId, SchemaTree, ValueTree, canonical_document_id, canonical_object_id,
 };
@@ -47,7 +47,9 @@ pub use tombstone::{
 };
 pub use transaction::Transaction;
 
-pub use facet_git_tree::{ObjectId, Schema, schema_of};
+pub use facet_git_tree::{
+    Backend, HashFormat, ObjectId, Oid, Schema, Sha1, Subtree, Tagged, schema_of,
+};
 
 /// The tree and schema format used by `git-store`.
 pub use facet_git_tree as tree;
@@ -56,10 +58,11 @@ pub use gix_refstore::{
     RefName, RefPath, RefPrefix, RefSegment, RefStore, SignatureBytes, Signer,
 };
 
-impl<'s, R, O> KindSchema<'s, R, O>
+impl<'s, R, O, F> KindSchema<'s, Store<R, O, F>>
 where
     R: RefStore,
-    O: gix::objs::Find,
+    F: HashFormat,
+    O: gix::objs::Find + Tagged<F>,
 {
     /// Read the schema document stored by `commit` into an owned snapshot.
     ///

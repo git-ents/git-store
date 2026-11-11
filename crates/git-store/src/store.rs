@@ -1,16 +1,18 @@
 //! [`Store`]: kinds, schemas, and entities as Git refs and commits.
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 use facet::Facet;
-use facet_git_tree::ObjectId;
-use facet_git_tree::{Schema, deserialize, validate_with_schema};
+use facet_git_tree::{
+    Backend, HashFormat, ObjectId, Oid, Schema, Sha1, Tagged, deserialize, validate_with_schema,
+};
 use facet_value::Value;
 use gix::objs::{Find, Write, WriteTo};
 use gix_refstore::{
-    ApplyError, Committer, ErasedSigner, Expectation, GixRefStore, RefEdit, RefName, RefPath,
-    RefPrefix, RefSegment, RefStore, SignatureBytes, Signer,
+    ApplyError, AsOfRefStore, Committer, ErasedSigner, Expectation, GixRefStore, RefEdit, RefName,
+    RefPath, RefPrefix, RefSegment, RefStore, SignatureBytes, Signer,
 };
 
 use crate::document::{DocumentInspection, DocumentShapeError, PreparedDocument};
@@ -121,7 +123,7 @@ impl Default for Layout {
 ///
 /// Stored values retain the schema against which they were validated. Reads
 /// use that bound schema without consulting publication history.
-pub struct Store<R, O> {
+pub struct Store<R, O, F: HashFormat = Sha1> {
     refs: R,
     objects: O,
     layout: Layout,
@@ -134,6 +136,8 @@ pub struct Store<R, O> {
     /// content-addressed, so the duplicate is harmless and needs no
     /// invalidation.
     schemas: RwLock<HashMap<ObjectId, Arc<Schema>>>,
+    /// The object hash format every id this store handles uses.
+    _format: PhantomData<F>,
 }
 
 /// The extra commit header a signed write's bytes land in.
@@ -170,10 +174,11 @@ pub(crate) fn validate_commit_message(message: &str) -> Result<(), Error> {
     Ok(())
 }
 
-impl<R, O> Store<R, O>
+impl<R, O, F> Store<R, O, F>
 where
     R: RefStore,
-    O: Find,
+    O: Find + Tagged<F>,
+    F: HashFormat,
 {
     /// Open a store with the default `refs/store`/`refs/schema` [`Layout`].
     pub fn new(refs: R, objects: O) -> Self {
@@ -188,6 +193,7 @@ where
             layout,
             signer: None,
             schemas: RwLock::new(HashMap::new()),
+            _format: PhantomData,
         }
     }
 
@@ -205,7 +211,7 @@ where
     /// land as one all-or-nothing compare-and-swap batch. `message` is used
     /// as the commit message for every publication and tombstone the
     /// transaction writes.
-    pub fn transaction(&self, message: impl Into<String>) -> Transaction<'_, R, O>
+    pub fn transaction(&self, message: impl Into<String>) -> Transaction<'_, R, O, F>
     where
         R: Committer,
         O: Write,
@@ -236,6 +242,29 @@ where
         &self.objects
     }
 
+    /// A read-only view of this store's refs as though `overrides` held,
+    /// sharing this store's object database and layout.
+    ///
+    /// An override maps a ref [`RefName`] to `Some(id)` — as if it held `id` —
+    /// or `None` — as if it did not exist. Reads through the returned store
+    /// see the overrides folded over this store's real refs and, everywhere
+    /// else, this store's state unchanged; this store is not written and no
+    /// ref moves. The view is read-only: a publication through it fails rather
+    /// than writing.
+    pub fn as_of(
+        &self,
+        overrides: impl IntoIterator<Item = (RefName, Option<ObjectId>)>,
+    ) -> Store<AsOfRefStore<&R>, Backend<F, &O>, F> {
+        Store::with_layout(
+            AsOfRefStore::new(&self.refs, overrides),
+            Backend::new(&self.objects),
+            Layout {
+                data: self.layout.data.clone(),
+                schema: self.layout.schema.clone(),
+            },
+        )
+    }
+
     pub(crate) fn schema(&self, tree: ObjectId) -> Result<Arc<Schema>, Error> {
         {
             let cache = self
@@ -250,7 +279,10 @@ where
         // Decode outside the cache lock: a miss must not hold a read lock
         // while another thread computes the same schema, and a hit returns
         // the cached `Arc` without ever touching the object store.
-        let schema = Arc::new(deserialize::<Schema>(&tree, self.objects())?);
+        let schema = Arc::new(deserialize::<Schema, F, _>(
+            &typed::<F>(tree)?,
+            self.objects(),
+        )?);
         self.schemas
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -264,13 +296,13 @@ where
     }
 
     /// A handle on the kind `name`, whose values are `T`.
-    pub fn kind<T: for<'a> Facet<'a>>(&self, name: RefSegment) -> Kind<'_, Typed<T>, R, O> {
+    pub fn kind<T: for<'a> Facet<'a>>(&self, name: RefSegment) -> Kind<'_, Typed<T>, Self> {
         self.kind_with(name)
     }
 
     /// A handle on the kind `name`, whose values are read and written as
     /// [`facet_value::Value`] under the kind's published schema.
-    pub fn dynamic(&self, name: RefSegment) -> Kind<'_, Dynamic, R, O> {
+    pub fn dynamic(&self, name: RefSegment) -> Kind<'_, Dynamic, Self> {
         self.kind_with(name)
     }
 
@@ -294,7 +326,7 @@ where
         schema_tree: SchemaTree,
     ) -> Result<Value, Error> {
         let doc = self.schema(schema_tree.object_id())?;
-        Dynamic::read(&value_tree.object_id(), &doc, self.objects())
+        Dynamic::read::<F, _>(&value_tree.object_id(), &doc, self.objects())
     }
 
     /// Encode a dynamic value under an explicitly supplied schema subtree.
@@ -306,7 +338,7 @@ where
         O: Write,
     {
         let doc = self.schema(schema_tree.object_id())?;
-        Ok(ValueTree::from(Dynamic::write(
+        Ok(ValueTree::from(Dynamic::write::<F, _>(
             value,
             &doc,
             self.objects(),
@@ -342,7 +374,7 @@ where
         }
         let doc = self.schema(schema_oid)?;
         ensure_struct_root(&doc)?;
-        validate_with_schema(&value_oid, &doc, self.objects())?;
+        validate_with_schema(&typed::<F>(value_oid)?, &doc.checked()?, self.objects())?;
         let document_tree = self.bind_schema(value_oid, schema_oid)?;
         Ok(PreparedDocument {
             document_tree: DocumentTree::from(document_tree),
@@ -355,8 +387,8 @@ where
     /// This is a *classifier*, not a validating parser: it answers "does this
     /// tree carry the `.schema` envelope entry?" and never fails on shape.
     /// `envelope::split` — the read path — is the *validating parser*: it
-    /// accepts only a well-formed envelope and rejects every shape below as
-    /// [`Error::NotSubtreeBound`] or [`Error::SubtreeMissing`]. The two
+    /// accepts only a well-formed envelope and rejects every shape below with
+    /// an [`Error::Document`] envelope error. The two
     /// therefore answer "is this a document envelope?" identically — this
     /// method reports `Bound` exactly when `envelope::split` succeeds — while
     /// `decode` adds the schema deserialization and read on top.
@@ -441,11 +473,11 @@ where
     }
 
     pub(crate) fn decode_with<E: Encoding>(&self, tree: ObjectId) -> Result<E::Value, Error> {
-        decode_with::<E, _>(tree, self.objects())
+        decode_with::<F, E, _>(tree, self.objects())
     }
 
     /// A handle on the kind `name` under a caller-supplied tree [`Encoding`].
-    pub fn kind_with<E: Encoding>(&self, name: RefSegment) -> Kind<'_, E, R, O> {
+    pub fn kind_with<E: Encoding>(&self, name: RefSegment) -> Kind<'_, E, Self> {
         Kind::new(self, name)
     }
 
@@ -510,21 +542,22 @@ where
     /// entry of the value's own. Requiring the whole shape, rather than looking
     /// up `.schema` in isolation, is what makes a bare value tree — or a
     /// pre-binding commit, whose tree *was* the value — fail as one diagnosable
-    /// [`Error::NotSubtreeBound`] rather than being half-matched and
-    /// misreported.
+    /// envelope error rather than being half-matched and misreported.
     ///
     /// The first element is the *document* root, not a bare value tree: reading
     /// its value goes through [`UnboundValue`](crate::envelope::UnboundValue).
-    pub(crate) fn split(
-        &self,
-        root: ObjectId,
-        commit: ObjectId,
-    ) -> Result<(ObjectId, ObjectId), Error> {
-        envelope::split(root, commit, self.objects())
+    pub(crate) fn split(&self, root: ObjectId) -> Result<(ObjectId, ObjectId), Error> {
+        Ok(envelope::split(root, self.objects())?)
     }
 
     /// Build and commit a tree forward over the current tip of `name`,
     /// retrying on a lost compare-and-swap race.
+    ///
+    /// Committing a tree identical to the current tip is a no-op: the tip is
+    /// returned and the ref is left untouched, so republishing unchanged
+    /// content does not append an empty commit. The check runs inside the
+    /// retry loop against the parent the edit is resolved against, so it holds
+    /// even under a concurrent writer.
     pub(crate) fn commit_forward(
         &self,
         name: &RefName,
@@ -539,6 +572,11 @@ where
         loop {
             let parent = self.refs.read(name).map_err(Error::backend)?;
             let tree = build_tree(parent)?;
+            if let Some(parent) = parent
+                && self.commit_tree(parent)? == tree
+            {
+                return Ok(parent);
+            }
             let commit = self.write_commit(message, tree, parent)?;
             let edit = match parent {
                 Some(expected) => RefEdit::Update {
@@ -676,6 +714,26 @@ where
     }
 }
 
+impl<R, O, F> Store<R, O, F>
+where
+    R: RefStore,
+    O: Find + Write + Tagged<F>,
+    F: HashFormat,
+{
+    /// Write `bytes` as a bare blob object and return its id, touching no ref.
+    ///
+    /// This is the write half of a `RawBlob` reference: a document names the
+    /// blob by object id, so the bytes are an ordinary Git object — its id a
+    /// function of its content — rather than something carried through a value
+    /// encoding. The write is idempotent, since identical bytes hash to the
+    /// same id.
+    pub fn write_blob(&self, bytes: &[u8]) -> Result<ObjectId, Error> {
+        self.objects()
+            .write_buf(gix::objs::Kind::Blob, bytes)
+            .map_err(Error::backend)
+    }
+}
+
 /// Decode a bound document root using only the schema embedded as its
 /// `.schema` entry and the supplied object database.
 ///
@@ -683,22 +741,38 @@ where
 /// function does not need a [`Store`], a kind name, a schema ref, or schema
 /// history, which makes it suitable for decoding a document reached by any
 /// content-addressed path.
-pub fn decode<S: Find + ?Sized>(tree: ObjectId, objects: &S) -> Result<Value, Error> {
-    decode_with::<Dynamic, _>(tree, objects)
+pub fn decode<F: HashFormat, S: Find + Tagged<F> + ?Sized>(
+    tree: ObjectId,
+    objects: &S,
+) -> Result<Value, Error> {
+    decode_with::<F, Dynamic, _>(tree, objects)
 }
 
-fn decode_with<E: Encoding, S: Find + ?Sized>(
+fn decode_with<F: HashFormat, E: Encoding, S: Find + Tagged<F> + ?Sized>(
     tree: ObjectId,
     objects: &S,
 ) -> Result<E::Value, Error> {
-    let (root, schema_tree) = envelope::split(tree, tree, objects)?;
-    let doc = deserialize::<Schema>(&schema_tree, objects)?;
-    envelope::read_value::<E, _>(root, &doc, objects)
+    let (root, schema_tree) = envelope::split(tree, objects)?;
+    let doc = deserialize::<Schema, F, _>(&typed::<F>(schema_tree)?, objects)?;
+    envelope::read_value(root, &doc, objects, |root, doc, view| {
+        E::read::<F, _>(root, doc, view)
+    })
+}
+
+/// Re-tag a bare object id with a store's hash format.
+///
+/// The store addresses objects by untyped [`ObjectId`]; facet-git-tree's
+/// schema-directed entry points take an [`Oid<F>`] so the type system can keep
+/// ids of one format out of an object database of the other. Every id read back
+/// through a `Tagged<F>` backend has format `F`, so a mismatch here means that
+/// backend claimed the wrong format.
+pub(crate) fn typed<F: HashFormat>(oid: ObjectId) -> Result<Oid<F>, Error> {
+    Oid::new(oid).map_err(Error::backend)
 }
 
 /// Every ref name directly under `prefix` that is a single valid
 /// [`RefSegment`], ascending. A nested ref under the namespace is skipped
-/// rather than mis-reported.
+/// rather than misreported.
 pub(crate) fn list_segments<R: RefStore>(
     refs: &R,
     prefix: &RefPrefix,
@@ -712,18 +786,18 @@ pub(crate) fn list_segments<R: RefStore>(
 }
 
 /// A [`Store`] over a `gix` repository's own refs and object database.
-pub type RepoStore<'r> = Store<GixRefStore<'r>, &'r gix::OdbHandle>;
+pub type RepoStore<'r> = Store<GixRefStore<'r>, Backend<Sha1, &'r gix::OdbHandle>, Sha1>;
 
 impl<'r> RepoStore<'r> {
     /// Open a store over `repo`'s own refs and objects, with the default
     /// [`Layout`].
     pub fn open(repo: &'r gix::Repository) -> Self {
-        Store::new(GixRefStore::new(repo), &repo.objects)
+        Store::new(GixRefStore::new(repo), Backend::new(&repo.objects))
     }
 
     /// Open a store over `repo`'s own refs and objects, with a caller-supplied
     /// [`Layout`].
     pub fn open_with_layout(repo: &'r gix::Repository, layout: Layout) -> Self {
-        Store::with_layout(GixRefStore::new(repo), &repo.objects, layout)
+        Store::with_layout(GixRefStore::new(repo), Backend::new(&repo.objects), layout)
     }
 }

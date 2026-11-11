@@ -1,6 +1,6 @@
 //! Focused coverage for prepared document publication.
 
-use facet_git_tree::{GitObject, ObjectStore};
+use facet_git_tree::{GitObject, ObjectStore, Oid, Sha1};
 use facet_value::value;
 use git_store::{
     DocumentInspection, DocumentTree, Expectation, MemoryRefStore, RefPath, RefSegment, RefStore,
@@ -82,7 +82,12 @@ fn explicit_parent_appends_above_legacy_tip_while_creating_absent_alias() {
         .unwrap();
 
     let legacy_commit = kind.put(&path("legacy"), &value!({ "n": 1 })).unwrap();
-    let legacy_tree = match store.objects().get(&legacy_commit).unwrap().unwrap() {
+    let legacy_tree = match store
+        .objects()
+        .get(&Oid::<Sha1>::new(legacy_commit).expect("sha1 id"))
+        .unwrap()
+        .unwrap()
+    {
         GitObject::Commit(commit) => commit.tree,
         other => panic!("expected legacy commit, got {other:?}"),
     };
@@ -103,7 +108,12 @@ fn explicit_parent_appends_above_legacy_tip_while_creating_absent_alias() {
         )
         .unwrap();
 
-    let commit = match store.objects().get(&publication.commit()).unwrap().unwrap() {
+    let commit = match store
+        .objects()
+        .get(&Oid::<Sha1>::new(publication.commit()).expect("sha1 id"))
+        .unwrap()
+        .unwrap()
+    {
         GitObject::Commit(commit) => commit,
         other => panic!("expected publication commit, got {other:?}"),
     };
@@ -122,14 +132,16 @@ fn stale_explicit_expectation_is_not_retried_or_published() {
         .put(&facet_git_tree::schema_of::<Counter>().unwrap())
         .unwrap();
     let alias = path("friendly");
-    kind.put_with_alias(&alias, &value!({ "n": 1 })).unwrap();
+    kind.put_entity_with_alias(&alias, &value!({ "n": 1 }))
+        .unwrap();
     let old_commit = kind
         .read(&alias)
         .map(|state| state.present())
         .unwrap()
         .unwrap()
         .commit;
-    kind.put_with_alias(&alias, &value!({ "n": 2 })).unwrap();
+    kind.put_entity_with_alias(&alias, &value!({ "n": 2 }))
+        .unwrap();
     let tree = kind.compile(&value!({ "n": 3 })).unwrap();
     let prepared = prepared(&store, tree);
 

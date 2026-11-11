@@ -14,7 +14,7 @@ use gix::objs::{Find, Write};
 use crate::error::Error;
 use crate::store::Store;
 use crate::store::validate_commit_message;
-use facet_git_tree::ObjectId;
+use facet_git_tree::{HashFormat, ObjectId, Tagged};
 use gix_refstore::RefStore;
 
 /// A commit whose tree, parents, author, committer, and message are all
@@ -121,10 +121,11 @@ impl CanonicalCommit {
     }
 }
 
-impl<R, O> Store<R, O>
+impl<R, O, F> Store<R, O, F>
 where
     R: RefStore,
-    O: Find + Write,
+    F: HashFormat,
+    O: Find + Write + Tagged<F>,
 {
     /// Write `commit` as a commit object, touching no ref.
     ///

@@ -317,6 +317,33 @@ fn failures_have_typed_exit_codes() {
     assert_eq!(code, 0, "first publish stderr: {err}");
     let (_, err, code) = run_with_status(path, None, &publish_args);
     assert_eq!(code, 4, "CAS stderr: {err}");
+
+    // A class attached with `.with_context(cli_context(..))` must survive to
+    // the process exit code. `anyhow` hides a context value from `chain()`, so
+    // a resolver that only walks the chain silently loses every such class and
+    // reports `Other` (exit 1) instead.
+    let (_, err, code) = run_with_status(path, None, &["put", "recipe", "..", "{}"]);
+    assert_eq!(code, 2, "invalid-name stderr: {err}");
+
+    let (_, err, code) =
+        run_with_status(path, None, &["ref", "resolve", "refs/store/recipe/missing"]);
+    assert_eq!(code, 3, "ref-not-found stderr: {err}");
+
+    let (_, err, code) = run_with_status(
+        path,
+        None,
+        &["cat", "0123456789abcdef0123456789abcdef01234567"],
+    );
+    assert_eq!(code, 3, "cat-missing stderr: {err}");
+
+    // `check` reads a published schema, so an unknown one is a not-found — the
+    // same class the store itself reports, not a bare generic error.
+    let (_, err, code) = run_with_status(
+        path,
+        None,
+        &["check", document.as_str(), "--schema", "ghost"],
+    );
+    assert_eq!(code, 3, "check-missing-schema stderr: {err}");
 }
 
 /// A schema that cannot serve as a document root is refused at `schema put`,
@@ -860,10 +887,10 @@ fn cat_decodes_through_a_ref_naming_a_bound_commit() {
     assert!(out.contains("\"serves\": 4"), "cat output: {out}");
 }
 
-/// `check <tree-ish> <schema>` validates a bare value tree against a schema
+/// `check <tree-ish> <schema>` validates a tree-ish's value against a schema
 /// without decoding it: it succeeds for the bare value tree a matching
-/// document compiled from, and refuses the bound `{ fields..., .schema }` root
-/// itself, whose own entries are not a bare value.
+/// document compiled from, and equally for the bound `{ fields..., .schema }`
+/// root, reading its value past the reserved `.schema` entry.
 fn refs_snapshot(path: &Path) -> String {
     let output = Command::new("git")
         .current_dir(path)
@@ -1128,8 +1155,9 @@ fn check_validates_a_value_tree_against_a_schema() {
     let (_, err, ok) = run(path, None, &["check", value_tree, "--schema", "recipe"]);
     assert!(ok, "check of a conforming value tree failed: {err}");
 
-    // A bound document's entries sit beside `.schema` and are not a bare
-    // value, so `check` refuses the whole root.
+    // A bound document carries the value's own entries beside `.schema`;
+    // `check` reads the value it encloses, so the same value still conforms
+    // when addressed through the document root the value was bound into.
     let (document, err, ok) = run(path, None, &["compile", "recipe", recipe]);
     assert!(ok, "compile failed: {err}");
     let (_, err, ok) = run(
@@ -1137,7 +1165,63 @@ fn check_validates_a_value_tree_against_a_schema() {
         None,
         &["check", document.trim(), "--schema", "recipe"],
     );
-    assert!(!ok, "check should refuse a bound document root: {err}");
+    assert!(ok, "check of a bound document root failed: {err}");
+}
+
+/// `blob put` writes a file's raw bytes as a blob object, is idempotent, and
+/// the id it prints names the blob a `RawBlob` field references.
+#[test]
+fn blob_put_writes_a_referenceable_blob() {
+    #[derive(Facet)]
+    struct Artifact {
+        note: String,
+        payload: facet_git_tree::RawBlob,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+
+    // Bytes that are not valid UTF-8: a text path would corrupt them.
+    std::fs::write(path.join("payload.bin"), [0u8, 1, 2, 0xff, b'h', b'i']).unwrap();
+
+    let (out, err, ok) = run(path, None, &["blob", "put", "-F", "payload.bin"]);
+    assert!(ok, "blob put failed: {err}");
+    let oid = out.trim().to_owned();
+    assert_eq!(oid.len(), 40, "blob oid: {oid}");
+    assert!(
+        oid.chars().all(|c| c.is_ascii_hexdigit()),
+        "blob oid: {oid}"
+    );
+
+    // The same bytes are the same object: the write is idempotent.
+    let (again, err, ok) = run(path, None, &["blob", "put", "-F", "payload.bin"]);
+    assert!(ok, "second blob put failed: {err}");
+    assert_eq!(again.trim(), oid, "blob put must be idempotent");
+
+    // The id names a real blob of the bytes' length.
+    let (inspected, err, ok) = run(path, None, &["object", "inspect", &oid]);
+    assert!(ok, "object inspect failed: {err}");
+    assert!(
+        inspected.starts_with(&format!("blob {oid} 6")),
+        "object inspect: {inspected}"
+    );
+
+    // A `RawBlob` field names the blob by id and reads back as that id.
+    let schema = facet_json::to_string(&schema_of::<Artifact>().unwrap()).unwrap();
+    let (_, err, ok) = run(path, Some(&schema), &["schema", "put", "artifact"]);
+    assert!(ok, "schema put failed: {err}");
+
+    let value = format!(r#"{{"note":"first","payload":"{oid}"}}"#);
+    let (_, err, ok) = run(path, Some(&value), &["put", "artifact", "art1"]);
+    assert!(ok, "put failed: {err}");
+
+    let (out, err, ok) = run(path, None, &["get", "artifact", "art1"]);
+    assert!(ok, "get failed: {err}");
+    assert!(
+        out.contains(&format!("\"payload\": \"{oid}\"")),
+        "get output: {out}"
+    );
 }
 
 /// Parse `json` as a generic value, panicking with the offending text on
@@ -1393,7 +1477,9 @@ fn every_command_the_help_advertises_exists() {
 #[test]
 fn every_command_the_docs_show_exists() {
     /// The commands that nest a subcommand under themselves.
-    const GROUPS: [&str; 6] = ["value", "document", "entity", "object", "ref", "schema"];
+    const GROUPS: [&str; 7] = [
+        "value", "document", "entity", "object", "ref", "blob", "schema",
+    ];
     /// Global options that consume the token after them.
     const VALUED: [&str; 3] = ["--format", "--data-prefix", "--schema-prefix"];
 
@@ -1497,4 +1583,28 @@ fn shell_transcript(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Republishing an unchanged schema is a no-op, exactly like a value `put`:
+/// the publication commit does not advance, so `schema log` records one entry.
+#[test]
+fn schema_put_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let path = dir.path();
+    let schema = facet_json::to_string(&schema_of::<Recipe>().unwrap()).unwrap();
+
+    let (first, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "first schema put: {err}");
+    let (second, err, ok) = run(path, Some(&schema), &["schema", "put", "recipe"]);
+    assert!(ok, "second schema put: {err}");
+    assert_eq!(
+        first.trim(),
+        second.trim(),
+        "republishing an unchanged schema must not advance the ref"
+    );
+
+    let (log, err, ok) = run(path, None, &["schema", "log", "recipe"]);
+    assert!(ok, "schema log: {err}");
+    assert_eq!(log.lines().count(), 1, "one publication expected: {log}");
 }

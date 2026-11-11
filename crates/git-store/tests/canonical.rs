@@ -12,9 +12,14 @@ use gix::date::Time;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
-use facet_git_tree::ObjectStore;
+use facet_git_tree::{ObjectStore, Oid, Sha1};
 
 const GOLDEN_TWO_PARENTS: &str = "76d7af494e03e031b318b7d87b8df89284d7a57f";
+
+/// Re-tag a bare object id for the format-checked object-store accessors.
+fn typed(id: ObjectId) -> Oid<Sha1> {
+    Oid::new(id).expect("an id written by this store uses SHA-1")
+}
 
 fn oid(hex: &str) -> ObjectId {
     ObjectId::from_hex(hex.as_bytes()).unwrap()
@@ -69,7 +74,8 @@ fn stored_bytes_match_git_exactly() {
 
     assert_eq!(id, oid(GOLDEN_TWO_PARENTS));
 
-    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap() else {
+    let gix::objs::Object::Commit(read_back) = store.objects().get(&typed(id)).unwrap().unwrap()
+    else {
         panic!("canonical write did not produce a commit");
     };
     assert_eq!(read_back.tree, commit.tree());
@@ -142,7 +148,8 @@ fn zero_parents_write_a_root_commit() {
         "seal\n",
     );
     let id = store.write_canonical(commit).unwrap();
-    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap() else {
+    let gix::objs::Object::Commit(read_back) = store.objects().get(&typed(id)).unwrap().unwrap()
+    else {
         panic!("canonical write did not produce a commit");
     };
     assert!(read_back.parents.is_empty());
@@ -170,7 +177,8 @@ fn a_newline_in_an_identity_cannot_forge_a_commit_header() {
 
     match store.write_canonical(commit) {
         Ok(id) => {
-            let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap()
+            let gix::objs::Object::Commit(read_back) =
+                store.objects().get(&typed(id)).unwrap().unwrap()
             else {
                 panic!("canonical write did not produce a commit");
             };
@@ -251,7 +259,8 @@ fn ordinary_identity_bytes_are_still_accepted() {
         "seal\n",
     );
     let id = store.write_canonical(commit).unwrap();
-    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap() else {
+    let gix::objs::Object::Commit(read_back) = store.objects().get(&typed(id)).unwrap().unwrap()
+    else {
         panic!("canonical write did not produce a commit");
     };
     assert_eq!(read_back.author.name, name.as_bytes());
@@ -270,7 +279,8 @@ fn negative_time_offsets_frame_like_git() {
         "offset\n",
     );
     let id = store.write_canonical(commit).unwrap();
-    let gix::objs::Object::Commit(read_back) = store.objects().get(&id).unwrap().unwrap() else {
+    let gix::objs::Object::Commit(read_back) = store.objects().get(&typed(id)).unwrap().unwrap()
+    else {
         panic!("canonical write did not produce a commit");
     };
     assert_eq!(read_back.author.time.offset, -18000);

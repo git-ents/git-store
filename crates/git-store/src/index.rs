@@ -14,6 +14,7 @@
 
 use std::fmt::Write as _;
 
+use facet_git_tree::{HashFormat, Tagged};
 use gix::objs::{Find, Write};
 use gix_refstore::{ObjectId, RefName, RefPath, RefPrefix, RefSegment, RefStore};
 
@@ -38,13 +39,14 @@ pub(crate) fn reference(kind: &RefSegment) -> RefName {
 /// [`crate::Transaction`], which stages edits for entities across several
 /// kinds at once; [`crate::Kind`]'s own listing shares the same shape through
 /// its `entries_in`.
-pub(crate) fn source_entries<R, O>(
-    store: &Store<R, O>,
+pub(crate) fn source_entries<R, O, F>(
+    store: &Store<R, O, F>,
     entities: &RefPrefix,
 ) -> Result<Vec<(RefPath, ObjectId)>, Error>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     let mut entries: Vec<_> = store
         .refs()
@@ -77,8 +79,8 @@ pub(crate) enum Change {
 /// the expectation is `current`, so a concurrent writer that moves the index
 /// makes this edit lose its compare-and-swap and the caller retries against
 /// the winner's index rather than overwriting it.
-pub(crate) fn update<R, O>(
-    store: &Store<R, O>,
+pub(crate) fn update<R, O, F>(
+    store: &Store<R, O, F>,
     kind: &RefSegment,
     entities: &RefPrefix,
     current: Option<ObjectId>,
@@ -86,7 +88,8 @@ pub(crate) fn update<R, O>(
 ) -> Result<Option<gix_refstore::RefEdit>, Error>
 where
     R: RefStore,
-    O: Find + Write,
+    F: HashFormat,
+    O: Find + Write + Tagged<F>,
 {
     let base = current.and_then(|tree| read_tree(store, tree).ok());
     let mut entries = match base.filter(|entries| !entries.is_empty()) {
@@ -113,15 +116,16 @@ where
 /// The materialized-index [`RefEdit`](gix_refstore::RefEdit) that brings
 /// `kind`'s index ref (currently at `current`) to reflect the complete set
 /// `entries`, or `None` when it already does.
-fn edit<R, O>(
-    store: &Store<R, O>,
+fn edit<R, O, F>(
+    store: &Store<R, O, F>,
     kind: &RefSegment,
     current: Option<ObjectId>,
     entries: &[(RefPath, ObjectId)],
 ) -> Result<Option<gix_refstore::RefEdit>, Error>
 where
     R: RefStore,
-    O: Find + Write,
+    F: HashFormat,
+    O: Find + Write + Tagged<F>,
 {
     if entries.is_empty() {
         return Ok(current.map(|expected| gix_refstore::RefEdit::Delete {
@@ -154,14 +158,15 @@ where
 /// listing, a tree read, and the decode of every index entry, so the index can
 /// never make a read cheaper than the listing it must be checked against; its
 /// only remaining job is to be maintained cheaply on the write side.
-pub(crate) fn read_validated<R, O>(
-    store: &Store<R, O>,
+pub(crate) fn read_validated<R, O, F>(
+    store: &Store<R, O, F>,
     kind: &RefSegment,
     source: &[(RefPath, ObjectId)],
 ) -> Result<Option<Vec<(RefPath, ObjectId)>>, Error>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     let index_ref = reference(kind);
     let Some(tree) = store.refs().read(&index_ref).map_err(Error::backend)? else {
@@ -180,13 +185,14 @@ where
     }
 }
 
-pub(crate) fn write<R, O>(
-    store: &Store<R, O>,
+pub(crate) fn write<R, O, F>(
+    store: &Store<R, O, F>,
     entries: &[(RefPath, ObjectId)],
 ) -> Result<ObjectId, Error>
 where
     R: RefStore,
-    O: Find + Write,
+    F: HashFormat,
+    O: Find + Write + Tagged<F>,
 {
     let mode = gix::objs::tree::EntryMode::from(gix::objs::tree::EntryKind::Commit);
     let mut tree_entries = entries
@@ -206,10 +212,14 @@ where
         .map_err(Error::backend)
 }
 
-fn read_tree<R, O>(store: &Store<R, O>, tree: ObjectId) -> Result<Vec<(RefPath, ObjectId)>, Error>
+fn read_tree<R, O, F>(
+    store: &Store<R, O, F>,
+    tree: ObjectId,
+) -> Result<Vec<(RefPath, ObjectId)>, Error>
 where
     R: RefStore,
-    O: Find,
+    F: HashFormat,
+    O: Find + Tagged<F>,
 {
     let entries = store.tree_entries(tree)?;
     if !entries

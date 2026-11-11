@@ -3,7 +3,7 @@
 use std::{fmt, str::FromStr};
 
 use facet::Facet;
-use facet_git_tree::{ObjectId, SerializeError, serialize_into};
+use facet_git_tree::{HashFormat, ObjectId, SerializeError, Tagged, serialize_into};
 use gix::objs::Write;
 use gix_refstore::RefSegment;
 
@@ -173,12 +173,13 @@ impl From<DocumentTree> for EntityId {
 /// identities. Store publication uses [`canonical_document_id`] instead, so
 /// schema-sensitive ids must be obtained from [`crate::Kind::compile`].
 /// Equal typed values still produce the same canonical object id.
-pub fn canonical_object_id<T, W>(value: &T, objects: &W) -> Result<ObjectId, SerializeError>
+pub fn canonical_object_id<T, F, W>(value: &T, objects: &W) -> Result<ObjectId, SerializeError>
 where
     T: for<'a> Facet<'a>,
-    W: Write + ?Sized,
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
 {
-    serialize_into(value, objects)
+    Ok(serialize_into(value, objects)?.into_raw())
 }
 
 #[cfg(test)]

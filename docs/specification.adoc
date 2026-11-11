@@ -186,17 +186,20 @@ pub enum VariantKind {
 
 A `Node` leaf variant is a bare blob holding its keyword (`unit`, `bool`,
 `char`, `string`, `i8` … `u128`, `isize`, `usize`, `f32`, `f64`, `bytes`,
-`cbor`, `rawtree`, `dynamic`); a composite variant is a single-entry tree
-`{ keyword -> payload }` (`list`, `array`, `map`, `optional`, `tuple`,
+`cbor`, `rawtree`, `rawblob`, `dynamic`); a composite variant is a single-entry
+tree `{ keyword -> payload }` (`list`, `array`, `map`, `optional`, `tuple`,
 `struct`, `enum`, `ref`). Node tags are exactly the *lowercase* variant names.
 
 * `Node::Struct` maps *field name -> `Node`* directly. There is no
   `StructField` wrapper, no `has_default` flag, and no `newtype` variant: a
   one-field tuple variant is `Tuple([n])`.
-* `cbor`, `rawtree`, and `dynamic` are node kinds. `cbor` is an opaque
-  canonical-CBOR payload; `rawtree` points at an existing tree oid without
-  re-encoding it (an opaque, arbitrarily-shaped subtree exempt from the
-  no-empty-tree and mode rules); `dynamic` is a value shaped at runtime.
+* `cbor`, `rawtree`, `rawblob`, and `dynamic` are node kinds. `cbor` is an
+  opaque canonical-CBOR payload; `rawtree` points at an existing tree oid
+  without re-encoding it (an opaque, arbitrarily-shaped subtree exempt from the
+  no-empty-tree and mode rules); `rawblob` points at an existing blob oid
+  without re-encoding it, so binary content is carried as a referenced object
+  rather than as bytes inside the encoding; `dynamic` is a value shaped at
+  runtime.
 * `Map.key` MUST be `String`. A schema whose `Map.key` node is anything else is
   rejected; non-string-keyed data is modeled as `cbor`.
 * Named types are `ref` nodes into the document's `defs` table. A `ref` whose
@@ -314,6 +317,18 @@ commit trailers, or a caller-selected entity name. A bound document is the
 value's own entries plus the single reserved `.schema` entry
 (link:#envelope), and the `.schema` subtree MUST be the exact schema used to
 validate the value.
+--
+
+[role="requirement", id="plumbing.blob"]
+.Binary Content as a Referenced Blob
+--
+A `RawBlob` schema leaf MUST name an existing blob by its object ID without
+re-encoding the bytes; the encoded value carries the ID, not the content. The
+CLI spelling that creates such a blob from a file's raw bytes is
+`git store blob put [-F <file>]`, which MUST write an ordinary blob object and
+print its object ID; the bytes MUST NOT pass through JSON, and identical bytes
+MUST produce the same ID. Reading a `RawBlob` leaf whose referenced object is
+not a blob MUST fail as a schema/value failure.
 --
 
 [role="requirement", id="plumbing.schema.history"]
